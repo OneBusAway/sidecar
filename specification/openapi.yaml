@@ -1,0 +1,1384 @@
+openapi: 3.1.0
+info:
+  title: OneBusAway Sidecar Services API
+  version: 1.0.0
+  summary: Region-scoped rider services that complement a OneBusAway REST API server.
+  description: |
+    The OneBusAway *sidecar* API: service alerts, departure alarms, iOS Live
+    Activities, push notification registration, rider surveys, ghost bus
+    reports, weather, vehicle search, and donations.
+
+    This specification is implementation-independent: it describes the wire
+    contract the OneBusAway mobile apps depend on, so that anyone can build a
+    compatible sidecar server with no dependency on OBACloud. The companion
+    document `README.md` (in this directory) is normative for server-side
+    *behavior* — alarm firing, Live Activity update cycles, retention, rate
+    limiting — which an HTTP contract alone cannot express.
+
+    **Conventions**
+
+    - All endpoints are unauthenticated. Ownership of mutable resources is
+      proven by possession of an unguessable server-generated token embedded
+      in the resource URL.
+    - `{regionId}` is the integer region identifier from the OneBusAway
+      regions directory (`regions-v3.json`); the sidecar host is discovered
+      via the directory's `sidecarBaseUrl` field.
+    - Unless noted, POST endpoints accept parameters as
+      `application/x-www-form-urlencoded` or `application/json` bodies (and,
+      degenerately, query parameters); servers MUST accept both encodings.
+    - Timestamps named `service_date` or `*_at` in requests are epoch
+      **milliseconds**; Live Activity content-state times are epoch
+      **seconds**.
+  contact:
+    name: OneBusAway
+    url: https://onebusaway.org
+  license:
+    name: Apache 2.0
+    identifier: Apache-2.0
+servers:
+  - url: https://sidecar.onebusaway.org
+    description: OBACloud reference deployment (example; use the region's advertised sidecarBaseUrl)
+# All rider-facing endpoints are deliberately unauthenticated (see README §1.3).
+security: []
+tags:
+  - name: Alerts
+    description: GTFS-realtime service alerts feed.
+  - name: Alarms
+    description: One-shot "notify me before departure" push alarms.
+  - name: Live Activities
+    description: iOS Lock Screen Live Activity subscriptions (ActivityKit push updates).
+  - name: Push Registrations
+    description: Device push-token registry; the audience for service-alert pushes.
+  - name: Surveys
+    description: Rider surveys and incremental survey responses.
+  - name: Ghost Bus Reports
+    description: Rider reports of predicted-but-never-arrived vehicles.
+  - name: Weather
+    description: Regional weather forecast proxy.
+  - name: Vehicles
+    description: Fuzzy vehicle-id search.
+  - name: Donations
+    description: Stripe PaymentSheet support for in-app donations (optional service).
+
+paths:
+  /api/v1/regions/{regionId}/alerts:
+    get:
+      tags: [Alerts]
+      operationId: getAlertsFeed
+      summary: GTFS-realtime service alerts feed
+      description: |
+        Returns the region's currently published service alerts as a binary
+        GTFS-realtime `FeedMessage` (`gtfs_realtime_version: "1.0"`)
+        containing only `Alert` entities. Test alerts are excluded unless
+        `test` is present. Feed entity ids are stable per alert across
+        requests. Append `.pbtext` to the path to receive the same message as
+        protobuf JSON (`text/plain`) for debugging.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - name: test
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            Any non-blank value includes alerts flagged as test alerts, for
+            verifying end-to-end delivery on production infrastructure.
+      responses:
+        '200':
+          description: GTFS-realtime FeedMessage.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Serialized `transit_realtime.FeedMessage` protocol buffer.
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+
+  /api/v1/regions/{regionId}/surveys:
+    get:
+      tags: [Surveys]
+      operationId: listSurveys
+      summary: List active surveys for a region
+      description: |
+        Returns surveys that are marked available and currently within their
+        scheduled window (surveys without a schedule are always active).
+        `user_id` is the client-generated anonymous device UUID and is
+        required.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Anonymous device UUID generated and stored on the rider's device.
+      responses:
+        '200':
+          description: Active surveys.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SurveyList'
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: Missing user_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyErrors'
+              example:
+                errors: ["user_id is required"]
+
+  /api/v1/survey_responses:
+    post:
+      tags: [Surveys]
+      operationId: createSurveyResponse
+      summary: Submit a survey response
+      description: |
+        Creates a survey response. Not region-scoped: `survey_id` already
+        identifies the region. The app submits the first answer immediately
+        (so partial data survives an abandoned survey) and amends via the
+        returned `update_path`. Note that `responses` is a JSON-array-encoded
+        **string**, not a nested array.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SurveyResponseCreateRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SurveyResponseCreateRequest'
+      responses:
+        '201':
+          description: Response recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SurveyResponseCreated'
+        '404':
+          description: Unknown survey.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimpleError'
+        '422':
+          description: Validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyErrors'
+
+  /api/v1/survey_responses/{responseId}:
+    parameters:
+      - name: responseId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The response's server-generated public identifier, as returned in `update_path`.
+    post:
+      tags: [Surveys]
+      operationId: amendSurveyResponsePost
+      summary: Amend a survey response (POST alias)
+      description: |
+        Identical to the PATCH/PUT amend operation; exists because shipped
+        clients POST to the `update_path` returned at creation.
+      requestBody:
+        $ref: '#/components/requestBodies/SurveyResponseAmend'
+      responses:
+        '200':
+          $ref: '#/components/responses/SurveyResponseAmended'
+        '404':
+          $ref: '#/components/responses/SurveyResponseNotFound'
+        '422':
+          $ref: '#/components/responses/SurveyResponseInvalid'
+    patch:
+      tags: [Surveys]
+      operationId: amendSurveyResponse
+      summary: Amend a survey response
+      description: |
+        Merges the submitted answers into the stored response by
+        `question_id`: an incoming answer replaces the stored answer to the
+        same question; answers to other questions are preserved. PUT is
+        accepted as an alias.
+      requestBody:
+        $ref: '#/components/requestBodies/SurveyResponseAmend'
+      responses:
+        '200':
+          $ref: '#/components/responses/SurveyResponseAmended'
+        '404':
+          $ref: '#/components/responses/SurveyResponseNotFound'
+        '422':
+          $ref: '#/components/responses/SurveyResponseInvalid'
+    put:
+      tags: [Surveys]
+      operationId: amendSurveyResponsePut
+      summary: Amend a survey response (PUT alias)
+      requestBody:
+        $ref: '#/components/requestBodies/SurveyResponseAmend'
+      responses:
+        '200':
+          $ref: '#/components/responses/SurveyResponseAmended'
+        '404':
+          $ref: '#/components/responses/SurveyResponseNotFound'
+        '422':
+          $ref: '#/components/responses/SurveyResponseInvalid'
+
+  /api/v1/regions/{regionId}/weather:
+    get:
+      tags: [Weather]
+      operationId: getWeather
+      summary: Regional weather forecast
+      description: |
+        Current conditions and hourly forecast for the region's center, in a
+        Dark Sky-derived shape. Servers should cache upstream responses
+        (~30 minutes). On upstream failure the response is `403` (the
+        reference happens to emit `{}`; any body is ignored — apps treat any
+        non-200 as "hide the weather UI").
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      responses:
+        '200':
+          description: Forecast.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WeatherForecast'
+        '403':
+          description: Upstream weather provider unavailable. Any body is ignored by clients.
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+
+  /api/v1/regions/{regionId}/vehicles:
+    get:
+      tags: [Vehicles]
+      operationId: searchVehicles
+      summary: Fuzzy vehicle-id search
+      description: |
+        Substring search over the region's vehicle ids, proxied from the
+        region's OBA REST API server. The query is lowercased and trimmed,
+        then matched against raw vehicle ids (effectively case-insensitive
+        for the usual lowercase/numeric fleet ids; replicate this exactly
+        rather than lowercasing both sides). Queries shorter than
+        3 characters return an empty array.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Substring to match against vehicle ids; minimum 3 characters.
+      responses:
+        '200':
+          description: Matching vehicles (empty array for short/absent queries).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VehicleMatch'
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+
+  /api/v1/regions/{regionId}/alarms:
+    post:
+      tags: [Alarms]
+      operationId: createAlarmV1
+      summary: Register a departure alarm (legacy V1)
+      deprecated: true
+      description: |
+        Legacy alarm registration for old app builds; `user_push_id` is a
+        OneSignal player id rather than a raw device token. V1 registration
+        is idempotent: re-POSTing the same `(user_push_id, trip_id, stop_id,
+        service_date)` returns the existing alarm's URL without applying any
+        changed fields. Unlike V2, a failed arrival lookup at creation time
+        surfaces as an error rather than falling back to a generic message.
+        New clients use the V2 endpoint.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AlarmCreateRequestV1'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlarmCreateRequestV1'
+      responses:
+        '201':
+          $ref: '#/components/responses/ResourceUrlCreated'
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: Validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithMessages'
+              example:
+                error: Unable to register alarm
+                messages: ["Push identifier can't be blank"]
+        '500':
+          description: >
+            The V1 path deliberately lets OBA lookup failures (unknown trip,
+            upstream network errors) escape as an unstructured 500 rather
+            than degrading to a generic alarm as V2 does.
+
+  /api/v1/regions/{regionId}/alarms/{alarmToken}:
+    delete:
+      tags: [Alarms]
+      operationId: deleteAlarmV1
+      summary: Cancel a departure alarm (legacy V1)
+      deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - $ref: '#/components/parameters/AlarmToken'
+      responses:
+        '204':
+          description: Alarm deleted. The deletion has actually occurred; a failed delete must be a 5xx, never a 204.
+        '404':
+          description: No alarm with this token. Empty body.
+
+  /api/v1/payment_intents:
+    post:
+      tags: [Donations]
+      operationId: createPaymentIntent
+      summary: Create a Stripe PaymentIntent for a donation
+      description: |
+        Backs the apps' Stripe PaymentSheet donation flow. Optional service.
+        The body is always raw JSON (the one exception to the dual-encoding
+        rule). `test_mode: "1"` routes to Stripe test credentials so app
+        builds can exercise the flow against production infrastructure.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentIntentRequest'
+      responses:
+        '200':
+          description: Client secrets for the PaymentSheet.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/OneTimePaymentIntentResponse'
+                  - $ref: '#/components/schemas/RecurringPaymentIntentResponse'
+        '400':
+          description: >
+            Malformed JSON body sent with a JSON content type. (A malformed
+            body sent without one reaches the handler's own parse and 500s
+            in the reference.)
+        '500':
+          description: Stripe error. Empty body. Clients treat any non-200 as a failed donation attempt.
+
+  /api/v2/regions/{regionId}/alarms:
+    post:
+      tags: [Alarms]
+      operationId: createAlarmV2
+      summary: Register a departure alarm
+      description: |
+        Registers a one-shot push alarm: the server polls the region's OBA
+        REST API and pushes `seconds_before` seconds before the trip departs
+        the stop, then deletes the alarm. `user_push_id` is the raw APNs
+        device token (iOS) or FCM registration token (Android). If the
+        arrival lookup fails at creation time the alarm is still created with
+        a generic message. Not deduplicated (V2 clients do not re-post).
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AlarmCreateRequestV2'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlarmCreateRequestV2'
+      responses:
+        '201':
+          $ref: '#/components/responses/ResourceUrlCreated'
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: Validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithMessages'
+              example:
+                error: Unable to register alarm
+                messages: ["Operating system can't be blank"]
+
+  /api/v2/regions/{regionId}/alarms/{alarmToken}:
+    delete:
+      tags: [Alarms]
+      operationId: deleteAlarmV2
+      summary: Cancel a departure alarm
+      description: |
+        Cancels the alarm addressed by the URL returned at creation. `204`
+        (not an empty `200`: shipped iOS builds misread an empty-bodied 200
+        as a disguised 404) is a binding "it's cancelled" signal — it must
+        only be sent after the row is actually gone.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - $ref: '#/components/parameters/AlarmToken'
+      responses:
+        '204':
+          description: Alarm deleted.
+        '404':
+          description: No alarm with this token. Empty body.
+
+  /api/v2/regions/{regionId}/live_activities:
+    post:
+      tags: [Live Activities]
+      operationId: registerLiveActivity
+      summary: Register (or refresh) a Live Activity subscription
+      description: |
+        Subscribes an iOS Live Activity to server-pushed departure updates
+        for one route+headsign at one stop. Registration is an upsert keyed
+        on `(region, activity_id)`: ActivityKit rotates push tokens over an
+        activity's lifetime and iOS re-POSTs the same activity with each new
+        token; every field, including `apns_sandbox`, is re-read on
+        re-registration. Subscriptions expire 8 hours after first
+        registration. See README §6 for the update cycle, content-state
+        contract, and ending semantics.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LiveActivityCreateRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LiveActivityCreateRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ResourceUrlCreated'
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: Validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithMessages'
+              example:
+                error: Unable to register live activity
+                messages: ["Push token can't be blank"]
+
+  /api/v2/regions/{regionId}/live_activities/{activityToken}:
+    delete:
+      tags: [Live Activities]
+      operationId: unregisterLiveActivity
+      summary: End a Live Activity subscription
+      description: |
+        Deletes the subscription addressed by the URL returned at
+        registration. Called when the rider dismisses the activity; no end
+        push is sent (the client is ending it itself). Same 204/404
+        semantics as alarm deletion.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - name: activityToken
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The secure token from the registration response URL.
+      responses:
+        '204':
+          description: Subscription deleted.
+        '404':
+          description: No subscription with this token. Empty body.
+
+  /api/v2/regions/{regionId}/push_registrations:
+    post:
+      tags: [Push Registrations]
+      operationId: registerPushToken
+      summary: Register (or refresh) a device push token
+      description: |
+        Upserts a device push registration keyed on `(region, token)`,
+        refreshing `last_seen_at`. Apps call this on launch and when the
+        rider grants notification permission; the registry is the audience
+        for service-alert pushes. Registrations unseen for 180 days are
+        pruned. Rate limit: 30/minute per IP.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/PushRegistrationRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushRegistrationRequest'
+      responses:
+        '204':
+          description: Registered/refreshed. The token itself is the handle; nothing to return.
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: Validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithMessages'
+              example:
+                error: Unable to register device
+                messages: ["Operating system is not included in the list"]
+        '429':
+          description: Rate limited.
+    delete:
+      tags: [Push Registrations]
+      operationId: unregisterPushToken
+      summary: Remove a device push registration (opt-out)
+      description: |
+        Deletes the registration for `token`. Ownership proof is possession
+        of the device token itself. The token may be sent as a query
+        parameter or in a form/JSON body. Shares the 30/minute-per-IP
+        throttle bucket with registration (the reference throttle is
+        path-scoped, not method-scoped).
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The registered device push token.
+      responses:
+        '204':
+          description: Registration deleted.
+        '404':
+          description: No registration with this token in this region. Empty body.
+        '429':
+          description: Rate limited (shared bucket with registration).
+
+  /api/v2/regions/{regionId}/ghost_bus_reports:
+    post:
+      tags: [Ghost Bus Reports]
+      operationId: createGhostBusReport
+      summary: Report a ghost bus
+      description: |
+        Files a rider report that a predicted vehicle never arrived.
+        Deduplicated: one report per `(region, user_identifier,
+        trip_identifier, service_date)`; a duplicate — including one caught
+        in a concurrent-submission race — returns the `already_reported` 422,
+        which clients treat as benign. Timestamp fields are epoch
+        milliseconds and must parse as integers; non-integer values coerce
+        to null. Rate limits: 10/hour per IP and 20/day per
+        `user_identifier`.
+      parameters:
+        - $ref: '#/components/parameters/RegionId'
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/GhostBusReportRequest'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GhostBusReportRequest'
+      responses:
+        '201':
+          description: Report recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id:
+                    type: string
+                    description: Server-generated public identifier for the report.
+                    examples: ["9f3c1a2b4d5e6f7a8b9c"]
+        '404':
+          $ref: '#/components/responses/RegionNotFound'
+        '422':
+          description: >
+            Validation failure, or duplicate report (`error:
+            already_reported`). Clients key on `error` only; the
+            human-readable `messages` differ between the validation and
+            race-rescue duplicate paths in the reference.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithMessages'
+              examples:
+                duplicate:
+                  value:
+                    error: already_reported
+                    messages: ["User has already reported this trip"]
+                invalid:
+                  value:
+                    error: Unable to save report
+                    messages: ["Wait duration minutes is not included in the list"]
+        '429':
+          description: Rate limited.
+        '403':
+          description: >
+            JSON body larger than the throttle's read cap (the reference caps
+            at 8 KB) — rejected outright, since a legitimate report is far
+            smaller and an uncounted oversized body would bypass the per-user
+            limit.
+
+# Out-of-band messages the sidecar *sends* (via APNs/FCM, not HTTP callbacks to
+# a client-registered URL). Modeled as webhooks because they are the other half
+# of the wire contract: a compatible sidecar must produce these exact payloads.
+webhooks:
+  alarmPush:
+    post:
+      tags: [Alarms]
+      operationId: alarmPushPayload
+      summary: Alarm push notification (delivered via APNs/FCM)
+      description: |
+        The push sent when an alarm fires (README §5.4). The notification
+        body is the message composed at registration time; the title is
+        `OneBusAway` on transports where the sender supplies it (gorush,
+        FCM — the legacy OneSignal path gets its title from OneSignal app
+        configuration). The `arrival_and_departure` data payload is parsed
+        by shipped apps to deep-link into the trip and must keep this exact
+        key set and nesting.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [arrival_and_departure]
+              properties:
+                arrival_and_departure:
+                  type: object
+                  required: [region_id, stop_id, trip_id, service_date, vehicle_id, stop_sequence]
+                  properties:
+                    region_id:
+                      type: integer
+                      description: >
+                        The public region identifier (the same number as
+                        `{regionId}` in the API paths) — the value the app
+                        can match against its region list. Reference quirk:
+                        OBACloud sends an internal database id that
+                        coincides with the public identifier in practice;
+                        new implementations send the public identifier.
+                    stop_id:
+                      type: string
+                    trip_id:
+                      type: string
+                    service_date:
+                      $ref: '#/components/schemas/EpochMilliseconds'
+                    vehicle_id:
+                      type: [string, "null"]
+                    stop_sequence:
+                      type: [integer, "null"]
+      responses:
+        '200':
+          description: Accepted by the push gateway.
+  liveActivityPush:
+    post:
+      tags: [Live Activities]
+      operationId: liveActivityPushPayload
+      summary: Live Activity update/end push (delivered via APNs)
+      description: |
+        The ActivityKit push sent on each Live Activity cycle (README §6.6).
+        Delivered with `apns-push-type: liveactivity` to the topic
+        `<bundle id>.push-type.liveactivity` at APNs priority 10, honoring
+        the subscription's `apns_sandbox` flag. `timestamp` must advance on
+        every push; `stale-date` (~10 minutes out) accompanies `update`
+        events and `dismissal-date` (~15 minutes out) accompanies `end`
+        events. All are epoch seconds.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event, content-state, timestamp]
+              properties:
+                event:
+                  type: string
+                  enum: [update, end]
+                content-state:
+                  $ref: '#/components/schemas/LiveActivityContentState'
+                timestamp:
+                  type: integer
+                  description: Epoch seconds; must be strictly newer than the previous push.
+                stale-date:
+                  type: integer
+                  description: Epoch seconds after which the widget renders as stale (update events).
+                dismissal-date:
+                  type: integer
+                  description: Epoch seconds at which iOS removes the ended activity (end events).
+      responses:
+        '200':
+          description: Accepted by APNs.
+
+components:
+  parameters:
+    RegionId:
+      name: regionId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9]+(-.*)?$'
+      description: >
+        The region's integer identifier from the OneBusAway regions
+        directory (`regions-v3.json` field `id`). Typed as a string because
+        server-generated resource URLs may carry an id-prefixed slug in this
+        segment (the reference emits e.g. `1-puget-sound`), and clients
+        replay those URLs verbatim; servers resolve the region from the
+        leading integer and ignore any suffix.
+    AlarmToken:
+      name: alarmToken
+      in: path
+      required: true
+      schema:
+        type: string
+      description: The secure token from the alarm creation response URL.
+
+  requestBodies:
+    SurveyResponseAmend:
+      required: true
+      content:
+        application/x-www-form-urlencoded:
+          schema:
+            $ref: '#/components/schemas/SurveyResponseAmendRequest'
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SurveyResponseAmendRequest'
+
+  responses:
+    RegionNotFound:
+      description: No region with this identifier is served by this sidecar.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SimpleError'
+          example:
+            error: Couldn't find Region
+    ResourceUrlCreated:
+      description: >
+        Resource created. `url` is the fully-qualified, secure-token-addressed
+        URL of the new resource; clients treat it as opaque and later DELETE
+        this exact URL. The region segment inside it may be an id-prefixed
+        slug rather than the bare integer (see the `regionId` parameter).
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [url]
+            properties:
+              url:
+                type: string
+                format: uri
+                examples:
+                  - https://sidecar.onebusaway.org/api/v2/regions/1-puget-sound/alarms/Zq1x9c2vB3nM4kL5pQ6rSt
+    SurveyResponseAmended:
+      description: Response amended.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SurveyResponseCreated'
+    SurveyResponseNotFound:
+      description: No survey response with this public identifier.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SimpleError'
+    SurveyResponseInvalid:
+      description: Validation failure.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyErrors'
+
+  schemas:
+    SimpleError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    ErrorWithMessages:
+      type: object
+      required: [error, messages]
+      properties:
+        error:
+          type: string
+          description: Stable, machine-checkable summary (or error code, e.g. `already_reported`).
+        messages:
+          type: array
+          items:
+            type: string
+          description: Human-readable validation messages.
+
+    LegacyErrors:
+      type: object
+      required: [errors]
+      properties:
+        errors:
+          type: array
+          items:
+            type: string
+
+    ApnsSandboxParam:
+      type: string
+      description: |
+        Whether this token was minted by a debug build carrying the
+        development APNs entitlement, and therefore only valid against the
+        APNs sandbox host. Strict allow-list parsing (case-insensitive,
+        trimmed): `1|t|true|on` → sandbox; `0|f|false|off`, empty, or absent
+        → production; **any other value → production** (never a permissive
+        boolean cast). Ignored for Android tokens.
+      examples: ["true"]
+
+    EpochMilliseconds:
+      type: integer
+      format: int64
+      description: Epoch milliseconds (the convention used throughout the OBA REST API).
+      examples: [1754809200000]
+
+    AlarmCreateRequestBase:
+      type: object
+      description: |
+        The `required` array documents the **client's obligation**, not
+        server enforcement: only a missing `user_push_id` (and, on V2,
+        `operating_system`) produces a 422. The trip-identity fields are
+        stored unvalidated — a V2 request missing them still returns 201
+        with a generic-message alarm (README §5.2). An `operating_system`
+        outside the enum is a 422 on V2; V1 treats it as absent and falls
+        back to `ios`.
+      required: [user_push_id, stop_id, trip_id, service_date]
+      properties:
+        user_push_id:
+          type: string
+          description: Push address for the device (meaning differs by API version; see each operation).
+        stop_id:
+          type: string
+          examples: ["1_570"]
+        trip_id:
+          type: string
+          examples: ["1_604370"]
+        service_date:
+          $ref: '#/components/schemas/EpochMilliseconds'
+        vehicle_id:
+          type: string
+          description: Optional; disambiguates the vehicle serving the trip.
+        stop_sequence:
+          type: integer
+          description: The stop's sequence within the trip (0 = first stop).
+        seconds_before:
+          type: integer
+          description: >
+            How many seconds before departure to push. Values ≤ 0 or
+            non-numeric are replaced with the default 600.
+          default: 600
+        operating_system:
+          type: string
+          enum: [ios, android]
+
+    AlarmCreateRequestV1:
+      allOf:
+        - $ref: '#/components/schemas/AlarmCreateRequestBase'
+        - type: object
+          properties:
+            user_push_id:
+              description: OneSignal player id (legacy push aggregator).
+            operating_system:
+              description: Defaults to `ios` when absent.
+
+    AlarmCreateRequestV2:
+      allOf:
+        - $ref: '#/components/schemas/AlarmCreateRequestBase'
+        - type: object
+          required: [operating_system]
+          properties:
+            user_push_id:
+              description: Raw APNs device token (iOS) or FCM registration token (Android).
+            apns_sandbox:
+              $ref: '#/components/schemas/ApnsSandboxParam'
+
+    LiveActivityCreateRequest:
+      type: object
+      required: [activity_id, push_token, stop_id, route_short_name, trip_headsign]
+      properties:
+        activity_id:
+          type: string
+          description: >
+            The ActivityKit activity's id. Upsert key (with the region):
+            re-registration with the same id updates the stored subscription.
+        push_token:
+          type: string
+          description: >
+            The activity's ActivityKit push token (not the device's alert
+            token). Rotates over the activity's lifetime; each rotation is
+            re-POSTed.
+        stop_id:
+          type: string
+        route_short_name:
+          type: string
+          description: Display identity — arrivals are filtered to this route+headsign.
+          examples: ["44"]
+        trip_headsign:
+          type: string
+          examples: ["Ballard"]
+        trip_id:
+          type: string
+          description: Optional display metadata; identity is bookmark-scoped, not trip-scoped.
+        service_date:
+          $ref: '#/components/schemas/EpochMilliseconds'
+        vehicle_id:
+          type: string
+        stop_sequence:
+          type: integer
+        apns_sandbox:
+          $ref: '#/components/schemas/ApnsSandboxParam'
+
+    PushRegistrationRequest:
+      type: object
+      required: [token, operating_system]
+      properties:
+        token:
+          type: string
+          maxLength: 4096
+          description: APNs device token (iOS) or FCM registration token (Android).
+        operating_system:
+          type: string
+          enum: [ios, android]
+        locale:
+          type: string
+          description: >
+            BCP-47 tag reported by the app (e.g. `es-MX`); normalized
+            server-side onto the alert-translation catalog. Unmatched locales
+            bucket into English. Sticky on upsert: an absent or null value
+            keeps the stored locale.
+        apns_sandbox:
+          $ref: '#/components/schemas/ApnsSandboxParam'
+        test_device:
+          type: boolean
+          description: >
+            Marks the device as a test-push target for admins. Sticky on
+            upsert: only overwritten when an actual value is present (absent
+            and JSON null both keep the stored value), so a routine
+            re-registration does not demote a test device. An explicit
+            `false` demotes.
+          default: false
+        description:
+          type: string
+          maxLength: 255
+          description: >
+            Human label ("Aaron's iPhone 17"). Required when `test_device` is
+            true; cleared for non-test devices. Sticky on upsert like
+            `test_device`.
+
+    GhostBusReportRequest:
+      type: object
+      required: [user_identifier, trip_identifier, service_date, wait_duration_minutes]
+      properties:
+        user_identifier:
+          type: string
+          description: Anonymous device UUID; part of the dedupe key.
+        trip_identifier:
+          type: string
+        service_date:
+          $ref: '#/components/schemas/EpochMilliseconds'
+        route_identifier:
+          type: string
+        stop_identifier:
+          type: string
+        vehicle_identifier:
+          type: string
+        stop_sequence:
+          type: integer
+        predicted:
+          type: boolean
+          description: Whether the app was showing a real-time prediction for the trip.
+        schedule_deviation_minutes:
+          type: integer
+          description: The deviation the app displayed at report time.
+        wait_duration_minutes:
+          type: integer
+          enum: [5, 10, 15, 20, 30]
+          description: How long the rider waited; 30 means "30+ minutes". Mirrored in the app UI.
+        comment:
+          type: string
+          maxLength: 1000
+        user_latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        user_longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        scheduled_arrival_at:
+          $ref: '#/components/schemas/EpochMilliseconds'
+        predicted_arrival_at:
+          $ref: '#/components/schemas/EpochMilliseconds'
+        prediction_last_updated_at:
+          $ref: '#/components/schemas/EpochMilliseconds'
+
+    SurveyResponseCreateRequest:
+      type: object
+      required: [survey_id, user_identifier, responses]
+      properties:
+        survey_id:
+          type: integer
+          description: The survey's id from the survey list endpoint.
+        user_identifier:
+          type: string
+          description: Anonymous device UUID.
+        stop_identifier:
+          type: string
+          description: >
+            The stop where the survey was answered. Required when the survey
+            sets `require_stop_id_in_response`; when present,
+            `stop_latitude`/`stop_longitude` are required too.
+        stop_latitude:
+          type: number
+        stop_longitude:
+          type: number
+        responses:
+          type: string
+          description: >
+            A JSON-array-encoded **string** (not a nested array) of answer
+            objects; see `SurveyAnswer` for the element schema.
+          contentMediaType: application/json
+          contentSchema:
+            type: array
+            items:
+              $ref: '#/components/schemas/SurveyAnswer'
+          examples:
+            - '[{"question_id":21,"question_type":"radio","question_label":"How was your trip?","answer":"Great"}]'
+
+    SurveyResponseAmendRequest:
+      type: object
+      required: [responses]
+      properties:
+        responses:
+          type: string
+          description: >
+            Same encoding as at creation. Answers are merged into the stored
+            response by `question_id`; existing answers to other questions
+            are preserved.
+          contentMediaType: application/json
+          contentSchema:
+            type: array
+            items:
+              $ref: '#/components/schemas/SurveyAnswer'
+
+    SurveyAnswer:
+      type: object
+      description: Element schema of the JSON-encoded `responses` string.
+      required: [question_id, answer]
+      properties:
+        question_id:
+          type: integer
+        question_type:
+          type: string
+          enum: [text, radio, checkbox, external_survey]
+        question_label:
+          type: string
+          description: The question's label at answer time (denormalized for export stability).
+        answer:
+          type: string
+          description: >
+            The answer as a string. Checkbox answers are a JSON-array-encoded
+            string of the selected options.
+
+    SurveyResponseCreated:
+      type: object
+      required: [survey_response]
+      properties:
+        survey_response:
+          type: object
+          required: [id, user_identifier, update_path]
+          properties:
+            id:
+              type: string
+              description: Server-generated public identifier (never a sequential row id).
+            user_identifier:
+              type: string
+            update_path:
+              type: string
+              description: Relative path to amend this response incrementally.
+              examples: ["/api/v1/survey_responses/9f3c1a2b4d5e6f7a8b9c"]
+
+    SurveyList:
+      type: object
+      required: [surveys, region]
+      properties:
+        surveys:
+          type: array
+          items:
+            $ref: '#/components/schemas/Survey'
+        region:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: integer
+              description: The region identifier.
+            name:
+              type: string
+
+    Survey:
+      type: object
+      required: [id, name, questions, study]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        start_date:
+          type: [string, "null"]
+          format: date-time
+        end_date:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        show_on_map:
+          type: boolean
+        show_on_stops:
+          type: boolean
+        always_visible:
+          type: boolean
+          description: Pins the survey above the fold instead of behind a dismissible prompt.
+        allows_multiple_responses:
+          type: boolean
+        visible_stop_list:
+          type: [array, "null"]
+          items:
+            type: string
+          description: Stop ids the survey is limited to; null = everywhere.
+        visible_route_list:
+          type: [array, "null"]
+          items:
+            type: string
+          description: Route ids the survey is limited to; null = everywhere.
+        study:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: integer
+            name:
+              type: string
+            description:
+              type: [string, "null"]
+        questions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SurveyQuestion'
+
+    SurveyQuestion:
+      type: object
+      required: [id, position, required, content]
+      properties:
+        id:
+          type: integer
+        position:
+          type: integer
+          description: 1-based display order.
+        required:
+          type: boolean
+          description: Always false for `label` and `external_survey` questions.
+        content:
+          type: object
+          required: [type, label_text]
+          properties:
+            type:
+              type: string
+              enum: [text, label, radio, checkbox, external_survey]
+            label_text:
+              type: string
+            options:
+              type: array
+              items:
+                type: string
+              description: Present for `radio` and `checkbox` questions.
+            url:
+              type: string
+              description: External survey URL (`external_survey` only).
+            survey_provider:
+              type: string
+              description: Third-party survey SDK identifier (`external_survey` only).
+            embedded_data_fields:
+              type: array
+              items:
+                type: string
+              description: App-side data fields to embed into the external survey (`external_survey` only).
+            sdk_configuration_values:
+              type: object
+              description: >
+                Provider-specific SDK configuration (`external_survey`
+                only); the key is omitted entirely when the stored value is
+                unparseable.
+
+    WeatherForecast:
+      type: object
+      properties:
+        latitude:
+          type: number
+        longitude:
+          type: number
+        region_identifier:
+          type: integer
+        region_name:
+          type: string
+        retrieved_at:
+          type: string
+          format: date-time
+        units:
+          type: string
+          description: Unit system of the numeric fields (Dark Sky vocabulary, e.g. `us`, `si`).
+        today_summary:
+          type: string
+        current_forecast:
+          $ref: '#/components/schemas/WeatherConditions'
+        hourly_forecast:
+          type: array
+          items:
+            $ref: '#/components/schemas/WeatherConditions'
+
+    WeatherConditions:
+      type: object
+      properties:
+        icon:
+          type: string
+          description: Dark Sky icon vocabulary (`clear-day`, `rain`, `snow`, `cloudy`, …).
+        summary:
+          type: string
+        temperature:
+          type: number
+        temperature_feels_like:
+          type: number
+        precip_per_hour:
+          type: number
+        precip_probability:
+          type: number
+          minimum: 0
+          maximum: 1
+        wind_speed:
+          type: number
+        time:
+          type: integer
+          description: Epoch seconds.
+
+    VehicleMatch:
+      type: object
+      required: [id, name, vehicle_id]
+      properties:
+        id:
+          type: string
+          description: Agency id.
+          examples: ["1"]
+        name:
+          type: string
+          description: Agency name.
+          examples: ["Metro Transit"]
+        vehicle_id:
+          type: string
+          examples: ["1_4361"]
+
+    PaymentIntentRequest:
+      type: object
+      required: [donation_amount_in_cents, email]
+      properties:
+        donation_amount_in_cents:
+          type: integer
+          minimum: 1
+        donation_frequency:
+          type: string
+          description: '`recurring` creates a monthly subscription; any other value (or absent) is a one-time donation.'
+          examples: ["one_time", "recurring"]
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+          description: Stripe customer identity (found-or-created) and receipt address.
+        test_mode:
+          type: string
+          description: '`"1"` routes to Stripe test credentials.'
+          default: "0"
+
+    OneTimePaymentIntentResponse:
+      type: object
+      required: [client_secret, id]
+      properties:
+        client_secret:
+          type: string
+          description: The PaymentIntent's client secret, for the Stripe PaymentSheet.
+        id:
+          type: string
+          format: uuid
+          description: Per-request correlation UUID (not a Stripe id).
+
+    RecurringPaymentIntentResponse:
+      type: object
+      required: [client_secret, customer_id, ephemeral_key, id]
+      properties:
+        client_secret:
+          type: string
+          description: Client secret of the subscription's first invoice's PaymentIntent.
+        customer_id:
+          type: string
+          description: Stripe customer id.
+        ephemeral_key:
+          type: string
+          description: Stripe ephemeral key secret for customer-scoped PaymentSheet operations.
+        id:
+          type: string
+          format: uuid
+          description: Per-request correlation UUID (not a Stripe id).
+
+    LiveActivityContentState:
+      type: object
+      description: |
+        The `content-state` object carried in every Live Activity push
+        (documented here for reference; it travels over APNs, not this HTTP
+        API). Strict wire contract with the iOS widget; no always-changing
+        field (e.g. a build timestamp) may ever be added, because servers
+        compare consecutive states to decide whether to push.
+      required: [arrivals]
+      properties:
+        arrivals:
+          type: array
+          maxItems: 3
+          description: Upcoming departures, ascending by time.
+          items:
+            type: object
+            required: [departure_time, schedule_status, schedule_deviation, is_arrival]
+            properties:
+              departure_time:
+                type: integer
+                description: Epoch **seconds** (unlike the rest of the API, which uses milliseconds).
+                examples: [1767980460]
+              schedule_status:
+                type: string
+                enum: [early, on_time, delayed, unknown]
+                description: >
+                  From real-time deviation, half-open on the late side:
+                  < −1.5 min early; −1.5 (inclusive) to +1.5 (exclusive)
+                  on_time; ≥ +1.5 delayed; `unknown` when schedule-only.
+              schedule_deviation:
+                type: integer
+                description: Deviation in seconds; 0 when schedule-only.
+              is_arrival:
+                type: boolean
+                description: >
+                  True at every stop but the trip's first (`stopSequence !=
+                  0`); selects whether arrival or departure times are shown.
