@@ -85,11 +85,11 @@ func (q *Queries) DeleteAlert(ctx context.Context, id int64) error {
 
 const feedAlerts = `-- name: FeedAlerts :many
 SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
-WHERE region_id = ?
+WHERE region_id = ?1
   AND published = TRUE
-  AND (is_test = FALSE OR CAST(?3 AS BOOLEAN))
+  AND (is_test = FALSE OR CAST(?2 AS BOOLEAN))
 ORDER BY start_time DESC, id DESC
-LIMIT ?
+LIMIT ?3
 `
 
 type FeedAlertsParams struct {
@@ -101,6 +101,12 @@ type FeedAlertsParams struct {
 // The test predicate is (is_test = FALSE OR :include_test). Writing
 // is_test = :include_test instead would return ONLY test alerts when
 // ?test=1, hiding every real alert from an agency verifying delivery.
+//
+// Every parameter is an explicit sqlc.arg so numbering stays uniform. A bare
+// `?` mixed with an explicitly-numbered sqlc.arg is numbered by SQLite
+// positionally after the highest explicit index, not by argument order:
+// that mismatch made the third Go argument (limit) silently target a
+// nonexistent fourth placeholder and every Feed call fail.
 func (q *Queries) FeedAlerts(ctx context.Context, arg FeedAlertsParams) ([]Alert, error) {
 	rows, err := q.db.QueryContext(ctx, feedAlerts, arg.RegionID, arg.IncludeTest, arg.Limit)
 	if err != nil {
@@ -143,11 +149,11 @@ func (q *Queries) FeedAlerts(ctx context.Context, arg FeedAlertsParams) ([]Alert
 const feedTranslations = `-- name: FeedTranslations :many
 SELECT id, alert_id, language, field, text, source_sha256, created_at, updated_at FROM alert_translations WHERE alert_id IN (
   SELECT id FROM alerts
-  WHERE region_id = ?
+  WHERE region_id = ?1
     AND published = TRUE
-    AND (is_test = FALSE OR CAST(?3 AS BOOLEAN))
+    AND (is_test = FALSE OR CAST(?2 AS BOOLEAN))
   ORDER BY start_time DESC, id DESC
-  LIMIT ?
+  LIMIT ?3
 )
 `
 
@@ -161,6 +167,9 @@ type FeedTranslationsParams struct {
 // matches the same rows. Both statements run in one read transaction; without
 // that, a publish between them can shift the top-20 set and an alert in the
 // response silently loses its translations.
+//
+// As in FeedAlerts, every parameter is an explicit sqlc.arg so none is left
+// to be numbered positionally.
 func (q *Queries) FeedTranslations(ctx context.Context, arg FeedTranslationsParams) ([]AlertTranslation, error) {
 	rows, err := q.db.QueryContext(ctx, feedTranslations, arg.RegionID, arg.IncludeTest, arg.Limit)
 	if err != nil {

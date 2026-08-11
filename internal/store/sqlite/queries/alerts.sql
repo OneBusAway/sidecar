@@ -39,25 +39,34 @@ ORDER BY start_time DESC, id DESC;
 -- The test predicate is (is_test = FALSE OR :include_test). Writing
 -- is_test = :include_test instead would return ONLY test alerts when
 -- ?test=1, hiding every real alert from an agency verifying delivery.
+--
+-- Every parameter is an explicit sqlc.arg so numbering stays uniform. A bare
+-- `?` mixed with an explicitly-numbered sqlc.arg is numbered by SQLite
+-- positionally after the highest explicit index, not by argument order:
+-- that mismatch made the third Go argument (limit) silently target a
+-- nonexistent fourth placeholder and every Feed call fail.
 SELECT * FROM alerts
-WHERE region_id = ?
+WHERE region_id = sqlc.arg(region_id)
   AND published = TRUE
   AND (is_test = FALSE OR CAST(sqlc.arg(include_test) AS BOOLEAN))
 ORDER BY start_time DESC, id DESC
-LIMIT ?;
+LIMIT sqlc.arg(limit);
 
 -- name: FeedTranslations :many
 -- The subquery repeats the feed predicate including ORDER BY and LIMIT so it
 -- matches the same rows. Both statements run in one read transaction; without
 -- that, a publish between them can shift the top-20 set and an alert in the
 -- response silently loses its translations.
+--
+-- As in FeedAlerts, every parameter is an explicit sqlc.arg so none is left
+-- to be numbered positionally.
 SELECT * FROM alert_translations WHERE alert_id IN (
   SELECT id FROM alerts
-  WHERE region_id = ?
+  WHERE region_id = sqlc.arg(region_id)
     AND published = TRUE
     AND (is_test = FALSE OR CAST(sqlc.arg(include_test) AS BOOLEAN))
   ORDER BY start_time DESC, id DESC
-  LIMIT ?
+  LIMIT sqlc.arg(limit)
 );
 
 -- name: ListAlertTranslations :many
