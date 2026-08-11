@@ -10,6 +10,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/store/storetest"
 )
 
 func TestOpenMigrateAndRoundTrip(t *testing.T) {
@@ -139,4 +140,24 @@ func TestFeed(t *testing.T) {
 	if len(feed[1].Translations) != 1 || feed[1].Translations[0].Text != "Primera alerta" {
 		t.Errorf("feed[1].Translations = %+v, want [{...Text: Primera alerta}]", feed[1].Translations)
 	}
+}
+
+// TestConformance runs the shared store conformance suite against the
+// SQLite adapter. When a Postgres adapter is added, it runs the same suite
+// unchanged to prove behavioral equivalence.
+func TestConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAlertRepository(t, func(t *testing.T) (alerts.Repository, regions.Repository) {
+		t.Helper()
+		store, err := sqlite.Open(filepath.Join(t.TempDir(), "conformance.db"))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		if err := store.Migrate(); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		return store.Alerts(), store.Regions()
+	})
 }
