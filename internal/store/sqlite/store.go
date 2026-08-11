@@ -1,0 +1,419 @@
+// Package sqlite is the SQLite adapter for the alerts and regions
+// repositories. It maps generated sqlc rows to the domain types defined in
+// internal/alerts and internal/regions — nothing outside this package ever
+// sees a gen.* struct, which is what lets a Postgres adapter satisfy the same
+// interfaces later without touching any other package.
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
+
+	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
+)
+
+// Store owns the database connection pool and hands out the two
+// repositories. It is safe for concurrent use.
+type Store struct {
+	db *sql.DB
+	q  *gen.Queries
+}
+
+// Open connects with the pragmas this design depends on:
+//
+//	_pragma=journal_mode(WAL)   server reads and CLI writes coexist
+//	_pragma=busy_timeout(5000)  block briefly rather than failing on a lock
+//	_pragma=foreign_keys(ON)    SQLite disables FK enforcement by default,
+//	                            without which ON DELETE CASCADE silently
+//	                            does nothing
+func Open(path string) (*Store, error) {
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
+	}
+	return &Store{db: db, q: gen.New(db)}, nil
+}
+
+// Migrate runs the embedded goose migrations.
+func (s *Store) Migrate() error {
+	goose.SetBaseFS(migrations.FS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return fmt.Errorf("sqlite: set dialect: %w", err)
+	}
+	if err := goose.Up(s.db, "."); err != nil {
+		return fmt.Errorf("sqlite: migrate: %w", err)
+	}
+	return nil
+}
+
+// Close releases the underlying connection pool.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// Alerts returns the alerts.Repository backed by this store.
+func (s *Store) Alerts() alerts.Repository {
+	return &alertRepo{db: s.db, q: s.q}
+}
+
+// Regions returns the regions.Repository backed by this store.
+func (s *Store) Regions() regions.Repository {
+	return &regionRepo{q: s.q}
+}
+
+// unixToTime converts a stored epoch-seconds value to an absolute instant in
+// UTC. Skipping .UTC() here would attach the machine's local zone to every
+// value read from the database.
+func unixToTime(n int64) time.Time {
+	return time.Unix(n, 0).UTC()
+}
+
+// nullUnixToTime converts an optional epoch-seconds column to *time.Time.
+func nullUnixToTime(n sql.NullInt64) *time.Time {
+	if !n.Valid {
+		return nil
+	}
+	t := unixToTime(n.Int64)
+	return &t
+}
+
+// timeToNullUnix converts an optional instant to the NULLable column form.
+func timeToNullUnix(t *time.Time) sql.NullInt64 {
+	if t == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: t.Unix(), Valid: true}
+}
+
+// ---------------------------------------------------------------------------
+// regions
+// ---------------------------------------------------------------------------
+
+type regionRepo struct {
+	q *gen.Queries
+}
+
+func regionFromRow(r gen.Region) regions.Region {
+	return regions.Region{
+		ID:              r.ID,
+		Name:            r.RegionName,
+		OBABaseURL:      r.ObaBaseUrl,
+		SidecarBaseURL:  r.SidecarBaseUrl,
+		Language:        r.Language,
+		Active:          r.Active,
+		DefaultAgencyID: r.DefaultAgencyID,
+		Timezone:        r.Timezone,
+	}
+}
+
+func (r *regionRepo) Get(ctx context.Context, id int64) (regions.Region, error) {
+	row, err := r.q.GetRegion(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return regions.Region{}, fmt.Errorf("sqlite: get region %d: %w", id, regions.ErrNotFound)
+		}
+		return regions.Region{}, fmt.Errorf("sqlite: get region %d: %w", id, err)
+	}
+	return regionFromRow(row), nil
+}
+
+func (r *regionRepo) List(ctx context.Context) ([]regions.Region, error) {
+	rows, err := r.q.ListRegions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list regions: %w", err)
+	}
+	out := make([]regions.Region, len(rows))
+	for i, row := range rows {
+		out[i] = regionFromRow(row)
+	}
+	return out, nil
+}
+
+func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Region, now time.Time) error {
+	ts := now.Unix()
+	for _, reg := range in {
+		if err := r.q.UpsertRegionFromDirectory(ctx, gen.UpsertRegionFromDirectoryParams{
+			ID:             reg.ID,
+			RegionName:     reg.Name,
+			ObaBaseUrl:     reg.OBABaseURL,
+			SidecarBaseUrl: reg.SidecarBaseURL,
+			Language:       reg.Language,
+			Active:         reg.Active,
+			SyncedAt:       ts,
+			CreatedAt:      ts,
+			UpdatedAt:      ts,
+		}); err != nil {
+			return fmt.Errorf("sqlite: upsert region %d: %w", reg.ID, err)
+		}
+	}
+	return nil
+}
+
+func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, agencyID, timezone string, now time.Time) error {
+	if err := r.q.SetRegionLocalFields(ctx, gen.SetRegionLocalFieldsParams{
+		DefaultAgencyID: agencyID,
+		Timezone:        timezone,
+		UpdatedAt:       now.Unix(),
+		ID:              id,
+	}); err != nil {
+		return fmt.Errorf("sqlite: set local fields for region %d: %w", id, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// alerts
+// ---------------------------------------------------------------------------
+
+type alertRepo struct {
+	db *sql.DB
+	q  *gen.Queries
+}
+
+func alertFromRow(a gen.Alert) alerts.Alert {
+	return alerts.Alert{
+		ID:              a.ID,
+		RegionID:        a.RegionID,
+		AgencyID:        a.AgencyID,
+		HeaderText:      a.HeaderText,
+		DescriptionText: a.DescriptionText,
+		URL:             a.Url,
+		Cause:           a.Cause,
+		Effect:          a.Effect,
+		Severity:        a.SeverityLevel,
+		StartTime:       unixToTime(a.StartTime),
+		EndTime:         nullUnixToTime(a.EndTime),
+		Published:       a.Published,
+		IsTest:          a.IsTest,
+	}
+}
+
+func translationFromRow(t gen.AlertTranslation) alerts.Translation {
+	return alerts.Translation{
+		Language:     t.Language,
+		Field:        alerts.Field(t.Field),
+		Text:         t.Text,
+		SourceSHA256: t.SourceSha256,
+	}
+}
+
+func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Time) (alerts.Alert, error) {
+	ts := now.Unix()
+	row, err := r.q.CreateAlert(ctx, gen.CreateAlertParams{
+		RegionID:        in.RegionID,
+		AgencyID:        in.AgencyID,
+		HeaderText:      in.HeaderText,
+		DescriptionText: in.DescriptionText,
+		Url:             in.URL,
+		Cause:           in.Cause,
+		Effect:          in.Effect,
+		SeverityLevel:   in.Severity,
+		StartTime:       in.StartTime.Unix(),
+		EndTime:         timeToNullUnix(in.EndTime),
+		Published:       false,
+		IsTest:          in.IsTest,
+		CreatedAt:       ts,
+		UpdatedAt:       ts,
+	})
+	if err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
+	}
+	return alertFromRow(row), nil
+}
+
+func (r *alertRepo) Get(ctx context.Context, id int64) (alerts.Alert, error) {
+	row, err := r.q.GetAlert(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return alerts.Alert{}, fmt.Errorf("sqlite: get alert %d: %w", id, alerts.ErrNotFound)
+		}
+		return alerts.Alert{}, fmt.Errorf("sqlite: get alert %d: %w", id, err)
+	}
+	a := alertFromRow(row)
+	translations, err := r.q.ListAlertTranslations(ctx, id)
+	if err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: list translations for alert %d: %w", id, err)
+	}
+	for _, t := range translations {
+		a.Translations = append(a.Translations, translationFromRow(t))
+	}
+	return a, nil
+}
+
+func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now time.Time) (alerts.Alert, error) {
+	current, err := r.q.GetAlert(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, alerts.ErrNotFound)
+		}
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
+	}
+
+	if p.AgencyID != nil {
+		current.AgencyID = *p.AgencyID
+	}
+	if p.HeaderText != nil {
+		current.HeaderText = *p.HeaderText
+	}
+	if p.DescriptionText != nil {
+		current.DescriptionText = *p.DescriptionText
+	}
+	if p.URL != nil {
+		current.Url = *p.URL
+	}
+	if p.Cause != nil {
+		current.Cause = *p.Cause
+	}
+	if p.Effect != nil {
+		current.Effect = *p.Effect
+	}
+	if p.Severity != nil {
+		current.SeverityLevel = *p.Severity
+	}
+	if p.StartTime != nil {
+		current.StartTime = p.StartTime.Unix()
+	}
+	if p.ClearEndTime {
+		current.EndTime = sql.NullInt64{}
+	} else if p.EndTime != nil {
+		current.EndTime = sql.NullInt64{Int64: p.EndTime.Unix(), Valid: true}
+	}
+	if p.IsTest != nil {
+		current.IsTest = *p.IsTest
+	}
+
+	row, err := r.q.UpdateAlert(ctx, gen.UpdateAlertParams{
+		AgencyID:        current.AgencyID,
+		HeaderText:      current.HeaderText,
+		DescriptionText: current.DescriptionText,
+		Url:             current.Url,
+		Cause:           current.Cause,
+		Effect:          current.Effect,
+		SeverityLevel:   current.SeverityLevel,
+		StartTime:       current.StartTime,
+		EndTime:         current.EndTime,
+		IsTest:          current.IsTest,
+		UpdatedAt:       now.Unix(),
+		ID:              id,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, alerts.ErrNotFound)
+		}
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
+	}
+	return alertFromRow(row), nil
+}
+
+func (r *alertRepo) SetPublished(ctx context.Context, id int64, published bool, now time.Time) error {
+	if err := r.q.SetAlertPublished(ctx, gen.SetAlertPublishedParams{
+		Published: published,
+		UpdatedAt: now.Unix(),
+		ID:        id,
+	}); err != nil {
+		return fmt.Errorf("sqlite: set published for alert %d: %w", id, err)
+	}
+	return nil
+}
+
+func (r *alertRepo) Delete(ctx context.Context, id int64) error {
+	if err := r.q.DeleteAlert(ctx, id); err != nil {
+		return fmt.Errorf("sqlite: delete alert %d: %w", id, err)
+	}
+	return nil
+}
+
+func (r *alertRepo) List(ctx context.Context, f alerts.ListFilter) ([]alerts.Alert, error) {
+	var rows []gen.Alert
+	var err error
+	if f.RegionID == nil {
+		rows, err = r.q.ListAlerts(ctx)
+	} else {
+		rows, err = r.q.ListAlertsByRegion(ctx, *f.RegionID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list alerts: %w", err)
+	}
+	out := make([]alerts.Alert, len(rows))
+	for i, row := range rows {
+		out[i] = alertFromRow(row)
+	}
+	return out, nil
+}
+
+// Feed returns published alerts for one region, newest first, capped at
+// limit, with translations attached. Both queries run inside a single read
+// transaction: on separate pool connections a concurrent publish could shift
+// the top-N set between the two queries, silently dropping translations from
+// an alert in the response.
+func (r *alertRepo) Feed(ctx context.Context, regionID int64, includeTest bool, limit int) ([]alerts.Alert, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: feed: begin tx: %w", err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+
+	q := r.q.WithTx(tx)
+
+	alertRows, err := q.FeedAlerts(ctx, gen.FeedAlertsParams{
+		RegionID:    regionID,
+		IncludeTest: includeTest,
+		Limit:       int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: feed: alerts: %w", err)
+	}
+
+	translationRows, err := q.FeedTranslations(ctx, gen.FeedTranslationsParams{
+		RegionID:    regionID,
+		IncludeTest: includeTest,
+		Limit:       int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: feed: translations: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("sqlite: feed: commit: %w", err)
+	}
+
+	byAlert := make(map[int64][]alerts.Translation, len(translationRows))
+	for _, t := range translationRows {
+		byAlert[t.AlertID] = append(byAlert[t.AlertID], translationFromRow(t))
+	}
+
+	out := make([]alerts.Alert, len(alertRows))
+	for i, row := range alertRows {
+		a := alertFromRow(row)
+		a.Translations = byAlert[a.ID]
+		out[i] = a
+	}
+	return out, nil
+}
+
+func (r *alertRepo) UpsertTranslation(ctx context.Context, alertID int64, t alerts.Translation, now time.Time) error {
+	ts := now.Unix()
+	if err := r.q.UpsertAlertTranslation(ctx, gen.UpsertAlertTranslationParams{
+		AlertID:      alertID,
+		Language:     t.Language,
+		Field:        string(t.Field),
+		Text:         t.Text,
+		SourceSha256: t.SourceSHA256,
+		CreatedAt:    ts,
+		UpdatedAt:    ts,
+	}); err != nil {
+		return fmt.Errorf("sqlite: upsert translation for alert %d: %w", alertID, err)
+	}
+	return nil
+}

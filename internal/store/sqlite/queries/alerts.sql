@@ -24,8 +24,15 @@ UPDATE alerts SET published = ?, updated_at = ? WHERE id = ?;
 DELETE FROM alerts WHERE id = ?;
 
 -- name: ListAlerts :many
+-- Every region. Region id 0 (Tampa Bay) is a real region, so "all regions"
+-- cannot be expressed as a region_id parameter value: it is a separate
+-- query from ListAlertsByRegion rather than a sentinel.
 SELECT * FROM alerts
-WHERE (CAST(sqlc.arg(region_id) AS INTEGER) = 0 OR region_id = CAST(sqlc.arg(region_id) AS INTEGER))
+ORDER BY start_time DESC, id DESC;
+
+-- name: ListAlertsByRegion :many
+SELECT * FROM alerts
+WHERE region_id = ?
 ORDER BY start_time DESC, id DESC;
 
 -- name: FeedAlerts :many

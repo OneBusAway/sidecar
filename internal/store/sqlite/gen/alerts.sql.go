@@ -258,12 +258,59 @@ func (q *Queries) ListAlertTranslations(ctx context.Context, alertID int64) ([]A
 
 const listAlerts = `-- name: ListAlerts :many
 SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
-WHERE (CAST(?1 AS INTEGER) = 0 OR region_id = CAST(?1 AS INTEGER))
 ORDER BY start_time DESC, id DESC
 `
 
-func (q *Queries) ListAlerts(ctx context.Context, regionID int64) ([]Alert, error) {
-	rows, err := q.db.QueryContext(ctx, listAlerts, regionID)
+// Every region. Region id 0 (Tampa Bay) is a real region, so "all regions"
+// cannot be expressed as a region_id parameter value: it is a separate
+// query from ListAlertsByRegion rather than a sentinel.
+func (q *Queries) ListAlerts(ctx context.Context) ([]Alert, error) {
+	rows, err := q.db.QueryContext(ctx, listAlerts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Alert{}
+	for rows.Next() {
+		var i Alert
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.AgencyID,
+			&i.HeaderText,
+			&i.DescriptionText,
+			&i.Url,
+			&i.Cause,
+			&i.Effect,
+			&i.SeverityLevel,
+			&i.StartTime,
+			&i.EndTime,
+			&i.Published,
+			&i.IsTest,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAlertsByRegion = `-- name: ListAlertsByRegion :many
+SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
+WHERE region_id = ?
+ORDER BY start_time DESC, id DESC
+`
+
+func (q *Queries) ListAlertsByRegion(ctx context.Context, regionID int64) ([]Alert, error) {
+	rows, err := q.db.QueryContext(ctx, listAlertsByRegion, regionID)
 	if err != nil {
 		return nil, err
 	}
