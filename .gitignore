@@ -1,0 +1,8 @@
+.DS_Store
+
+# Build artifacts
+/bin/
+
+# Test artifacts
+coverage.out
+coverage.html

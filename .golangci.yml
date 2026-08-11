@@ -1,0 +1,63 @@
+version: "2"
+
+linters:
+  # The standard set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gocritic
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment optimizes struct memory layout at the cost of grouping
+        # related fields together. Readability wins here.
+        - fieldalignment
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+
+  exclusions:
+    generated: strict
+    presets:
+      # Note: the "comments" preset is deliberately omitted — it suppresses
+      # revive's exported/package-comments rules, which we want enforced.
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test helpers routinely ignore errors from things like fmt.Fprintf and
+      # deliberately construct odd values; don't fight the linter over it.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/OneBusAway/sidecar
+  exclusions:
+    generated: strict
