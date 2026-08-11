@@ -48,6 +48,30 @@ no GTFS agency id**; both are managed locally (§2.2, §2.4).
 **Region id 0 is real** — Tampa Bay. Any `if regionID == 0 { … not found }` shortcut is
 a bug. Absence is signalled by an explicit lookup miss, never by a zero value.
 
+#### The fetch is hostile-input handling, not a convenience
+
+This is an unauthenticated ingest path from infrastructure the operator does not control,
+running at boot and hourly, whose contents populate the serving path. §2.6 of the
+normative spec caps a request body at 8 KB for exactly this reason — "an unbounded read
+hands attackers a free memory amplifier" — and the same discipline applies here. The
+fallback in §2.1 defends against *unreachable*; these defend against *hostile*:
+
+| Control | Value | Without it |
+|---|---|---|
+| `http.Client.Timeout` | 30s | Go's default client has **no timeout**; a tarpitting host hangs the fetch forever |
+| `io.LimitReader` on the body | 5 MB (real document ≈ 100 KB) | A multi-gigabyte response OOM-kills the server, hourly |
+| Max entries | 10,000 | A hostile document bloats the table every refresh |
+| Per-field length caps | 512 chars | Unbounded strings, and terminal escape sequences in `region_name` are later rendered raw by `region list` |
+| `id >= 0`, unique within document | reject the entry | Negative or duplicate ids corrupt the primary key |
+
+Boot never blocks on the fetch beyond the timeout: the server starts serving from
+existing rows and the first refresh runs in the background.
+
+**The sync never deletes region rows.** `alerts.region_id` is `ON DELETE CASCADE`, so
+removing a region because it vanished from the directory would silently destroy every
+alert authored for it. Regions that disappear upstream keep their row and their alerts;
+only directory-sourced columns are ever rewritten.
+
 ### 2.2 The `regions` table has two kinds of columns
 
 | Directory-sourced — refresh overwrites | Locally-managed — refresh must **not** touch |
@@ -115,13 +139,14 @@ English.
 Language tags are normalised to lowercase in Go before storage — never with SQL
 collation, which differs across engines. `url` is English-only.
 
-### 2.7 Postgres portability: identical types, one interface, one conformance suite
+### 2.7 Postgres portability: aligned types under three conditions, one interface, one conformance suite
 
-Generating the same schema for both engines with sqlc produces **structurally identical**
-models and method signatures:
+Generating equivalent schemas for both engines with sqlc produces **structurally
+identical** models and method signatures — but only when the Postgres schema is written
+correctly (see condition 3 below; a naive translation does *not* produce this):
 
 ```
-SQLITE                          POSTGRES
+SQLITE                          POSTGRES (BIGINT columns)
 StartTime int64                 StartTime int64
 EndTime   sql.NullInt64         EndTime   sql.NullInt64
 Published bool                  Published bool
@@ -129,12 +154,31 @@ CreatedAt int64                 CreatedAt int64
 ```
 
 That alignment is *caused by* §2.3. Had the schema used `DATETIME` / `TIMESTAMPTZ`, the
-two engines would yield `time.Time` versus `pgtype.Timestamptz`. Two conditions preserve
-it:
+two engines would yield `time.Time` versus `pgtype.Timestamptz`. Three conditions
+preserve it, and **all three are load-bearing**:
 
 1. Epoch-integer storage for all timestamps.
 2. `sql_package: "database/sql"` for both engines — **not** pgx, whose `pgtype.Text`
    diverges from `sql.NullString`.
+3. **Every Postgres id and timestamp column is `BIGINT`, never `INTEGER`.**
+
+Condition 3 is the easy one to get wrong, because SQLite's `INTEGER` is 64-bit while
+Postgres's is 32-bit. Copying §3's SQLite DDL verbatim to Postgres yields:
+
+```
+                                POSTGRES with INTEGER      POSTGRES with BIGINT
+StartTime  (sqlite: int64)      int32          ✗           int64          ✓
+EndTime    (sqlite: NullInt64)  sql.NullInt32  ✗           sql.NullInt64  ✓
+ID         (sqlite: int64)      int32          ✗           int64          ✓
+```
+
+The failure mode is nasty: the interface mismatch is *obvious* at compile time, so the
+implementer "fixes" it with `int64(row.StartTime)` casts that compile clean — and every
+timestamp past 2038 then truncates or fails at insert. An `--end` a few years out is
+enough to hit it. The Postgres migrations therefore use `BIGINT` and
+`BIGINT GENERATED ALWAYS AS IDENTITY`, and the conformance suite carries a
+`start_time > 2^31` case (§8) so the divergence fails a test rather than reaching
+production.
 
 Structural identity is not type identity: `sqlite.Alert` and `postgres.Alert` remain
 distinct Go types. So the boundary is a repository interface over domain types, and:
@@ -222,8 +266,21 @@ convention.
 which would let a new alert inherit a deleted alert's entity id and collide with client
 caches. Postgres `GENERATED ALWAYS AS IDENTITY` gives the same guarantee.
 
+The DDL above is the **SQLite** schema. A Postgres schema translates `INTEGER` to
+`BIGINT` and `INTEGER PRIMARY KEY AUTOINCREMENT` to
+`BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY` for the reasons in §2.7 — SQLite's
+`INTEGER` is 64-bit, Postgres's is 32-bit, and a verbatim copy silently caps timestamps
+at 2038.
+
 Migrations are goose SQL files embedded via `embed.FS`, under
 `internal/store/sqlite/migrations/`.
+
+**`cmd/sidecar` runs migrations at boot**, against the embedded set, *before* the first
+directory fetch, and exits non-zero if they fail. Without this the ordering is undefined:
+§2.1's "boots on whatever the table already holds" presumes a `regions` table that does
+not exist on a fresh database, so the first upsert would fail against a missing relation.
+`sidecar-admin migrate` exists for inspection (`status`) and for running migrations
+without starting a server; it is not a prerequisite for boot.
 
 ## 4. Feed contract
 
@@ -236,8 +293,31 @@ SQL selects; Go renders.
 - **`BuildFeed`** renders those rows to protobuf. It applies no filtering, ordering, or
   capping.
 
-Translations load in one additional query scoped by a subquery repeating the feed
-predicate — two queries total, no N+1, no dependency on `sqlc.slice()` support.
+The test predicate is written out because the obvious misreading is silently wrong:
+
+```sql
+WHERE region_id = ? AND published = TRUE AND (is_test = FALSE OR ?)  -- ? = include_test
+```
+
+`is_test = ?` would return **only** test alerts when `?test=1`, hiding every real alert
+from an agency verifying production delivery. §8 asserts that non-test alerts remain
+present when `?test=1`, which is what catches it.
+
+Translations load in one additional query whose subquery repeats the predicate
+**including `ORDER BY` and `LIMIT`**, so it matches the same 20 rows:
+
+```sql
+SELECT t.* FROM alert_translations t WHERE t.alert_id IN (
+  SELECT id FROM alerts
+  WHERE region_id = ? AND published = TRUE AND (is_test = FALSE OR ?)
+  ORDER BY start_time DESC, id DESC LIMIT 20
+);
+```
+
+Two queries total, no N+1, no dependency on `sqlc.slice()`. Both run **inside one
+read transaction** — otherwise they can land on different pool connections, and a
+`publish` between them shifts the top-20 set so an alert in the response silently loses
+its translations.
 
 The feed does **not** filter by active window. Spec §13 states apps hide out-of-window
 alerts client-side using `active_period`, so all 20 newest published alerts are returned
@@ -272,6 +352,11 @@ Enum names are stored as TEXT (`"CONSTRUCTION"`, not `6`) — portable, legible 
 Translations sort by language tag rather than following map iteration order, so wire
 output is byte-stable across runs.
 
+A stored enum name that does not map — schema drift, a hand-edited database, a future
+rename — renders as the corresponding `UNKNOWN_*` value and logs at warn level. It must
+not panic and must not abort the response: one bad row would otherwise darken the entire
+region's feed.
+
 An empty result set still yields a valid `FeedMessage` with a populated header and no
 entities — spec §15 requires the endpoint to conform even when it always returns empty.
 
@@ -283,14 +368,35 @@ GET /api/v1/regions/{regionId}/alerts.pbtext   → 200 text/plain
                                                  404 application/json
 ```
 
-- **Region segment**: parse the leading integer and ignore any suffix, per spec §2.4 —
-  `1-puget-sound` resolves to region 1. Shipped clients replay server-generated
-  id-prefixed slugs verbatim.
+- **Region segment**: parse the leading run of digits and ignore any suffix, per spec
+  §2.4 — `1-puget-sound` resolves to region 1. Shipped clients replay server-generated
+  id-prefixed slugs verbatim. Every malformed case resolves to **404, never 500**, since
+  §1.2 makes unrecognised identifiers a normal condition rather than an error:
+
+  | Input | Result |
+  |---|---|
+  | `1`, `1-puget-sound` | region 1 |
+  | `007` | region 7 (leading zeros ignored) |
+  | `92233720368547758081-x` | 404 — overflows `int64`; a parse error mapped to 500 would violate §1.2 |
+  | `abc`, `-1`, `+1`, `` | 404 — no leading digit |
+
 - **Unknown region**: `404 {"error": "Couldn't find Region"}`.
+- **`active`**: a region row is served **regardless of `active`**. The 404 contract is
+  about identifiers the sidecar does not serve, and an alert authored for a region is a
+  deliberate act that a directory-level activity flag should not silently suppress.
+  `active` is stored for display in `region list` only. Combined with §2.1's
+  never-delete rule, a region that leaves the directory keeps serving its alerts.
 - **`?test=`**: test alerts are included when the parameter is present with **any
   non-blank value**. Note `?test=0` therefore *includes* them — this follows spec §3's
-  "any non-blank value" and a conventional boolean parse would get it wrong.
+  "any non-blank value" and a conventional boolean parse would get it wrong. Blank means
+  empty **or whitespace-only** (`?test=%20` is blank), matching the Rails `blank?` the
+  reference implementation uses; a Go `!= ""` check diverges.
 - Routing uses the stdlib `net/http.ServeMux` path patterns available since Go 1.22.
+- **Server timeouts are set explicitly.** This endpoint is unauthenticated by design
+  (§1.3), and Go's `http.Server` defaults to no `ReadHeaderTimeout`, no `ReadTimeout`,
+  and no `IdleTimeout` — a trivial slowloris holds goroutines and file descriptors
+  indefinitely. Set `ReadHeaderTimeout` 5s, `ReadTimeout` 10s, `WriteTimeout` 15s,
+  `IdleTimeout` 60s. These are process-level defence and do not assume a fronting proxy.
 
 ## 5. Packages
 
@@ -323,7 +429,7 @@ alert   create --region N --header TEXT --start RFC3339
         list [--region N] [--all]
         show ID
         edit ID [--header TEXT] [--description TEXT] [--url URL]
-                [--start RFC3339] [--end RFC3339] [--agency-id ID]
+                [--start RFC3339] [--end RFC3339 | --no-end] [--agency-id ID]
                 [--cause C] [--effect E] [--severity S] [--test | --no-test]
         publish ID | unpublish ID | delete ID
         translate ID --language es [--header TEXT] [--description TEXT]
@@ -336,26 +442,51 @@ directory (§2.1), so an unknown `--id` is an error rather than an implicit inse
 
 Every `alert edit` flag is optional and patches only what is passed — distinct from
 `create`, where `--region`, `--header`, and `--start` are required. Omitting a flag
-leaves the stored value untouched; clearing an optional field uses an explicit empty
-value (`--url ""`).
+leaves the stored value untouched. Clearing differs by field type: `--url ""` stores
+NULL (and `BuildFeed` emits `url` only when non-NULL and non-empty, so `''` and NULL
+render identically), while `--end` takes a separate `--no-end` because `""` is not
+parseable RFC 3339 and reverting to the 8-hour fallback needs its own syntax.
+
+**Timestamps are validated at author time**, because the wire types make bad values
+dangerous rather than merely wrong. `TimeRange.start`/`end` are `uint64` in the proto, so
+a negative epoch wraps: `--start 1969-12-31T23:00:00Z` parses as valid RFC 3339 and was
+verified to render as `"start":"18446744073709548016"` with an `end` 18 quintillion
+seconds *before* it. `create` and `edit` therefore reject:
+
+- `start` before 2000-01-01 or more than 10 years ahead — catches typo'd years and all
+  negative epochs.
+- `end <= start` — otherwise `publish` succeeds, the alert appears in the feed, and
+  riders never see it because §13 has apps hide out-of-window alerts client-side. A
+  silent no-show with no error anywhere is the worst failure mode available here.
 
 The database path comes from `--db` or `SIDECAR_DB`, defaulting to `./sidecar.db`.
 `alert list` renders times in the region's configured timezone with the zone name, plus
-UTC.
+UTC. `region set --timezone` validates through `time.LoadLocation` at set time, so a
+typo'd `America/Seatle` fails at the point of the mistake rather than later inside
+`alert list`. Both binaries import `_ "time/tzdata"` so zone lookup works in a scratch
+container with no system tzdata.
 
-Both binaries follow the existing `run(io.Writer, []string) error` seam in
-`cmd/sidecar/main.go`, so command behaviour is testable without a subprocess.
+Both binaries use a `run(stdout, stderr io.Writer, args []string) error` seam so command
+behaviour is testable without a subprocess and `main` can map the error to a non-zero
+exit code. The existing `cmd/sidecar/main.go` seam is `run(io.Writer, []string)` with no
+error return — it is widened to this signature as part of this work.
 
 ## 7. Error handling
 
 | Condition | Behaviour |
 |---|---|
 | Unknown region (HTTP) | `404 {"error": "Couldn't find Region"}` |
-| Directory refresh fails | Log; keep serving the last known good rows |
+| Unparseable / overflowing region segment | `404`, same body — never `500` (§4.3) |
+| Migration failure at boot | Log and exit non-zero; never serve on an unknown schema |
+| Directory refresh fails, times out, or exceeds a limit | Log; keep serving the last known good rows |
 | Directory fetch fails at boot | Log; serve whatever the table holds |
+| Directory entry invalid (bad id, oversized field) | Skip that entry, log, keep the rest |
 | Naive `--start` / `--end` | CLI error naming the region's timezone; no write |
+| `start` out of range, or `end <= start` | CLI error; no write (§6) |
 | No `--agency-id` and no region default | CLI error; no write (§2.4) |
-| Unknown enum name | CLI error listing valid values; no write |
+| Unknown enum name at author time | CLI error listing valid values; no write |
+| Unmappable enum name at render | Emit `UNKNOWN_*`, log warn, keep serving (§4.2) |
+| Unknown `--timezone` | CLI error at `region set`; no write |
 | Store failure during render | `500`, empty body; error logged with the region id |
 
 ## 8. Testing strategy
@@ -371,17 +502,26 @@ emitted, empty input producing a valid header-only `FeedMessage`.
 **2 — Store and migrations.** Against a temporary SQLite file with the real migrations.
 Written as the shared conformance suite from the start: CRUD, publish/unpublish
 visibility, test filtering, ordering including the `id DESC` tie-break, the 20-row cap,
-and the partial upsert preserving `default_agency_id` and `timezone`.
+and the partial upsert preserving `default_agency_id` and `timezone`. Plus a
+**`start_time > 2^31` case** — the one assertion that fails loudly if a future Postgres
+schema uses `INTEGER` instead of `BIGINT` (§2.7).
 
 **3 — Region directory.** An `httptest` server returning a fixture captured from the real
 directory: parsing, upsert, refresh-preserves-local-columns, and fetch-failure-serves-stale.
+Hostile-input cases too, since this is an untrusted ingest path (§2.1): a body exceeding
+the size cap, a slow response hitting the timeout, an entry count over the cap, a negative
+id, and an oversized field — each skipped or aborted without disturbing existing rows.
+A region absent from a later fetch must **keep** its row and its alerts.
 
 **4 — HTTP handlers.** `httptest` against a real store: both encodings and their content
-types, `?test=` handling including the `?test=0` case, the 404 body, and the
-`1-puget-sound` slug segment.
+types, the 404 body, and the region-segment table from §4.3 (`1-puget-sound`, `007`, the
+`int64` overflow, and a non-numeric segment — all 404, none 500). `?test=` handling
+covers the `?test=0` case, whitespace-only blank, **and that non-test alerts remain
+present when `?test=1`** — the assertion that catches an `is_test = ?` predicate.
 
 **5 — CLI.** Temporary database via the `run` seam: a create → publish → appears-in-feed
-round trip, and rejection of a naive `--start`.
+round trip, rejection of a naive `--start`, rejection of `end <= start`, rejection of a
+pre-2000 start, and rejection of an unknown `--timezone`.
 
 ### Wire assertions never use golden files
 
@@ -390,14 +530,24 @@ order is not guaranteed stable either. Every wire assertion unmarshals and compa
 `protocmp.Transform()` from `google.golang.org/protobuf/testing/protocmp`. A golden-string
 comparison passes locally and flakes in CI.
 
+### The `time.Local` ban is enforced by the linter, not by convention
+
+`make test-tz` alone does **not** catch every local-time leak: a `time.Now()` in a path
+whose tests assert epoch integers passes under both timezones. The ban therefore becomes
+a `forbidigo` rule in `.golangci.yml` prohibiting `time\.Local` and `time\.Now` outside
+`cmd/`, where the clock is legitimately read once and injected downward. A leak then
+fails `make lint` at the point it is written, rather than depending on a test happening
+to observe it.
+
 ### Commands
 
-Two new Makefile targets:
+Three new Makefile targets:
 
 - `make test-tz` — runs `go test ./...` under `TZ=UTC` and again under
   `TZ=Asia/Kathmandu`, and is folded into `make check`.
-- `make generate` — runs `sqlc generate`, and a `make generate-check` verifying the
-  committed output is current, so a hand-edited or stale generated file fails the build.
+- `make generate` — runs `sqlc generate`.
+- `make generate-check` — verifies the committed generated output is current, so a
+  hand-edited or stale generated file fails the build.
 
 ## 9. Dependencies
 
