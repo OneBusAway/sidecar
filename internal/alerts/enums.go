@@ -37,15 +37,17 @@ var (
 		"MEDICAL_EMERGENCY": gtfs.Alert_MEDICAL_EMERGENCY,
 	}
 	effects = map[string]gtfs.Alert_Effect{
-		"NO_SERVICE":         gtfs.Alert_NO_SERVICE,
-		"REDUCED_SERVICE":    gtfs.Alert_REDUCED_SERVICE,
-		"SIGNIFICANT_DELAYS": gtfs.Alert_SIGNIFICANT_DELAYS,
-		"DETOUR":             gtfs.Alert_DETOUR,
-		"ADDITIONAL_SERVICE": gtfs.Alert_ADDITIONAL_SERVICE,
-		"MODIFIED_SERVICE":   gtfs.Alert_MODIFIED_SERVICE,
-		"OTHER_EFFECT":       gtfs.Alert_OTHER_EFFECT,
-		"UNKNOWN_EFFECT":     gtfs.Alert_UNKNOWN_EFFECT,
-		"STOP_MOVED":         gtfs.Alert_STOP_MOVED,
+		"NO_SERVICE":          gtfs.Alert_NO_SERVICE,
+		"REDUCED_SERVICE":     gtfs.Alert_REDUCED_SERVICE,
+		"SIGNIFICANT_DELAYS":  gtfs.Alert_SIGNIFICANT_DELAYS,
+		"DETOUR":              gtfs.Alert_DETOUR,
+		"ADDITIONAL_SERVICE":  gtfs.Alert_ADDITIONAL_SERVICE,
+		"MODIFIED_SERVICE":    gtfs.Alert_MODIFIED_SERVICE,
+		"OTHER_EFFECT":        gtfs.Alert_OTHER_EFFECT,
+		"UNKNOWN_EFFECT":      gtfs.Alert_UNKNOWN_EFFECT,
+		"STOP_MOVED":          gtfs.Alert_STOP_MOVED,
+		"NO_EFFECT":           gtfs.Alert_NO_EFFECT,
+		"ACCESSIBILITY_ISSUE": gtfs.Alert_ACCESSIBILITY_ISSUE,
 	}
 	severities = map[string]gtfs.Alert_SeverityLevel{
 		"UNKNOWN_SEVERITY": gtfs.Alert_UNKNOWN_SEVERITY,
