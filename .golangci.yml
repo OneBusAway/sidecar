@@ -7,6 +7,7 @@ linters:
     - bodyclose
     - copyloopvar
     - errorlint
+    - forbidigo
     - gocritic
     - misspell
     - nilerr
@@ -21,6 +22,13 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^time\.Local$'
+          msg: "time.Local is banned outside cmd/: timestamps are absolute instants (see design spec §2.3)"
+        - pattern: '^time\.Now$'
+          msg: "time.Now is banned outside cmd/: inject the clock so tests are deterministic (see design spec §2.3)"
     govet:
       enable-all: true
       disable:
@@ -50,6 +58,14 @@ linters:
         linters:
           - errcheck
           - unparam
+      # Entrypoints legitimately read the clock once and inject it downward.
+      - path: '^cmd/'
+        linters:
+          - forbidigo
+      # Tests construct fixed instants and occasionally need a real clock.
+      - path: '_test\.go$'
+        linters:
+          - forbidigo
 
 formatters:
   enable:

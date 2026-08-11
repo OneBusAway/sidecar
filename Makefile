@@ -80,7 +80,7 @@ lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 ## --- Aggregates ------------------------------------------------------------
 
 .PHONY: check
-check: fmt-check vet lint test ## Everything CI runs
+check: fmt-check vet lint test test-tz ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
@@ -98,3 +98,16 @@ require-golangci-lint:
 .PHONY: tools
 tools: ## Install pinned development tooling
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+.PHONY: generate
+generate: ## Regenerate sqlc code
+	sqlc generate
+
+.PHONY: generate-check
+generate-check: ## Fail if committed sqlc output is stale
+	sqlc diff
+
+.PHONY: test-tz
+test-tz: ## Run tests under two timezones to catch local-time leaks
+	TZ=UTC go test ./...
+	TZ=Asia/Kathmandu go test ./...

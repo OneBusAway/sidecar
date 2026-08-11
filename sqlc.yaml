@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "internal/store/sqlite/migrations"
+    queries: "internal/store/sqlite/queries"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/store/sqlite/gen"
+        emit_empty_slices: true
