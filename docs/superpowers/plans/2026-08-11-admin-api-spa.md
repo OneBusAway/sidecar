@@ -1592,6 +1592,8 @@ git commit -m "Scaffold the SvelteKit admin SPA and wire it into make"
 
 - [ ] **Step 1: `types.ts`** — mirror the wire shapes exactly (`Alert` with `region_id`, `start_time: string`, `end_time: string | null`, `translations: Translation[]`; `Region` with `default_agency_id`, `timezone`; keep snake_case — no mapping layer to drift).
 
+  **Trap:** `GET /alerts` (the list) always returns `translations: []` on every item, whatever the alert really has — only `GET /alerts/{id}` populates them. An empty array on a list item means "not loaded", never "none exist". Never render a translation count or a "no translations" state from a list response. Put this warning in a comment on the `Alert` type itself, where a reader of `types.ts` will see it.
+
 - [ ] **Step 2: Failing datetime tests** (`datetime.test.ts`, vitest — this module is the one place the CLI's timezone lessons could regress in the browser):
 
 ```ts

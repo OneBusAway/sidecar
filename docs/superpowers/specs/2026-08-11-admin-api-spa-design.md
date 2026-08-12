@@ -257,6 +257,11 @@ GET    /session                            whoami → 200 {username} | 401
 
 GET    /alerts?region=N                    list; drafts and test alerts included —
                                            this is the authoring view, not the feed.
+                                           List items ALWAYS carry `translations: []`
+                                           regardless of what the alert actually has;
+                                           only GET /alerts/{id} populates them. An
+                                           empty array here means "not loaded", never
+                                           "none exist".
                                            region absent → all regions; non-integer
                                            → 400; unknown id → 200 [] (it is a
                                            filter, not a resource lookup — and
