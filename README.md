@@ -136,7 +136,8 @@ in front of sidecar must:
   -- nginx's default rewrites `Host` to the upstream address, which makes
   every admin write look cross-site and get rejected with a 403).
 - Set `X-Forwarded-Proto: https` when terminating TLS, or the session
-  cookie is issued without `Secure` and browsers will not send it back over
+  cookie is issued without `Secure`, so it will also be sent over any
+  plain-HTTP connection to the same host instead of being restricted to
   HTTPS.
 
 ### Development
@@ -157,12 +158,8 @@ the cross-site guard exists to do.
 
 `make web` rebuilds the embedded copy that ships inside the `sidecar`
 binary from `web/admin`'s current source; `make build` and the `test`/
-`test-tz`/`test-race`/`check` targets all run it for you first. A CI
-workflow that runs bare `go test ./...` (or otherwise skips `make web`)
-will fail the embed regression test in
-`internal/httpapi/adminui/adminui_test.go`, which needs a populated
-`dist/`: route CI through `make check`, or run `make web` before any Go
-test step.
+`test-tz`/`test-race`/`check` targets all run it for you first (see the CI
+note in the "## Development" section below if you're wiring up a workflow).
 
 ## Development
 
@@ -175,7 +172,13 @@ make run     # build and run the server
 make help    # list all targets
 ```
 
-Run `make check` before opening a pull request.
+Run `make check` before opening a pull request. There is no CI workflow in
+this repo yet (no `.github/`), but whoever adds one needs to route it
+through `make check`, or run `make web` before any `go test` step: the Go
+suite includes an embed regression test
+(`internal/httpapi/adminui/adminui_test.go`) that needs a populated
+`internal/httpapi/adminui/dist/`, and a bare `go test ./...` against the
+empty, gitignored `dist/` fails it.
 
 ## License
 
