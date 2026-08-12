@@ -14,6 +14,13 @@ import (
 	"syscall"
 	"time"
 
+	// time/tzdata embeds the IANA timezone database into the binary, so
+	// time.LoadLocation works in a scratch container with no system tzdata
+	// -- PATCH /api/admin/v1/regions/{id} depends on it to reject a bad
+	// timezone at the point of the mistake, and would otherwise reject every
+	// valid one on such a host.
+	_ "time/tzdata"
+
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"

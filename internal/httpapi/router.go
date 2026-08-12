@@ -109,28 +109,67 @@ func NewRouter(deps Deps) http.Handler {
 	return mux
 }
 
+// adminRoute is one admin API route plus the middleware it must carry.
+//
+// The routes are a table rather than a run of mux.Handle calls for one
+// reason: http.ServeMux cannot be enumerated, so a route registered without
+// requireSession would be invisible to every test in this package. The table
+// is the thing a test can walk, which is what makes "every admin route needs a
+// session" checkable rather than merely intended.
+type adminRoute struct {
+	pattern string
+	handler http.HandlerFunc
+	// requiresSession is false for exactly two routes, both deliberate and
+	// both documented at their entry in adminRoutes.
+	requiresSession bool
+}
+
+// adminRoutes is the admin API route table (design spec §5). It takes Deps so
+// the handlers close over the same dependencies the router was built with;
+// a caller that only wants to inspect the table can pass a zero Deps.
+func adminRoutes(deps Deps) []adminRoute {
+	session := &sessionHandler{deps: deps}
+	alertsAdmin := &adminAlertsHandler{deps: deps}
+	regionsAdmin := &adminRegionsHandler{deps: deps}
+
+	return []adminRoute{
+		// Login has no session to require yet; the cross-site guard is what
+		// protects it (design spec §4.4).
+		{"POST /api/admin/v1/session", session.login, false},
+		// Logout sits outside requireSession so it stays idempotent: the SPA
+		// calls it to tidy up after a 401, and answering that with another
+		// 401 gives the client nothing it can act on. It is not a hole -- the
+		// handler only ever deletes the session named by the token the caller
+		// presented, and the cross-site guard still covers it.
+		{"DELETE /api/admin/v1/session", session.logout, false},
+		{"GET /api/admin/v1/session", session.whoami, true},
+
+		{"GET /api/admin/v1/alerts", alertsAdmin.list, true},
+		{"POST /api/admin/v1/alerts", alertsAdmin.create, true},
+		{"GET /api/admin/v1/alerts/{id}", alertsAdmin.get, true},
+		{"PATCH /api/admin/v1/alerts/{id}", alertsAdmin.patch, true},
+		{"DELETE /api/admin/v1/alerts/{id}", alertsAdmin.delete, true},
+		{"POST /api/admin/v1/alerts/{id}/publish", alertsAdmin.setPublished(true), true},
+		{"POST /api/admin/v1/alerts/{id}/unpublish", alertsAdmin.setPublished(false), true},
+		{"PUT /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, true},
+		{"DELETE /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, true},
+
+		{"GET /api/admin/v1/regions", regionsAdmin.list, true},
+		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, true},
+	}
+}
+
 // registerAdminRoutes mounts the admin JSON API. Every route passes through
 // crossSiteGuard -- including POST /session, which is the whole reason the
 // guard is separate from requireSession (design spec §4.4) -- and everything
-// except login and logout also requires a live session; see the note on
-// DELETE below for why logout is not behind requireSession.
+// except login and logout also requires a live session.
 func registerAdminRoutes(mux *http.ServeMux, deps Deps) {
-	session := &sessionHandler{deps: deps}
 	mw := &authMiddleware{deps: deps}
-
-	guarded := func(h http.HandlerFunc) http.Handler {
-		return crossSiteGuard(deps.Logger, h)
+	for _, route := range adminRoutes(deps) {
+		var h http.Handler = route.handler
+		if route.requiresSession {
+			h = mw.requireSession(h)
+		}
+		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
-	authed := func(h http.HandlerFunc) http.Handler {
-		return crossSiteGuard(deps.Logger, mw.requireSession(h))
-	}
-
-	mux.Handle("POST /api/admin/v1/session", guarded(session.login))
-	// Logout sits outside requireSession so it stays idempotent: the SPA
-	// calls it to tidy up after a 401, and answering that with another 401
-	// gives the client nothing it can act on. It is not a hole -- the handler
-	// only ever deletes the session named by the token the caller presented,
-	// and the cross-site guard still covers it.
-	mux.Handle("DELETE /api/admin/v1/session", guarded(session.logout))
-	mux.Handle("GET /api/admin/v1/session", authed(session.whoami))
 }
