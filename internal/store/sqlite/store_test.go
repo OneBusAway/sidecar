@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestOpenMigrateAndRoundTrip(t *testing.T) {
@@ -40,6 +43,33 @@ func TestOpenMigrateAndRoundTrip(t *testing.T) {
 	}
 	if _, err := store.Alerts().Get(ctx, 999); !errors.Is(err, alerts.ErrNotFound) {
 		t.Errorf("Get(999) error = %v, want alerts.ErrNotFound", err)
+	}
+}
+
+// TestMigrateCreatesAuthTables checks that migrating creates the users and
+// sessions tables. It opens its own *sql.DB on the path OpenAt returns
+// rather than going through store.Regions()/store.Alerts(): this test file
+// is package sqlite_test (external), so it cannot reach the Store's
+// unexported db field, and Store intentionally has no public DB() accessor.
+func TestMigrateCreatesAuthTables(t *testing.T) {
+	t.Parallel()
+
+	path, _ := sqlitetest.OpenAt(t)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, table := range []string{"users", "sessions"} {
+		var n int
+		err := db.QueryRowContext(ctx,
+			"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&n)
+		if err != nil || n != 1 {
+			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
+		}
 	}
 }
 
