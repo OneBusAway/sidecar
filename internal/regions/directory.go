@@ -1,0 +1,211 @@
+package regions
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// ClientOptions bounds a directory fetch. Every field here is a security
+// control, not a tuning knob: this is an unauthenticated ingest path from
+// infrastructure the operator does not control, fetched at boot and hourly,
+// whose contents populate the serving path.
+type ClientOptions struct {
+	// Timeout bounds the whole request. Go's default http.Client has no
+	// timeout at all, so a tarpitting host would otherwise hang the fetch
+	// forever.
+	Timeout time.Duration
+
+	// MaxBytes caps the response body. The real document is ~100 KB; an
+	// unbounded read hands a hostile or compromised host a free memory
+	// amplifier.
+	MaxBytes int64
+
+	// MaxEntries caps the number of directory entries accepted in one
+	// document.
+	MaxEntries int
+
+	// MaxFieldLen caps the length of every stored string field.
+	MaxFieldLen int
+
+	// HTTPClient, if set, is used instead of a client constructed from
+	// Timeout. Tests supply this to point at an httptest server; production
+	// callers normally leave it nil.
+	HTTPClient *http.Client
+}
+
+// DefaultClientOptions are sized for the real directory (~100 KB, ~50
+// entries).
+//
+// These are not tuning knobs, they are the defence. This is an
+// unauthenticated ingest path from infrastructure the operator does not
+// control, running at boot and hourly, whose contents populate the serving
+// path.
+func DefaultClientOptions() ClientOptions {
+	return ClientOptions{
+		Timeout:     30 * time.Second, // Go's default client has NO timeout
+		MaxBytes:    5 << 20,          // an unbounded read is a memory amplifier
+		MaxEntries:  10_000,
+		MaxFieldLen: 512,
+	}
+}
+
+// Client fetches and validates the regions directory document.
+type Client struct {
+	url  string
+	opts ClientOptions
+	http *http.Client
+}
+
+// NewClient builds a Client for the directory document at url. If
+// opts.HTTPClient is nil, a client is constructed using opts.Timeout.
+func NewClient(url string, opts ClientOptions) *Client {
+	httpClient := opts.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: opts.Timeout}
+	}
+	return &Client{url: url, opts: opts, http: httpClient}
+}
+
+// directoryResponse is the top-level shape of regions-v3.json:
+//
+//	{"version":3,"code":200,"text":"OK","data":{"list":[ ... ]}}
+//
+// The real document carries many more fields (bounds, analytics ids, contact
+// info, ...) that this type does not name; encoding/json ignores unknown
+// fields by default, so they are dropped harmlessly.
+type directoryResponse struct {
+	Data struct {
+		List []directoryEntry `json:"list"`
+	} `json:"data"`
+}
+
+// directoryEntry is one region as the directory document represents it. The
+// document carries no timezone and no default agency id -- those are locally
+// managed, which is why they are absent here too.
+type directoryEntry struct {
+	ID             int64  `json:"id"`
+	RegionName     string `json:"regionName"`
+	OBABaseURL     string `json:"obaBaseUrl"`
+	SidecarBaseURL string `json:"sidecarBaseUrl"`
+	Language       string `json:"language"`
+	Active         bool   `json:"active"`
+}
+
+// Fetch downloads and parses the directory document, returning the entries
+// that pass validation. An individual malformed entry is skipped rather than
+// failing the whole fetch, so one bad row from upstream cannot block a
+// refresh that would otherwise succeed. Fetch never mutates any store; that
+// is Sync's job.
+func (c *Client) Fetch(ctx context.Context) ([]Region, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("regions: build request for %s: %w", c.url, err)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("regions: fetch %s: %w", c.url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("regions: fetch %s: unexpected status %d", c.url, resp.StatusCode)
+	}
+
+	// Read at most MaxBytes+1: if the extra byte is present, the body
+	// exceeded the cap and we reject it outright rather than parsing a
+	// truncated document.
+	limited := io.LimitReader(resp.Body, c.opts.MaxBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("regions: read response from %s: %w", c.url, err)
+	}
+	if int64(len(body)) > c.opts.MaxBytes {
+		return nil, fmt.Errorf("regions: response from %s exceeds %d bytes", c.url, c.opts.MaxBytes)
+	}
+
+	var doc directoryResponse
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("regions: decode response from %s: %w", c.url, err)
+	}
+
+	if len(doc.Data.List) > c.opts.MaxEntries {
+		return nil, fmt.Errorf("regions: response from %s has %d entries, exceeds max %d", c.url, len(doc.Data.List), c.opts.MaxEntries)
+	}
+
+	seen := make(map[int64]bool, len(doc.Data.List))
+	out := make([]Region, 0, len(doc.Data.List))
+	for _, e := range doc.Data.List {
+		reg, ok := c.validate(e, seen)
+		if !ok {
+			continue
+		}
+		out = append(out, reg)
+	}
+	return out, nil
+}
+
+// validate applies the per-entry rules and returns the sanitized Region. An
+// entry that fails any rule -- including being a repeat of an id already
+// seen earlier in this document -- is reported invalid (ok=false) rather
+// than erroring the whole fetch. On success, e.ID is recorded in seen so a
+// later duplicate in the same document is rejected.
+func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) {
+	if e.ID < 0 {
+		return Region{}, false
+	}
+	if seen[e.ID] {
+		return Region{}, false
+	}
+
+	// Strip ASCII control characters from the name: it is later printed to
+	// an admin's terminal by `sidecar-admin region list`, where escape
+	// sequences are an injection vector.
+	name := stripControlChars(e.RegionName)
+	if name == "" || e.OBABaseURL == "" {
+		return Region{}, false
+	}
+
+	for _, s := range []string{name, e.OBABaseURL, e.SidecarBaseURL, e.Language} {
+		if len(s) > c.opts.MaxFieldLen {
+			return Region{}, false
+		}
+	}
+
+	seen[e.ID] = true
+	return Region{
+		ID:             e.ID,
+		Name:           name,
+		OBABaseURL:     e.OBABaseURL,
+		SidecarBaseURL: e.SidecarBaseURL,
+		Language:       e.Language,
+		Active:         e.Active,
+	}, true
+}
+
+// stripControlChars removes ASCII control characters (0x00-0x1F and the 0x7F
+// DEL) from s, leaving everything else -- including non-ASCII text --
+// untouched.
+func stripControlChars(s string) string {
+	if !strings.ContainsFunc(s, isASCIIControl) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if isASCIIControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isASCIIControl(r rune) bool {
+	return r < 0x20 || r == 0x7f
+}
