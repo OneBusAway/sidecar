@@ -72,6 +72,66 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
 		}
 	}
+
+	// Every timestamp is epoch seconds in an INTEGER column, never DATETIME or
+	// TEXT. Nothing else in the suite can hold this: SQLite's dynamic typing
+	// round-trips an int64 unchanged through a TEXT- or DATETIME-declared
+	// column, so the storetest conformance suite stays green against a
+	// mis-declared schema and cannot be the check. Reading the declared types
+	// back out of the catalog is the only assertion that bites, and it is
+	// engine-specific, which is why it lives here rather than in storetest.
+	wantIntegerColumns := map[string][]string{
+		"users":    {"created_at", "updated_at"},
+		"sessions": {"created_at", "expires_at"},
+	}
+	for table, columns := range wantIntegerColumns {
+		types, err := columnTypes(ctx, db, table)
+		if err != nil {
+			t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+		}
+		for _, column := range columns {
+			got, ok := types[column]
+			if !ok {
+				t.Errorf("%s.%s missing after migrate", table, column)
+				continue
+			}
+			if got != "INTEGER" {
+				t.Errorf("%s.%s declared type = %q, want INTEGER (epoch seconds, never DATETIME/TEXT)", table, column, got)
+			}
+		}
+	}
+}
+
+// columnTypes returns each column's declared type for one table, as SQLite
+// recorded it at CREATE TABLE time.
+func columnTypes(ctx context.Context, db *sql.DB, table string) (map[string]string, error) {
+	// PRAGMA does not accept a bound parameter for the table name; the values
+	// here are test-local literals, not input.
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			declType   string
+			notNull    int
+			defaultVal sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &declType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return nil, err
+		}
+		out[name] = declType
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // TestFeed exercises Feed through the generated Go bindings rather than by

@@ -277,10 +277,15 @@ func testCreateRejectsInvalidUsername(t *testing.T, newRepo newAuthRepoFunc) {
 }
 
 // testCreateRejectsEmptyPasswordHash asserts the repository refuses to store a
-// user with no password hash. The column is NOT NULL but not non-empty, so
-// without this check a caller that forgot to hash would create an account
-// whose verification step compares against "" -- a login shape nobody
-// intended, produced silently.
+// user with no password hash, on BOTH paths that write the column. It is NOT
+// NULL but not non-empty, so without these checks a caller that forgot to hash
+// would create -- or downgrade -- an account whose verification step compares
+// against "", a login shape nobody intended, produced silently.
+//
+// The UpdatePassword half matters as much as the create half: `user passwd` is
+// the path that turns an existing, working account into that state, and a
+// future Postgres adapter that implemented only the create-side guard would
+// otherwise pass this whole suite with the asymmetry intact.
 func testCreateRejectsEmptyPasswordHash(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
 	ctx := context.Background()
@@ -290,6 +295,18 @@ func testCreateRejectsEmptyPasswordHash(t *testing.T, newRepo newAuthRepoFunc) {
 	}
 	if _, err := repo.GetUserByUsername(ctx, "admin"); !errors.Is(err, auth.ErrNotFound) {
 		t.Errorf("GetUserByUsername after a rejected create = %v, want auth.ErrNotFound (no row may exist)", err)
+	}
+
+	created := mustCreateUser(t, repo, "admin")
+	if err := repo.UpdatePassword(ctx, "admin", "", base.Add(time.Hour)); err == nil {
+		t.Error("UpdatePassword with an empty password hash: want error, got nil")
+	}
+	got, err := repo.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername after a rejected UpdatePassword: %v", err)
+	}
+	if got.PasswordHash != created.PasswordHash {
+		t.Errorf("PasswordHash = %q after a rejected UpdatePassword, want unchanged %q", got.PasswordHash, created.PasswordHash)
 	}
 }
 
@@ -643,12 +660,19 @@ func testPasswordUpdatePersists(t *testing.T, newRepo newAuthRepoFunc) {
 }
 
 // testTimestampsSurvive32BitBoundary stores instants a day past the 32-bit
-// signed overflow boundary (2038-01-19) and requires them back exactly. The
-// migration test asserts only that the users and sessions tables exist -- it
-// checks no column types -- so this subtest is what holds the epoch-seconds
-// invariant: a column typed as 32-bit INTEGER (which is what Postgres INTEGER
-// means) would truncate these, and a DATETIME/text column would round-trip a
-// reformatted string rather than the instant written.
+// signed overflow boundary (2038-01-19) and requires them back exactly. It
+// catches a driver or adapter that truncates epoch seconds to 32 bits -- a
+// Postgres INTEGER column, or an adapter narrowing through int32 -- both in
+// storage and in the expiry comparison.
+//
+// It is NOT a schema assertion, and must not be read as one: SQLite's dynamic
+// typing round-trips these values unchanged through a column mis-declared as
+// TEXT or DATETIME (the adapter binds an int64, affinity converts it, and
+// database/sql scans it straight back), and the expires_at comparison survives
+// too because affinity converts the parameter to match and every value here is
+// a same-width decimal, so lexicographic order happens to agree with numeric
+// order. The engine-specific column types are pinned separately, by the
+// PRAGMA table_info assertions in the sqlite package's migration test.
 func testTimestampsSurvive32BitBoundary(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
 	ctx := context.Background()
