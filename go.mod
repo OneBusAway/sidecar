@@ -10,7 +10,7 @@ require (
 	modernc.org/sqlite v1.56.0
 )
 
-require golang.org/x/term v0.45.0 // indirect
+require golang.org/x/term v0.45.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

@@ -33,8 +33,6 @@ const (
 // this never operates against an unknown schema. `migrate up` is still
 // useful on its own for scripted, explicit use (e.g. a deploy step) even
 // though it is redundant here.
-//
-//nolint:unparam // stdin is threaded through in this commit; the next commit's runUser dispatch consumes it.
 func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	fs := flag.NewFlagSet("sidecar-admin", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -53,7 +51,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing command; expected region, alert, or migrate")
+		return errors.New("missing command; expected region, alert, migrate, or user")
 	}
 
 	store, err := sqlite.Open(*dbPath)
@@ -90,8 +88,10 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 		return runAlert(ctx, stdout, store, now, cmdArgs)
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
+	case "user":
+		return runUser(ctx, stdin, stdout, stderr, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown command %q; expected region, alert, or migrate", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, migrate, or user", cmd)
 	}
 }
 
