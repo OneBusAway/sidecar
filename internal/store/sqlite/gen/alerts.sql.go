@@ -88,6 +88,23 @@ func (q *Queries) DeleteAlert(ctx context.Context, id int64) (int64, error) {
 	return id_2, err
 }
 
+const deleteAlertTranslations = `-- name: DeleteAlertTranslations :execrows
+DELETE FROM alert_translations WHERE alert_id = ? AND language = ?
+`
+
+type DeleteAlertTranslationsParams struct {
+	AlertID  int64
+	Language string
+}
+
+func (q *Queries) DeleteAlertTranslations(ctx context.Context, arg DeleteAlertTranslationsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteAlertTranslations, arg.AlertID, arg.Language)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const feedAlerts = `-- name: FeedAlerts :many
 SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
 WHERE region_id = ?1

@@ -87,3 +87,6 @@ ON CONFLICT (alert_id, language, field) DO UPDATE SET
   text          = excluded.text,
   source_sha256 = excluded.source_sha256,
   updated_at    = excluded.updated_at;
+
+-- name: DeleteAlertTranslations :execrows
+DELETE FROM alert_translations WHERE alert_id = ? AND language = ?;

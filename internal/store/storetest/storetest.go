@@ -54,6 +54,8 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("CreateRejectsEmptyAgencyID", func(t *testing.T) { testCreateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("UpdateRejectsEmptyAgencyID", func(t *testing.T) { testUpdateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
+	t.Run("AlertTimestampsPopulated", func(t *testing.T) { testAlertTimestampsPopulated(t, newStore) })
+	t.Run("DeleteTranslationRemovesBothFields", func(t *testing.T) { testDeleteTranslationRemovesBothFields(t, newStore) })
 }
 
 // putRegion inserts a minimal directory-sourced region with the given id.
@@ -832,5 +834,98 @@ func testUpsertTranslationNormalizesLanguage(t *testing.T, newStore newStoreFunc
 	}
 	if matches[0].Text != "Segundo" {
 		t.Errorf("Text = %q, want %q (second upsert should win)", matches[0].Text, "Segundo")
+	}
+}
+
+// testAlertTimestampsPopulated asserts that Get surfaces CreatedAt/UpdatedAt
+// read back from storage as UTC instants -- an instant-only comparison (e.g.
+// Equal) would pass even if the adapter attached the wrong zone, so this
+// checks .Location() explicitly -- and that Update advances UpdatedAt while
+// leaving CreatedAt untouched. A future Postgres adapter inherits this
+// requirement because it runs against this same suite.
+func testAlertTimestampsPopulated(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := repo.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, base)
+	}
+	if got.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt.Location() = %v, want %v", got.CreatedAt.Location(), time.UTC)
+	}
+	if !got.UpdatedAt.Equal(base) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, base)
+	}
+	if got.UpdatedAt.Location() != time.UTC {
+		t.Errorf("UpdatedAt.Location() = %v, want %v", got.UpdatedAt.Location(), time.UTC)
+	}
+
+	later := base.Add(time.Hour)
+	newHeader := "Updated"
+	updated, err := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &newHeader}, later)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !updated.UpdatedAt.Equal(later) {
+		t.Errorf("UpdatedAt after Update = %v, want %v (must advance)", updated.UpdatedAt, later)
+	}
+	if !updated.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt after Update = %v, want unchanged %v", updated.CreatedAt, base)
+	}
+}
+
+// testDeleteTranslationRemovesBothFields asserts that DeleteTranslation
+// removes every field row for one (alert, language) pair -- both header and
+// description -- and normalizes the language it is given: the test passes
+// "ES" specifically to prove that, since the schema stores the normalized
+// "es" the earlier upserts wrote. A second delete against the same
+// now-empty language must report alerts.ErrNotFound rather than silently
+// succeeding a second time.
+func testDeleteTranslationRemovesBothFields(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	a, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "es", Field: alerts.FieldHeader, Text: "Encabezado",
+		SourceSHA256: alerts.SourceHash("Header"),
+	}, base); err != nil {
+		t.Fatalf("UpsertTranslation(header): %v", err)
+	}
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "es", Field: alerts.FieldDescription, Text: "Detalle",
+		SourceSHA256: alerts.SourceHash("Description"),
+	}, base); err != nil {
+		t.Fatalf("UpsertTranslation(description): %v", err)
+	}
+
+	if err = repo.DeleteTranslation(ctx, a.ID, "ES"); err != nil {
+		t.Fatalf("DeleteTranslation(ES): %v", err)
+	}
+
+	got, err := repo.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Translations) != 0 {
+		t.Fatalf("Translations after DeleteTranslation = %+v, want none", got.Translations)
+	}
+
+	if err = repo.DeleteTranslation(ctx, a.ID, "ES"); !errors.Is(err, alerts.ErrNotFound) {
+		t.Errorf("second DeleteTranslation(ES) = %v, want alerts.ErrNotFound", err)
 	}
 }

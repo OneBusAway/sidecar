@@ -277,6 +277,8 @@ func alertFromRow(a gen.Alert) alerts.Alert {
 		EndTime:         nullUnixToTime(a.EndTime),
 		Published:       a.Published,
 		IsTest:          a.IsTest,
+		CreatedAt:       unixToTime(a.CreatedAt),
+		UpdatedAt:       unixToTime(a.UpdatedAt),
 	}
 }
 
@@ -553,6 +555,24 @@ func (r *alertRepo) UpsertTranslation(ctx context.Context, alertID int64, t aler
 		UpdatedAt:    ts,
 	}); err != nil {
 		return fmt.Errorf("sqlite: upsert translation for alert %d: %w", alertID, err)
+	}
+	return nil
+}
+
+// DeleteTranslation removes every field row for one (alert, language) pair.
+// It normalizes language itself for the same reason UpsertTranslation does:
+// the schema's language column is case-sensitive, so an un-normalized
+// caller-supplied tag would silently match zero rows against the normalized
+// values UpsertTranslation actually wrote.
+func (r *alertRepo) DeleteTranslation(ctx context.Context, alertID int64, language string) error {
+	n, err := r.q.DeleteAlertTranslations(ctx, gen.DeleteAlertTranslationsParams{
+		AlertID: alertID, Language: alerts.NormalizeLanguage(language),
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: delete translations for alert %d: %w", alertID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("sqlite: delete translations for alert %d: %w", alertID, alerts.ErrNotFound)
 	}
 	return nil
 }
