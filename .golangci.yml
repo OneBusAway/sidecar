@@ -45,6 +45,11 @@ linters:
 
   exclusions:
     generated: strict
+    paths:
+      # web/admin/node_modules holds npm dependencies, a few of which vendor
+      # Go source of their own (flatted, for one). The go tool skips
+      # node_modules automatically; golangci-lint does not.
+      - '^web/'
     presets:
       # Note: the "comments" preset is deliberately omitted — it suppresses
       # revive's exported/package-comments rules, which we want enforced.
@@ -77,3 +82,5 @@ formatters:
         - github.com/OneBusAway/sidecar
   exclusions:
     generated: strict
+    paths:
+      - '^web/'

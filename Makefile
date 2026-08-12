@@ -5,6 +5,8 @@ CMD         := ./cmd/sidecar
 BIN_DIR     := bin
 COVER_FILE  := coverage.out
 GO          ?= go
+WEB_DIR     := web/admin
+EMBED_DIR   := internal/httpapi/adminui/dist
 
 # Pin the linter so local runs and CI agree.
 GOLANGCI_LINT_VERSION := v2.12.2
@@ -19,8 +21,18 @@ help: ## Show this help
 ## --- Build & run -----------------------------------------------------------
 
 .PHONY: build
-build: ## Build the sidecar binary into bin/
+build: web ## Build the sidecar binary into bin/ (SPA first, so it is embedded)
 	$(GO) build -o $(BIN_DIR)/$(BINARY) $(CMD)
+
+.PHONY: web
+web: ## Build the admin SPA into the Go embed directory
+	cd $(WEB_DIR) && npm ci && npm run build
+	find $(EMBED_DIR) -mindepth 1 ! -name '.gitkeep' -delete
+	cp -R $(WEB_DIR)/build/. $(EMBED_DIR)/
+
+.PHONY: web-check
+web-check: ## Frontend checks: svelte-check, prettier, eslint, vitest
+	cd $(WEB_DIR) && npm ci && npm run check && npm run lint && npm run test:unit
 
 .PHONY: run
 run: ## Run the sidecar server (make run ARGS="--addr :8080")
@@ -57,7 +69,9 @@ fmt: ## Format all Go source
 
 .PHONY: fmt-check
 fmt-check: ## Fail if any Go source is unformatted
-	@unformatted="$$(gofmt -l .)"; \
+	@# Prune web/: npm dependencies vendor Go source we neither own nor
+	@# format (the go tool skips node_modules on its own; gofmt does not).
+	@unformatted="$$(find . -path ./web -prune -o -name '*.go' -print | xargs gofmt -l)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "These files need gofmt:"; \
 		echo "$$unformatted"; \
@@ -79,8 +93,12 @@ lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 
 ## --- Aggregates ------------------------------------------------------------
 
+# `web` comes first because the Go tests include an embed assertion that
+# needs a populated dist/ (see internal/httpapi/adminui/adminui_test.go);
+# on a clean checkout `test` would otherwise fail before web-check ever ran.
+# Prerequisite order only holds for a serial make -- do not run this with -j.
 .PHONY: check
-check: fmt-check vet lint test test-tz test-race ## Everything CI runs
+check: web fmt-check vet lint test test-tz test-race web-check ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
