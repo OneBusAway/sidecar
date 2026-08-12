@@ -1,9 +1,11 @@
 // Package httpapi is the HTTP layer for the sidecar: the rider-facing feeds,
-// which are unauthenticated by design, and the admin API behind a session
-// cookie. It wires the repositories into stdlib handlers; nothing in this
-// package reads the wall clock or sleeps directly, since the design spec bans
-// time.Now outside cmd/ (see internal/alerts/feed.go) and the login failure
-// delay has to be observable to tests.
+// which are unauthenticated by design, the admin API behind a session
+// cookie, and the admin SPA itself (also unauthenticated -- the login page
+// lives there, and everything sensitive is behind the API). It wires the
+// repositories into stdlib handlers; nothing in this package reads the wall
+// clock or sleeps directly, since the design spec bans time.Now outside
+// cmd/ (see internal/alerts/feed.go) and the login failure delay has to be
+// observable to tests.
 package httpapi
 
 import (
@@ -95,6 +97,18 @@ func NewRouter(deps Deps) http.Handler {
 	// deliberately bypass every admin middleware.
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
+
+	// The admin SPA is registered independently of the admin API below, and
+	// deliberately outside registerAdminRoutes / adminRoutes: it is served
+	// unauthenticated (the login page is part of it) and must never pass
+	// through crossSiteGuard or requireSession, both of which assume a JSON
+	// API. Nil AdminUI means the binary was built without it, so the routes
+	// are simply not registered.
+	if deps.AdminUI != nil {
+		h := &spaHandler{fs: deps.AdminUI, logger: deps.Logger}
+		mux.HandleFunc("GET /admin", h.serve)
+		mux.HandleFunc("GET /admin/{path...}", h.serve)
+	}
 
 	// The admin routes dereference all three of these on the first request that
 	// reaches them, and a nil-deref inside a handler is recovered by net/http

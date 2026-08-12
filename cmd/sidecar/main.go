@@ -22,6 +22,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/OneBusAway/sidecar/internal/httpapi"
+	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 )
@@ -35,6 +36,14 @@ const (
 	// shutdownTimeout bounds how long a graceful shutdown waits for
 	// in-flight requests to finish before giving up.
 	shutdownTimeout = 10 * time.Second
+
+	// adminFailDelay is the constant pause httpapi.Deps.FailDelay applies to
+	// every failed login: a brake on online password guessing (design spec
+	// §4.3). httpapi.NewRouter does not default this field -- an omission
+	// here would silently disable the brake with no panic and no failing
+	// test, so it is named and tested (see TestBuildDeps_WiresFailDelay)
+	// rather than inlined into the Deps literal below.
+	adminFailDelay = 500 * time.Millisecond
 )
 
 func main() {
@@ -113,16 +122,30 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
-		Deps: httpapi.Deps{
-			Alerts:  store.Alerts(),
-			Regions: store.Regions(),
-			Now:     time.Now,
-			Logger:  logger,
-		},
+		Deps: buildDeps(store, logger),
 	})
 
 	logger.Info("sidecar: listening", "addr", *addr)
 	return serve(ctx, server, logger)
+}
+
+// buildDeps assembles the httpapi.Deps the router needs. It is factored out
+// of run so a test can inspect the wired-up Deps directly -- in particular
+// FailDelay (see adminFailDelay's comment) -- without standing up a listener
+// or driving the process through signal handling. time.Now is read here,
+// not in httpapi, because cmd/ is the one place in this repo allowed to
+// touch the wall clock directly (design spec §2.3); everywhere else gets it
+// injected.
+func buildDeps(store *sqlite.Store, logger *slog.Logger) httpapi.Deps {
+	return httpapi.Deps{
+		Alerts:    store.Alerts(),
+		Regions:   store.Regions(),
+		Auth:      store.Auth(),
+		Now:       time.Now,
+		Logger:    logger,
+		AdminUI:   adminui.FS(),
+		FailDelay: adminFailDelay,
+	}
 }
 
 // serve runs server until ctx is cancelled (by SIGINT/SIGTERM), then shuts
