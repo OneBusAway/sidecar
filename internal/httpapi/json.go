@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -41,6 +42,15 @@ func serverErrorJSON(w http.ResponseWriter, logger *slog.Logger, op string, err 
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		// http.MaxBytesReader's error wraps a message written for a Go
+		// developer ("http: request body too large"), not for whoever hit
+		// this endpoint -- every other 4xx on this API is copy written for an
+		// operator, and this is the one place that was leaking Go internals
+		// instead.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return errors.New("request body too large")
+		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil

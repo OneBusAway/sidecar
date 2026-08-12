@@ -44,8 +44,8 @@ func configureGoose() error {
 	return gooseConfigureErr
 }
 
-// Store owns the database connection pool and hands out the two
-// repositories. It is safe for concurrent use.
+// Store owns the database connection pool and hands out the three
+// repositories: alerts, regions, and auth. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
 	q  *gen.Queries
@@ -301,6 +301,15 @@ func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Tim
 	if in.AgencyID == "" {
 		return alerts.Alert{}, errors.New("sqlite: create alert: agency id must not be empty")
 	}
+	// HeaderText is the one piece of text riders cannot do without:
+	// alerts.BuildFeed passes it straight through to the feed's
+	// alert_header_text with no fallback, so an empty value ships a
+	// header-less alert. The column is NOT NULL but not non-empty; enforcing
+	// it here, rather than trusting every caller to have checked already,
+	// protects every caller of this Repository.
+	if in.HeaderText == "" {
+		return alerts.Alert{}, errors.New("sqlite: create alert: header text must not be empty")
+	}
 	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
 		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
 	}
@@ -412,6 +421,14 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	// informed_entity{agency_id:""} in the feed that no OBA app matches.
 	if current.AgencyID == "" {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: agency id must not be empty", id)
+	}
+
+	// Same invariant Create enforces (see the comment there): alerts.BuildFeed
+	// passes HeaderText straight through with no fallback, so without this
+	// check Patch{HeaderText: &""} would succeed and blank the header of an
+	// already-published alert riders are reading right now.
+	if current.HeaderText == "" {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: header text must not be empty", id)
 	}
 
 	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {

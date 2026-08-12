@@ -1,5 +1,5 @@
-// Package storetest is the shared conformance suite for alerts and regions
-// repositories. It runs against the SQLite adapter today; when a Postgres
+// Package storetest is the shared conformance suite for the alerts, regions,
+// and auth repositories. It runs against the SQLite adapter today; when a Postgres
 // adapter is added it runs unchanged against that store too, which is what
 // makes database portability real rather than aspirational.
 //
@@ -53,6 +53,8 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("CreateRejectsInvalidWindow", func(t *testing.T) { testCreateRejectsInvalidWindow(t, newStore) })
 	t.Run("CreateRejectsEmptyAgencyID", func(t *testing.T) { testCreateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("UpdateRejectsEmptyAgencyID", func(t *testing.T) { testUpdateRejectsEmptyAgencyID(t, newStore) })
+	t.Run("CreateRejectsEmptyHeaderText", func(t *testing.T) { testCreateRejectsEmptyHeaderText(t, newStore) })
+	t.Run("UpdateRejectsEmptyHeaderText", func(t *testing.T) { testUpdateRejectsEmptyHeaderText(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
 	t.Run("AlertTimestampsPopulated", func(t *testing.T) { testAlertTimestampsPopulated(t, newStore) })
 	t.Run("DeleteTranslationRemovesBothFields", func(t *testing.T) { testDeleteTranslationRemovesBothFields(t, newStore) })
@@ -785,6 +787,56 @@ func testUpdateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
 	}
 	if got.AgencyID != created.AgencyID {
 		t.Errorf("AgencyID = %q after a rejected Update, want unchanged %q", got.AgencyID, created.AgencyID)
+	}
+}
+
+// testCreateRejectsEmptyHeaderText asserts that Create rejects an empty
+// HeaderText rather than storing it: alerts.BuildFeed passes HeaderText
+// straight through to the feed's alert_header_text with no fallback, so a
+// caller that reaches the repository directly (an HTTP admin API, a bulk
+// importer) -- not through the CLI, which validates independently -- must
+// get the same protection, or riders receive an alert with no header text. A
+// future Postgres adapter inherits this requirement because it runs against
+// this same suite.
+func testCreateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	in := newAlertIn(1, base)
+	in.HeaderText = ""
+	if _, err := repo.Create(ctx, in, base); err == nil {
+		t.Error("Create with empty HeaderText: want error, got nil")
+	}
+}
+
+// testUpdateRejectsEmptyHeaderText asserts that Update enforces the same
+// non-empty-HeaderText invariant Create does. The check was originally added
+// only to Create; Patch{HeaderText: &""} would otherwise succeed and blank
+// the header of an already-published alert riders are reading right now. A
+// future Postgres adapter inherits this requirement because it runs against
+// this same suite.
+func testUpdateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	empty := ""
+	if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &empty}, base.Add(time.Minute)); updateErr == nil {
+		t.Error("Update with empty HeaderText: want error, got nil")
+	}
+
+	got, err := repo.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.HeaderText != created.HeaderText {
+		t.Errorf("HeaderText = %q after a rejected Update, want unchanged %q", got.HeaderText, created.HeaderText)
 	}
 }
 

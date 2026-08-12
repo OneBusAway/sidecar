@@ -318,6 +318,64 @@ func TestUnknownCauseRejected(t *testing.T) {
 	assertNoAlerts(t, store, 1)
 }
 
+// TestAlertCreateEmptyHeaderRejected pins the CLI-level guard against
+// `--header ""`: the flag is seen (so the "requires --header" check does not
+// catch it), and without this check it would reach the repository, which now
+// rejects it too, but with a bare storage-layer message rather than one
+// naming the flag the author typed.
+func TestAlertCreateEmptyHeaderRejected(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40", "--timezone", "UTC"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+
+	_, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "",
+		"--start", "2026-08-15T14:00:00Z")
+	if err == nil {
+		t.Fatal("alert create with empty --header: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "--header") {
+		t.Errorf("error = %v, want it to name --header", err)
+	}
+	assertNoAlerts(t, store, 1)
+}
+
+// TestAlertEditEmptyHeaderRejected pins the CLI-level guard against
+// `--header ""` blanking the header of an already-published alert, mirroring
+// the existing --agency-id guard in alert edit.
+func TestAlertEditEmptyHeaderRejected(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40", "--timezone", "UTC"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+	stdout, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "Original",
+		"--start", "2026-08-15T14:00:00Z")
+	if err != nil {
+		t.Fatalf("alert create: %v", err)
+	}
+	id := parseCreatedID(t, stdout)
+
+	_, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(id, 10), "--header", "")
+	if editErr == nil {
+		t.Fatal("alert edit with empty --header: want error, got nil")
+	}
+	if !strings.Contains(editErr.Error(), "--header") {
+		t.Errorf("error = %v, want it to name --header", editErr)
+	}
+
+	got, gerr := store.Alerts().Get(context.Background(), id)
+	if gerr != nil {
+		t.Fatalf("Get: %v", gerr)
+	}
+	if got.HeaderText != "Original" {
+		t.Errorf("HeaderText = %q after a rejected edit, want unchanged %q", got.HeaderText, "Original")
+	}
+}
+
 func TestUnknownTimezoneRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)

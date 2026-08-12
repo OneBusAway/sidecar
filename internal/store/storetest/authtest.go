@@ -215,7 +215,7 @@ func testUsernameNormalizedOnWriteAndRead(t *testing.T, newRepo newAuthRepoFunc)
 }
 
 // testDuplicateUsernameIsErrUsernameTaken asserts the duplicate is reported as
-// the auth.ErrUsernameTaken sentinel, so `sidecar-admin user add` can print a
+// the auth.ErrUsernameTaken sentinel, so `sidecar-admin user create` can print a
 // useful message instead of a raw driver string. It also asserts the collision
 // survives case differences: normalization happens before the UNIQUE index
 // sees the value, so "ADMIN" must collide with an existing "admin" rather than
@@ -314,7 +314,7 @@ func testCreateRejectsEmptyPasswordHash(t *testing.T, newRepo newAuthRepoFunc) {
 // missing account as auth.ErrNotFound rather than returning nil. DeleteUser
 // and UpdatePassword run as :execrows statements that affect zero rows and
 // report no driver error, so without an explicit rows-affected check
-// `sidecar-admin user rm typo` would exit 0 and print nothing while the real
+// `sidecar-admin user delete typo` would exit 0 and print nothing while the real
 // account stayed live.
 func testUnknownUserIsErrNotFound(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
@@ -346,7 +346,7 @@ func testUnknownUserIsErrNotFound(t *testing.T, newRepo newAuthRepoFunc) {
 }
 
 // testListUsersOrderedByUsername asserts ListUsers returns a stable,
-// username-ordered result. `sidecar-admin user ls` prints it directly, and an
+// username-ordered result. `sidecar-admin user list` prints it directly, and an
 // unordered listing makes the output shuffle between invocations for no
 // reason the operator can see.
 func testListUsersOrderedByUsername(t *testing.T, newRepo newAuthRepoFunc) {
@@ -541,7 +541,7 @@ func testDeleteExpiredSessionsCount(t *testing.T, newRepo newAuthRepoFunc) {
 }
 
 // testUserDeleteCascadesToSessions asserts that removing a user removes their
-// sessions with them. Without the cascade, `sidecar-admin user rm` would leave
+// sessions with them. Without the cascade, `sidecar-admin user delete` would leave
 // live session rows pointing at a deleted account -- either a dangling
 // credential or, under enforced foreign keys, a delete that fails outright.
 //

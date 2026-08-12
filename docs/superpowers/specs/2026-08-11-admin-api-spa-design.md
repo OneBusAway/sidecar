@@ -129,6 +129,10 @@ from a one-row model. The cost over a singleton is one CLI noun.
 type Repository interface {
     CreateUser(ctx context.Context, username, passwordHash string, now time.Time) (User, error)
     GetUserByUsername(ctx context.Context, username string) (User, error)
+    // GetUserByID looks up the account behind a session's UserID; the
+    // session middleware calls it on every authenticated request, once
+    // GetSession has resolved the cookie to a live session row.
+    GetUserByID(ctx context.Context, id int64) (User, error)
     ListUsers(ctx context.Context) ([]User, error)
     DeleteUser(ctx context.Context, username string) error
     UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error

@@ -113,7 +113,7 @@ func (r *authRepo) ListUsers(ctx context.Context) ([]auth.User, error) {
 
 // DeleteUser reports auth.ErrNotFound when nothing matched. The DELETE is an
 // :execrows statement, so a missing account is not a driver error: without the
-// count check `sidecar-admin user rm typo` would exit 0 and print nothing
+// count check `sidecar-admin user delete typo` would exit 0 and print nothing
 // while the real account stayed live. Sessions go with the user via the
 // schema's ON DELETE CASCADE.
 func (r *authRepo) DeleteUser(ctx context.Context, username string) error {

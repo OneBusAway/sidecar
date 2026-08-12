@@ -173,6 +173,10 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 			"region_id is required (region 0 is a real region, so there is no default)")
 		return
 	}
+	if req.Header == "" {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header is required")
+		return
+	}
 
 	ctx := r.Context()
 	region, err := h.deps.Regions.Get(ctx, *req.RegionID)
@@ -284,11 +288,21 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	patch := alerts.Patch{
-		HeaderText:      req.Header,
 		DescriptionText: req.Description,
 		URL:             req.URL,
 		ClearEndTime:    req.ClearEndTime,
 		IsTest:          req.IsTest,
+	}
+
+	if req.Header != nil {
+		// The column is NOT NULL but not non-empty: an empty header stores
+		// fine and then ships a header-less alert to every rider reading the
+		// feed. Same reasoning as the agency_id check just below.
+		if *req.Header == "" {
+			writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header must not be empty")
+			return
+		}
+		patch.HeaderText = req.Header
 	}
 
 	if req.AgencyID != nil {

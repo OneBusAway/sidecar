@@ -332,6 +332,9 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	if len(missing) > 0 {
 		return fmt.Errorf("alert create requires %s", strings.Join(missing, ", "))
 	}
+	if *header == "" {
+		return errors.New("alert create: --header cannot be empty")
+	}
 
 	reg, err := store.Regions().Get(ctx, *regionID)
 	if err != nil {
@@ -591,6 +594,9 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	}
 
 	if seen["header"] {
+		if *header == "" {
+			return errors.New("alert edit: --header cannot be empty")
+		}
 		patch.HeaderText = header
 	}
 	if seen["description"] {

@@ -450,6 +450,30 @@ func TestLogin_BadRequests(t *testing.T) {
 	}
 }
 
+// TestLogin_OversizedBodyMessageIsClean pins the copy of the one 4xx on this
+// API that used to leak Go internals: http.MaxBytesReader's underlying error
+// text is "http: request body too large", written for a Go developer, not
+// whoever is hitting this endpoint. Every other error on this API is written
+// for an operator (design spec §5); this asserts that rule now holds here
+// too, and that the raw driver string never reaches the response body.
+func TestLogin_OversizedBodyMessageIsClean(t *testing.T) {
+	t.Parallel()
+
+	f := newLoginFixture(t)
+	body := `{"username":"admin","password":"` + strings.Repeat("x", 9000) + `"}`
+	rec := f.postLogin(body, nil)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "request body too large") {
+		t.Errorf("body = %q, want it to say the request body is too large", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "http:") {
+		t.Errorf("body = %q, leaks the underlying Go error text", rec.Body.String())
+	}
+}
+
 // TestLogin_UnknownFieldsIgnored: the SPA may send extra fields (or a future
 // version may), and decodeJSON deliberately does not set
 // DisallowUnknownFields.

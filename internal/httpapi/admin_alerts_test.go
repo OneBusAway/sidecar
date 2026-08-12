@@ -591,6 +591,18 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 			name: "empty body", body: ` `,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"invalid JSON"},
 		},
+		{
+			// alertRepo.Create also rejects this, but the handler must catch
+			// it first: reaching the repository would surface as a bare 500,
+			// and riders would never see a header-less alert reach the feed
+			// in the first place.
+			name: "missing header", body: `{"region_id":1,"start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusBadRequest, wantInError: []string{"header"},
+		},
+		{
+			name: "empty header", body: `{"region_id":1,"header":"","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusBadRequest, wantInError: []string{"header"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -898,6 +910,7 @@ func TestAdminAlerts_PatchRejections(t *testing.T) {
 		{"naive start time", target, `{"start_time":"2026-08-15T14:00:00"}`, http.StatusBadRequest, []string{"explicit offset", "America/Los_Angeles"}},
 		{"naive end time", target, `{"end_time":"2026-08-15T14:00:00"}`, http.StatusBadRequest, []string{"explicit offset"}},
 		{"empty agency id", target, `{"agency_id":""}`, http.StatusBadRequest, []string{"agency_id"}},
+		{"empty header", target, `{"header":""}`, http.StatusBadRequest, []string{"header"}},
 		{"unknown cause", target, `{"cause":"NOPE"}`, http.StatusBadRequest, []string{"unknown cause"}},
 		{"unknown effect", target, `{"effect":"NOPE"}`, http.StatusBadRequest, []string{"unknown effect"}},
 		{"unknown severity", target, `{"severity":"NOPE"}`, http.StatusBadRequest, []string{"unknown severity"}},
