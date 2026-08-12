@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // spaHandler serves the embedded admin SPA per spec section 6.5: real files
@@ -14,6 +15,13 @@ import (
 type spaHandler struct {
 	fs     fs.FS
 	logger *slog.Logger
+
+	// warnUnbuiltOnce caps the "admin UI not built" log at one line for the
+	// life of the handler. Every request against an unbuilt embed takes this
+	// same path -- a health check or a user hammering reload before the
+	// operator notices would otherwise write one WARN per request, burying
+	// the one fact the log exists to surface.
+	warnUnbuiltOnce sync.Once
 }
 
 // serve implements spaHandler's routing: an exact file match is served as
@@ -36,9 +44,14 @@ func (h *spaHandler) serve(w http.ResponseWriter, r *http.Request) {
 		p = "index.html"
 		if !fileExists(h.fs, p) {
 			// The embed exists but is empty -- a binary built without `make
-			// web` (design spec §2.3). Say so plainly rather than serving a
-			// generic 404 that looks like a routing bug.
-			h.logger.Warn("httpapi: admin UI not built", "path", r.URL.Path)
+			// web` (design spec §2.3). Warn once so the operator has
+			// something to find in the logs, rather than nothing -- but only
+			// once: every request against an unbuilt embed hits this same
+			// branch, and the response body already tells the caller what's
+			// wrong on every request, so the log only needs to say it once.
+			h.warnUnbuiltOnce.Do(func() {
+				h.logger.Warn("httpapi: admin UI not built", "path", r.URL.Path)
+			})
 			http.Error(w, "admin UI not built; run make web", http.StatusServiceUnavailable)
 			return
 		}

@@ -166,6 +166,50 @@ func TestSPA_UnbuiltUIReturns503(t *testing.T) {
 	}
 }
 
+// countingLogHandler is a minimal slog.Handler that counts how many records
+// contain msgSubstr, so a test can assert a log fires at most once across
+// several requests without depending on slog's text/JSON formatting.
+type countingLogHandler struct {
+	msgSubstr string
+	count     *int
+}
+
+func (h countingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h countingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	if strings.Contains(r.Message, h.msgSubstr) {
+		*h.count++
+	}
+	return nil
+}
+func (h countingLogHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h countingLogHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func TestSPA_UnbuiltUIWarnsOnce(t *testing.T) {
+	t.Parallel()
+
+	// Every request against an unbuilt embed takes the same 503 branch. A
+	// health check or a user hammering reload before the operator notices
+	// must not turn that into one WARN per request -- the log exists for
+	// operator visibility, not as a per-request audit trail, so it must be
+	// deduplicated across the life of the handler.
+	var warnCount int
+	logger := slog.New(countingLogHandler{msgSubstr: "admin UI not built", count: &warnCount})
+	router := httpapi.NewRouter(httpapi.Deps{AdminUI: fstest.MapFS{}, Logger: logger})
+
+	for range 3 {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/admin", nil)
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
+		}
+	}
+
+	if warnCount != 1 {
+		t.Errorf("warn count = %d, want exactly 1 across 3 requests", warnCount)
+	}
+}
+
 func TestSPA_NilAdminUIRegistersNoRoutes(t *testing.T) {
 	t.Parallel()
 

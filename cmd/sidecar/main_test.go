@@ -125,11 +125,18 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	}
 }
 
-// TestBuildDeps_WiresAdminSurface checks the other two fields Task 7 adds:
-// without them, httpapi.NewRouter either panics (Auth set, admin deps
-// missing) or never registers the admin surface at all (AdminUI nil), and
-// neither failure mode would be visible from run's own tests, which never
-// reach a request handler.
+// TestBuildDeps_WiresAdminSurface checks the fields Task 7 adds: without
+// Auth or AdminUI, httpapi.NewRouter either panics (Auth set, admin deps
+// missing) or never registers the admin surface at all (AdminUI nil); and
+// Now must be the real wall clock -- forbidigo does not catch a wrong clock
+// here, since .golangci.yml explicitly excludes the time.Now/time.Local
+// rule for path '^cmd/' (rightly so: cmd/ is the one place allowed to read
+// it). A clock pinned to some fixed instant would compile and lint clean
+// while minting every session already-expired, so Now is checked by bounds
+// rather than by nil-ness: two func values can never be compared with ==,
+// and a nil check alone would let a wrong-but-non-nil clock through.
+// None of these failure modes would be visible from run's own tests, which
+// never reach a request handler.
 func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	t.Parallel()
 
@@ -143,6 +150,12 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 		t.Error("Deps.AdminUI = nil, want adminui.FS()")
 	}
 	if deps.Now == nil {
-		t.Error("Deps.Now = nil, want time.Now")
+		t.Fatal("Deps.Now = nil, want time.Now")
+	}
+	before := time.Now()
+	got := deps.Now()
+	after := time.Now()
+	if got.Before(before) || got.After(after) {
+		t.Errorf("Deps.Now() = %v, want a value between %v and %v (i.e. the real wall clock)", got, before, after)
 	}
 }
