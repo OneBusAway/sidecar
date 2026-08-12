@@ -124,7 +124,7 @@ func userCreate(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 
 	if _, createErr := store.Auth().CreateUser(ctx, normalized, hash, now); createErr != nil {
 		if errors.Is(createErr, auth.ErrUsernameTaken) {
-			return fmt.Errorf("user create: username %q already taken: %w", normalized, auth.ErrUsernameTaken)
+			return fmt.Errorf("user create: %q: %w", normalized, auth.ErrUsernameTaken)
 		}
 		return fmt.Errorf("user create: %w", createErr)
 	}

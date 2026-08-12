@@ -94,6 +94,39 @@ func TestUserCreate_DuplicateUsernameRejected(t *testing.T) {
 	}
 }
 
+// TestUserCreate_PasswordFlagRejected and TestUserPasswd_PasswordFlagRejected
+// lock in the single security invariant this task exists to protect: there
+// is deliberately no --password flag, because passwords must never reach
+// shell history or `ps` output. This asserts the flag is genuinely
+// unregistered with flag.FlagSet -- not merely unused -- so a future
+// "for convenience" addition of --password breaks a test rather than
+// shipping silently with every other test still green.
+func TestUserCreate_PasswordFlagRejected(t *testing.T) {
+	t.Parallel()
+	dbPath, _ := newDB(t)
+
+	_, _, err := cli(t, dbPath, "user", "create", "--username", "alice", "--password", validPassword)
+	if err == nil {
+		t.Fatal("user create --password: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("error = %q, want it to report --password as an undefined flag", err.Error())
+	}
+}
+
+func TestUserPasswd_PasswordFlagRejected(t *testing.T) {
+	t.Parallel()
+	dbPath, _ := newDB(t)
+
+	_, _, err := cli(t, dbPath, "user", "passwd", "--username", "alice", "--password", validPassword)
+	if err == nil {
+		t.Fatal("user passwd --password: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("error = %q, want it to report --password as an undefined flag", err.Error())
+	}
+}
+
 func TestUserCreate_MissingUsernameRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, _ := newDB(t)
