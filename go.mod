@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs v1.0.0
+	github.com/google/go-cmp v0.7.0
 	github.com/pressly/goose/v3 v3.27.3
 	modernc.org/sqlite v1.56.0
 )
