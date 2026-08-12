@@ -19,6 +19,14 @@ func TestEmbedIncludesUnderscoreAndDotPaths(t *testing.T) {
 	if _, err := fs.Stat(fsys, "index.html"); err != nil {
 		t.Fatalf("index.html missing from the embed -- run make web: %v", err)
 	}
+	// The dot half of the claim. It has to be a direct Stat: the WalkDir
+	// below starts at ".", whose path.Base is "." -- a HasPrefix(base, ".")
+	// check inside the callback would pass unconditionally and assert
+	// nothing.
+	if _, err := fs.Stat(fsys, ".gitkeep"); err != nil {
+		t.Errorf(".gitkeep missing from the embed: the all: prefix is gone, so dot-paths are excluded: %v", err)
+	}
+
 	var sawUnderscore bool
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {

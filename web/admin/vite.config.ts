@@ -10,7 +10,15 @@ export default defineConfig({
 		// changeOrigin: it would rewrite Host while the browser Origin stays
 		// the Vite origin, and the API's cross-site guard would 403 every
 		// write.
-		proxy: { '/api': 'http://localhost:8080' },
+		//
+		// The object form is REQUIRED. Vite expands the string shorthand
+		// ('/api': 'http://localhost:8080') to { target, changeOrigin: true },
+		// so the shorthand turns on exactly what this comment says is off --
+		// and Vite's rewriteOriginHeader only fires for rewriteWsOrigin, so
+		// Origin is never fixed up to match. Browsers survive it because the
+		// guard checks Sec-Fetch-Site first; curl and embedded webviews get a
+		// 403 on every write.
+		proxy: { '/api': { target: 'http://localhost:8080', changeOrigin: false } },
 	},
 	test: {
 		// Task 10 adds the first tests; keep `make web-check` green until then.
