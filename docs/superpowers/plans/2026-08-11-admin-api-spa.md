@@ -1569,6 +1569,44 @@ kill %1; rm -f /tmp/spa-smoke.db*
 git status --short   # dist/ contents must NOT appear (gitignore from Task 7)
 ```
 
+- [ ] **Step 5b: Add the embed regression test** (`internal/httpapi/adminui/adminui_test.go`).
+
+Until now `dist/` held only `.gitkeep`, so dropping the `all:` prefix from the
+`go:embed` directive failed to compile — accidental protection that disappears the
+moment this task populates `dist/` with real output. From here on, `//go:embed dist`
+(no `all:`) would compile cleanly while silently dropping every `.`- and
+`_`-prefixed path, including the whole `_app/` tree: the binary builds, the server
+starts, and every asset 404s. Assert what the comment claims:
+
+```go
+func TestEmbedIncludesUnderscoreAndDotPaths(t *testing.T) {
+	fsys := FS()
+	if _, err := fs.Stat(fsys, "index.html"); err != nil {
+		t.Fatalf("index.html missing from the embed -- run make web: %v", err)
+	}
+	var sawUnderscore bool
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(path.Base(p), "_") {
+			sawUnderscore = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawUnderscore {
+		t.Error("no _-prefixed path in the embed: the go:embed directive lost its all: prefix, " +
+			"so SvelteKit's _app/ tree is silently excluded and every asset will 404")
+	}
+}
+```
+
+Verify it discriminates: drop `all:` from the directive, confirm this test fails
+(not just that the build breaks), then revert.
+
 - [ ] **Step 6: `make check`** (now including web-check). Expected: PASS.
 - [ ] **Step 7: Commit.**
 
