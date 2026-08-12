@@ -1864,6 +1864,29 @@ git commit -m "Add SPA core: API client, timezone-explicit datetime module, logi
 - Consumes: Task 10's `api`, `types`, `datetime`; the admin API.
 - Produces: the five screens of spec §6.2.
 
+**Carried forward from Task 10's review — three required items:**
+
+- **Overwrite `src/routes/regions/+page.svelte`.** Task 10 created it as a bare
+  placeholder (an HTML comment plus `<h1>Regions</h1>`) purely so `resolve()`'s
+  route-union argument type would compile. Left alone it renders as a
+  finished-looking empty screen with no signal that it is unimplemented.
+- **Add `src/routes/+error.svelte`.** `whoami()` now rethrows non-401 failures, so a
+  500 on the session probe currently surfaces as SvelteKit's unstyled default error
+  page. Give it the app's shell and a way back to `/admin`.
+- **Every new datetime-dependent test must be TZ-robust.** Task 10 proved two
+  brief-prescribed assertions were vacuous on a Pacific-time machine: an
+  `instantToLocalInput` mutation formatting in the browser's zone still passed an
+  `America/Los_Angeles` case, because the dev machine *is* Pacific. Choose fixture
+  zones that differ from any plausible dev machine (`Asia/Kathmandu`'s +05:45 is the
+  house choice) and include a DST-transition case where offsets are in play.
+  `make test-tz` now runs vitest under two zones — keep it green.
+
+Optional but worth deciding explicitly rather than by omission: `environment: 'node'`
+means there is no DOM, so component behavior (the login form's submit wiring, error
+banners, the sign-out error path) has no automated coverage. If any screen here
+carries real logic in its markup rather than in a `.ts` module, add a jsdom vitest
+project for it; otherwise keep the logic in testable modules.
+
 - [ ] **Step 1: `enums.ts`** — the option lists, copied from `internal/alerts/enums.go` (12 causes, 11 effects, 4 severities — copy the exact names from that file at implementation time; a drifted list turns into a 400 at submit, which the form surfaces, so drift is visible not silent).
 
 - [ ] **Step 2: Alerts list** (`src/routes/+page.svelte` + `+page.ts` load): fetch `api.get<Alert[]>('/alerts')` and `api.get<Region[]>('/regions')`; region `<select>` filter (client-side; "All regions" default — remember region 0 is real, key the "all" option on `''` never `0`); table of header / region name / start (rendered with `instantToLocalInput` in the region's timezone, falling back to the raw UTC string when the region has no timezone) / badges (`published` green, `draft` gray, `test` amber — plain CSS classes); row links to `/alerts/[id]` via `resolve`; "New alert" button.
