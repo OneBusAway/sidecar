@@ -64,6 +64,11 @@ describe('request', () => {
 		expect(init.method).toBe('GET');
 		expect(init.body).toBeUndefined();
 		expect(init.headers).toBeUndefined();
+		// The API is same-origin and its cross-site guard depends on staying
+		// that way. Naming these keeps the "nothing here is CORS" comment in
+		// api.ts honest: setting either would otherwise pass every test.
+		expect(init.mode).toBeUndefined();
+		expect(init.credentials).toBeUndefined();
 	});
 
 	it('uses the method matching the helper', async () => {

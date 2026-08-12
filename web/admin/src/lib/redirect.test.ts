@@ -41,16 +41,39 @@ describe('safeRedirect', () => {
 		expect(safeRedirect('http://localhost:8080/admin/', home)).toBe(home);
 	});
 
+	// The URL parser deletes tab, LF and CR from anywhere in its input, so
+	// each of these resolves to https://evil.example once parsed. They all
+	// start with a single '/', which is what makes them worth a test.
+	it('refuses control characters that the URL parser strips away', () => {
+		for (const target of [
+			'/\t/evil.example',
+			'/\n/evil.example',
+			'/\r/evil.example',
+		]) {
+			expect(safeRedirect(target, home), JSON.stringify(target)).toBe(home);
+			expect(new URL(target, 'http://host/admin/').origin).toBe(
+				'http://evil.example',
+			);
+		}
+	});
+
 	it('refuses a path outside the base, including one that merely shares its prefix', () => {
 		expect(safeRedirect('/api/admin/v1/alerts', home)).toBe(home);
 		expect(safeRedirect('/adminfoo/bar', home)).toBe(home);
 		expect(safeRedirect('/', home)).toBe(home);
 	});
 
+	// paths.base is fixed at '/admin' in svelte.config.js, so an empty base is
+	// hypothetical -- but it is the branch where every check degrades to
+	// "starts with a slash", which is precisely where a stripped-away control
+	// character would smuggle a target off-origin.
 	it('still refuses to change origin when the app is mounted at the root', () => {
 		expect(safeRedirect('/alerts/7', '/')).toBe('/alerts/7');
 		expect(safeRedirect('//evil.example', '/')).toBe('/');
 		expect(safeRedirect('/\\evil.example', '/')).toBe('/');
+		expect(safeRedirect('/\t/evil.example', '/')).toBe('/');
+		expect(safeRedirect('/\n/evil.example', '/')).toBe('/');
+		expect(safeRedirect('/\r/evil.example', '/')).toBe('/');
 		expect(safeRedirect('https://evil.example', '/')).toBe('/');
 	});
 });

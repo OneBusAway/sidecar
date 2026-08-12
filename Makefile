@@ -150,3 +150,8 @@ generate-check: ## Fail if committed sqlc output is stale
 test-tz: web ## Run tests under two timezones to catch local-time leaks
 	TZ=UTC go test ./...
 	TZ=Asia/Kathmandu go test ./...
+	@# The SPA needs this as badly as the Go side does. A datetime assertion
+	@# written against the region zone cannot fail when the host zone happens
+	@# to match it, so a Pacific-time laptop silently loses coverage that a
+	@# UTC CI box still has -- and vice versa. Two zones, no host can hide it.
+	cd $(WEB_DIR) && TZ=UTC npm run test:unit && TZ=Asia/Kathmandu npm run test:unit

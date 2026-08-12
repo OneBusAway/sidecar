@@ -17,17 +17,27 @@ export function safeRedirect(
 ): string {
 	if (!target) return home;
 
-	// Both '//evil.example' and '/\evil.example' begin with a single '/' yet
-	// resolve to another origin -- the URL parser treats a backslash here the
-	// way it treats a slash. Neither has any business in an in-app path.
-	if (target.startsWith('//') || target.includes('\\')) return home;
+	// Reject anything that could still name another origin after the URL
+	// parser has had its way with it:
+	//
+	//   '//evil.example'    protocol-relative.
+	//   '/\evil.example'    the parser treats a backslash as a slash for
+	//                       special schemes, so this is protocol-relative too.
+	//   '/\tevil.example'   the parser DELETES U+0009/U+000A/U+000D from
+	//                       anywhere in the input, so '/<TAB>/evil.example'
+	//                       becomes '//evil.example' after parsing.
+	//
+	// The range covers the whole C0 block plus DEL rather than just those
+	// three: no in-app path has a control character in it, and an allowlist
+	// that enumerates only today's known tricks is the kind that ages badly.
+	// eslint-disable-next-line no-control-regex
+	if (target.startsWith('//') || /[\\\u0000-\u001f\u007f]/.test(target))
+		return home;
 
 	const base = home.endsWith('/') ? home.slice(0, -1) : home;
-	// paths.base is '/admin' today, but an empty base is legal; then any
-	// rooted path is in-app (the two checks above already excluded the ones
-	// that would leave the origin).
-	if (base === '') return target.startsWith('/') ? target : home;
-
+	// No special case for an empty base (paths.base = ''): the checks below
+	// reduce to "starts with / or ?", which is exactly right once the guard
+	// above has removed the strings that leave the origin.
 	if (
 		target === base ||
 		target.startsWith(`${base}/`) ||
