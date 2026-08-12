@@ -81,6 +81,41 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// MigrationStatus describes one embedded migration's state, for
+// `sidecar-admin migrate status`.
+type MigrationStatus struct {
+	Version int64
+	Pending bool
+}
+
+// MigrationStatuses reports the state of every embedded migration, applied
+// or pending, ordered by version.
+//
+// This builds its own goose.Provider scoped to s.db rather than going
+// through the package-level goose.Status, whose backing Provider.Close would
+// close s.db out from under every other Store method -- Provider is
+// otherwise a plain read against s.db and needs no such cleanup here.
+func (s *Store) MigrationStatuses(ctx context.Context) ([]MigrationStatus, error) {
+	provider, err := goose.NewProvider(goose.DialectSQLite3, s.db, migrations.FS)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: migration status: new provider: %w", err)
+	}
+
+	statuses, err := provider.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: migration status: %w", err)
+	}
+
+	out := make([]MigrationStatus, len(statuses))
+	for i, st := range statuses {
+		out[i] = MigrationStatus{
+			Version: st.Source.Version,
+			Pending: st.State == goose.StatePending,
+		}
+	}
+	return out, nil
+}
+
 // Alerts returns the alerts.Repository backed by this store.
 func (s *Store) Alerts() alerts.Repository {
 	return &alertRepo{db: s.db, q: s.q}
