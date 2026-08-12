@@ -236,6 +236,65 @@ func TestRegionDefaultAgencyApplied(t *testing.T) {
 	}
 }
 
+// TestEditTestFalseClearsTestFlag reproduces the finding that `alert edit ID
+// --test=false` was a silent no-op: the old code branched on the flag's
+// *value* (`if *test`) rather than on whether it was passed, so
+// `--test=false` looked indistinguishable from the flag being absent
+// entirely and IsTest never changed. An author promoting a verified test
+// alert to a real one with the natural `--test=false` syntax believed it was
+// live; riders would never see it.
+func TestEditTestFalseClearsTestFlag(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	created, err := store.Alerts().Create(context.Background(), alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "Test alert",
+		Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+		StartTime: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC), IsTest: true,
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.IsTest {
+		t.Fatalf("fixture setup: created alert must start with IsTest = true")
+	}
+
+	if _, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(created.ID, 10), "--test=false"); editErr != nil {
+		t.Fatalf("alert edit --test=false: %v", editErr)
+	}
+
+	got, err := store.Alerts().Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.IsTest {
+		t.Error("IsTest = true after --test=false, want false")
+	}
+}
+
+// TestEditTestAndNoTestTogetherRejected asserts that passing both --test and
+// --no-test in one invocation is an error rather than one silently winning.
+func TestEditTestAndNoTestTogetherRejected(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	created, err := store.Alerts().Create(context.Background(), alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "Alert",
+		Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+		StartTime: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC),
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, _, err = cli(t, dbPath, "alert", "edit", strconv.FormatInt(created.ID, 10), "--test", "--no-test")
+	if err == nil {
+		t.Fatal("alert edit --test --no-test: want error, got nil")
+	}
+}
+
 func TestUnknownCauseRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)

@@ -305,6 +305,106 @@ func TestFeed_TestAlertSemantics(t *testing.T) {
 	}
 }
 
+// recordingHandler is a minimal slog.Handler that captures every record
+// passed to it, so tests can assert on the warning the design spec (§4.2,
+// §7) requires for an unmappable stored enum name without depending on log
+// text formatting.
+type recordingHandler struct {
+	records *[]slog.Record
+}
+
+func (h recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	*h.records = append(*h.records, r)
+	return nil
+}
+func (h recordingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h recordingHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func recordAttrs(r slog.Record) map[string]string {
+	attrs := make(map[string]string, r.NumAttrs())
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	return attrs
+}
+
+// TestFeed_UnmappableEnumLogsWarn reproduces a hand-edited row (or a future
+// enum rename that strips a value out of the mapping table) and asserts the
+// server logs a warning, per design spec §4.2/§7: "Emit UNKNOWN_*, log warn,
+// keep serving." Without this, the degradation is silent and no operator
+// would ever get a signal that a whole region's alerts had lost their cause.
+func TestFeed_UnmappableEnumLogsWarn(t *testing.T) {
+	t.Parallel()
+
+	store, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if migrateErr := store.Migrate(); migrateErr != nil {
+		t.Fatalf("Migrate: %v", migrateErr)
+	}
+
+	var records []slog.Record
+	logger := slog.New(recordingHandler{records: &records})
+
+	deps := httpapi.Deps{
+		Alerts:  store.Alerts(),
+		Regions: store.Regions(),
+		Now:     func() time.Time { return base },
+		Logger:  logger,
+	}
+	h := httpapi.NewRouter(deps)
+
+	putRegion(t, store.Regions(), 1)
+	ctx := context.Background()
+	// Bypass CLI-side validation (repo.Create stores whatever it is given) to
+	// simulate schema drift or a hand-edited row: cause="BANANA" is not in
+	// the mapping table.
+	a, err := store.Alerts().Create(ctx, alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "Weird row",
+		Cause: "BANANA", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+		StartTime: base,
+	}, base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Alerts().SetPublished(ctx, a.ID, true, base); err != nil {
+		t.Fatalf("SetPublished: %v", err)
+	}
+
+	rec := doGet(t, h, "/api/v1/regions/1/alerts")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// The feed must still render, degraded to UNKNOWN_CAUSE, regardless of
+	// the warning.
+	var msg gtfs.FeedMessage
+	if err := proto.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("proto.Unmarshal: %v", err)
+	}
+	if got := msg.GetEntity()[0].GetAlert().GetCause(); got != gtfs.Alert_UNKNOWN_CAUSE {
+		t.Errorf("cause = %v, want UNKNOWN_CAUSE", got)
+	}
+
+	var found bool
+	for _, r := range records {
+		if r.Level != slog.LevelWarn {
+			continue
+		}
+		attrs := recordAttrs(r)
+		if attrs["kind"] == "cause" && attrs["name"] == "BANANA" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no warn log with kind=cause name=BANANA found; records = %+v", records)
+	}
+}
+
 func assertNotFound(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if rec.Code != http.StatusNotFound {

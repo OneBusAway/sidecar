@@ -49,6 +49,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("FeedAttachesTranslations", func(t *testing.T) { testFeedAttachesTranslations(t, newStore) })
 	t.Run("DeleteCascadesToTranslations", func(t *testing.T) { testDeleteCascadesToTranslations(t, newStore) })
 	t.Run("UpdatePatchSemantics", func(t *testing.T) { testUpdatePatchSemantics(t, newStore) })
+	t.Run("SetPublishedAndDeleteReportUnknownID", func(t *testing.T) { testSetPublishedAndDeleteReportUnknownID(t, newStore) })
 }
 
 // putRegion inserts a minimal directory-sourced region with the given id.
@@ -611,6 +612,26 @@ func testDeleteCascadesToTranslations(t *testing.T, newStore newStoreFunc) {
 
 	if _, err := repo.Get(ctx, a.ID); !errors.Is(err, alerts.ErrNotFound) {
 		t.Errorf("Get after delete: err = %v, want alerts.ErrNotFound", err)
+	}
+}
+
+// testSetPublishedAndDeleteReportUnknownID asserts that SetPublished and
+// Delete report alerts.ErrNotFound for an id that does not exist, rather than
+// returning nil. Without this, `sidecar-admin alert publish 9999` exits 0 and
+// prints nothing -- an author who mistypes an id believes the alert is live
+// when nothing happened. A future Postgres adapter inherits this requirement
+// because it runs against this same suite.
+func testSetPublishedAndDeleteReportUnknownID(t *testing.T, newStore newStoreFunc) {
+	repo, _ := newStore(t)
+	ctx := context.Background()
+
+	const unknownID = 999999
+
+	if err := repo.SetPublished(ctx, unknownID, true, base); !errors.Is(err, alerts.ErrNotFound) {
+		t.Errorf("SetPublished(unknown id) = %v, want alerts.ErrNotFound", err)
+	}
+	if err := repo.Delete(ctx, unknownID); !errors.Is(err, alerts.ErrNotFound) {
+		t.Errorf("Delete(unknown id) = %v, want alerts.ErrNotFound", err)
 	}
 }
 

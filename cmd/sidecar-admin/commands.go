@@ -498,7 +498,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	if seen["end"] && *noEnd {
 		return errors.New("sidecar-admin: alert edit: specify only one of --end or --no-end")
 	}
-	if *test && *noTest {
+	if seen["test"] && seen["no-test"] {
 		return errors.New("sidecar-admin: alert edit: specify only one of --test or --no-test")
 	}
 
@@ -577,11 +577,16 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 		}
 		patch.Severity = &name
 	}
-	if *test {
-		v := true
+	// Branch on whether --test/--no-test were passed at all, not on their
+	// values: `--test=false` must clear IsTest, not be mistaken for the flag
+	// being absent (which is what `if *test` did -- a silent no-op that let
+	// a verified test alert stay flagged as test after an author explicitly
+	// tried to promote it to real).
+	if seen["test"] {
+		v := *test
 		patch.IsTest = &v
-	} else if *noTest {
-		v := false
+	} else if seen["no-test"] {
+		v := !*noTest
 		patch.IsTest = &v
 	}
 

@@ -23,7 +23,7 @@ build: ## Build the sidecar binary into bin/
 	$(GO) build -o $(BIN_DIR)/$(BINARY) $(CMD)
 
 .PHONY: run
-run: ## Run the sidecar (make run ARGS="Aaron")
+run: ## Run the sidecar server (make run ARGS="--addr :8080")
 	$(GO) run $(CMD) $(ARGS)
 
 .PHONY: tidy

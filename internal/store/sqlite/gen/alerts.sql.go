@@ -74,13 +74,18 @@ func (q *Queries) CreateAlert(ctx context.Context, arg CreateAlertParams) (Alert
 	return i, err
 }
 
-const deleteAlert = `-- name: DeleteAlert :exec
+const deleteAlert = `-- name: DeleteAlert :one
 DELETE FROM alerts WHERE id = ?
+RETURNING id
 `
 
-func (q *Queries) DeleteAlert(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, deleteAlert, id)
-	return err
+// RETURNING id, for the same reason as SetAlertPublished above: deleting a
+// nonexistent id must be reported, not silently accepted.
+func (q *Queries) DeleteAlert(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, deleteAlert, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
 }
 
 const feedAlerts = `-- name: FeedAlerts :many
@@ -357,8 +362,9 @@ func (q *Queries) ListAlertsByRegion(ctx context.Context, regionID int64) ([]Ale
 	return items, nil
 }
 
-const setAlertPublished = `-- name: SetAlertPublished :exec
+const setAlertPublished = `-- name: SetAlertPublished :one
 UPDATE alerts SET published = ?, updated_at = ? WHERE id = ?
+RETURNING id
 `
 
 type SetAlertPublishedParams struct {
@@ -367,9 +373,14 @@ type SetAlertPublishedParams struct {
 	ID        int64
 }
 
-func (q *Queries) SetAlertPublished(ctx context.Context, arg SetAlertPublishedParams) error {
-	_, err := q.db.ExecContext(ctx, setAlertPublished, arg.Published, arg.UpdatedAt, arg.ID)
-	return err
+// RETURNING id turns a no-op update against a nonexistent id into
+// sql.ErrNoRows instead of a silent, unreported success -- see
+// alertRepo.SetPublished in store.go, which maps that into alerts.ErrNotFound.
+func (q *Queries) SetAlertPublished(ctx context.Context, arg SetAlertPublishedParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, setAlertPublished, arg.Published, arg.UpdatedAt, arg.ID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const updateAlert = `-- name: UpdateAlert :one

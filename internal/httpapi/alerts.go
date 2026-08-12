@@ -88,6 +88,10 @@ func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *
 	built := alerts.BuildFeed(rows, alerts.FeedOptions{
 		Now:             h.deps.Now(),
 		DefaultDuration: alerts.DefaultDuration,
+		OnUnknownEnum: func(kind, name string) {
+			h.deps.Logger.Warn("httpapi: unmappable enum value, degrading to UNKNOWN_*",
+				"region_id", id, "kind", kind, "name", name)
+		},
 	})
 	return built, id, true
 }

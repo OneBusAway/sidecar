@@ -206,6 +206,77 @@ func TestBuilderPreservesInputOrderAndDoesNotFilter(t *testing.T) {
 	}
 }
 
+func TestOnUnknownEnumFiresForUnmappableStoredValues(t *testing.T) {
+	t.Parallel()
+
+	a := base()
+	a.Cause = "BANANA"
+	a.Effect = "ALSO_BOGUS"
+	// Severity left as a legitimate, mappable value: it must not trigger the
+	// callback, distinguishing a real miss from every other field.
+
+	type call struct{ kind, name string }
+	var calls []call
+	o := opts()
+	o.OnUnknownEnum = func(kind, name string) {
+		calls = append(calls, call{kind, name})
+	}
+
+	msg := alerts.BuildFeed([]alerts.Alert{a}, o)
+
+	// The degradation itself must still happen regardless of the callback.
+	got := msg.GetEntity()[0].GetAlert()
+	if got.GetCause() != gtfs.Alert_UNKNOWN_CAUSE {
+		t.Errorf("cause = %v, want UNKNOWN_CAUSE", got.GetCause())
+	}
+	if got.GetEffect() != gtfs.Alert_UNKNOWN_EFFECT {
+		t.Errorf("effect = %v, want UNKNOWN_EFFECT", got.GetEffect())
+	}
+
+	want := []call{{"cause", "BANANA"}, {"effect", "ALSO_BOGUS"}}
+	if len(calls) != len(want) {
+		t.Fatalf("OnUnknownEnum calls = %+v, want %+v", calls, want)
+	}
+	for i, w := range want {
+		if calls[i] != w {
+			t.Errorf("call[%d] = %+v, want %+v", i, calls[i], w)
+		}
+	}
+}
+
+func TestOnUnknownEnumNotCalledForLegitimateUnknownValues(t *testing.T) {
+	t.Parallel()
+
+	a := base()
+	a.Cause = "UNKNOWN_CAUSE"
+	a.Effect = "UNKNOWN_EFFECT"
+	a.Severity = "UNKNOWN_SEVERITY"
+
+	called := false
+	o := opts()
+	o.OnUnknownEnum = func(kind, name string) { called = true }
+
+	alerts.BuildFeed([]alerts.Alert{a}, o)
+
+	if called {
+		t.Error("OnUnknownEnum fired for an explicit, valid UNKNOWN_* value; want no call")
+	}
+}
+
+func TestNilOnUnknownEnumIsSafe(t *testing.T) {
+	t.Parallel()
+
+	a := base()
+	a.Cause = "BANANA"
+
+	// opts() leaves OnUnknownEnum nil; BuildFeed must not panic and must
+	// still degrade normally.
+	msg := alerts.BuildFeed([]alerts.Alert{a}, opts())
+	if got := msg.GetEntity()[0].GetAlert().GetCause(); got != gtfs.Alert_UNKNOWN_CAUSE {
+		t.Errorf("cause = %v, want UNKNOWN_CAUSE", got)
+	}
+}
+
 func TestFeedMarshalsBothEncodings(t *testing.T) {
 	t.Parallel()
 

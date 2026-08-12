@@ -6,3 +6,8 @@
 # Test artifacts
 coverage.out
 coverage.html
+
+# Local SQLite databases (e.g. the README quickstart's ./sidecar.db)
+*.db
+*.db-wal
+*.db-shm

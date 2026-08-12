@@ -92,7 +92,7 @@ Requires Go 1.26+ (`mise install` will set it up) and [golangci-lint](https://go
 
 ```sh
 make tools   # install pinned dev tooling
-make check   # fmt-check + vet + lint + test — everything CI runs
+make check   # fmt-check + vet + lint + test + test-tz + test-race — everything CI runs
 make run     # build and run the server
 make help    # list all targets
 ```

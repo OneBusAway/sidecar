@@ -93,24 +93,44 @@ func ParseSeverity(in string) (string, error) {
 // time, so a bad value here means schema drift or a hand-edited row, and one
 // such row must not darken the whole region's feed.
 func CauseEnum(name string) gtfs.Alert_Cause {
-	if v, ok := causes[name]; ok {
-		return v
-	}
-	return gtfs.Alert_UNKNOWN_CAUSE
+	v, _ := causeLookup(name)
+	return v
 }
 
 // EffectEnum maps a stored name to its protobuf value, degrading as CauseEnum does.
 func EffectEnum(name string) gtfs.Alert_Effect {
-	if v, ok := effects[name]; ok {
-		return v
-	}
-	return gtfs.Alert_UNKNOWN_EFFECT
+	v, _ := effectLookup(name)
+	return v
 }
 
 // SeverityEnum maps a stored name to its protobuf value, degrading as CauseEnum does.
 func SeverityEnum(name string) gtfs.Alert_SeverityLevel {
-	if v, ok := severities[name]; ok {
-		return v
+	v, _ := severityLookup(name)
+	return v
+}
+
+// causeLookup, effectLookup, and severityLookup are the internal counterparts
+// of CauseEnum/EffectEnum/SeverityEnum that additionally report whether name
+// was found, so BuildFeed can tell a genuine "UNKNOWN_*" value apart from a
+// degraded, unmappable one and invoke FeedOptions.OnUnknownEnum only for the
+// latter.
+func causeLookup(name string) (gtfs.Alert_Cause, bool) {
+	if v, ok := causes[name]; ok {
+		return v, true
 	}
-	return gtfs.Alert_UNKNOWN_SEVERITY
+	return gtfs.Alert_UNKNOWN_CAUSE, false
+}
+
+func effectLookup(name string) (gtfs.Alert_Effect, bool) {
+	if v, ok := effects[name]; ok {
+		return v, true
+	}
+	return gtfs.Alert_UNKNOWN_EFFECT, false
+}
+
+func severityLookup(name string) (gtfs.Alert_SeverityLevel, bool) {
+	if v, ok := severities[name]; ok {
+		return v, true
+	}
+	return gtfs.Alert_UNKNOWN_SEVERITY, false
 }

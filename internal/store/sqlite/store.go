@@ -37,6 +37,7 @@ var (
 func configureGoose() error {
 	gooseConfigureOnce.Do(func() {
 		goose.SetBaseFS(migrations.FS)
+		goose.SetLogger(goose.NopLogger())
 		gooseConfigureErr = goose.SetDialect("sqlite3")
 	})
 	return gooseConfigureErr
@@ -371,18 +372,24 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 }
 
 func (r *alertRepo) SetPublished(ctx context.Context, id int64, published bool, now time.Time) error {
-	if err := r.q.SetAlertPublished(ctx, gen.SetAlertPublishedParams{
+	if _, err := r.q.SetAlertPublished(ctx, gen.SetAlertPublishedParams{
 		Published: published,
 		UpdatedAt: now.Unix(),
 		ID:        id,
 	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sqlite: set published for alert %d: %w", id, alerts.ErrNotFound)
+		}
 		return fmt.Errorf("sqlite: set published for alert %d: %w", id, err)
 	}
 	return nil
 }
 
 func (r *alertRepo) Delete(ctx context.Context, id int64) error {
-	if err := r.q.DeleteAlert(ctx, id); err != nil {
+	if _, err := r.q.DeleteAlert(ctx, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sqlite: delete alert %d: %w", id, alerts.ErrNotFound)
+		}
 		return fmt.Errorf("sqlite: delete alert %d: %w", id, err)
 	}
 	return nil

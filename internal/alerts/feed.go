@@ -28,6 +28,16 @@ const (
 type FeedOptions struct {
 	Now             time.Time
 	DefaultDuration time.Duration
+
+	// OnUnknownEnum, if non-nil, is invoked once for each stored cause,
+	// effect, or severity name that does not map to a known GTFS-realtime
+	// enum value (kind is "cause", "effect", or "severity"; name is the
+	// offending stored value). This package performs no I/O and imports no
+	// logger itself -- callers that want the warning logged (design spec
+	// §4.2, §7: "log warn, keep serving") wire this to their own logger.
+	// A nil callback is safe: the degradation to UNKNOWN_* still happens,
+	// just silently.
+	OnUnknownEnum func(kind, name string)
 }
 
 // BuildFeed renders alerts into a GTFS-realtime FeedMessage.
@@ -60,13 +70,13 @@ func BuildFeed(in []Alert, opts FeedOptions) *gtfs.FeedMessage {
 		id := entityPrefix + fmt.Sprint(a.ID)
 		msg.Entity = append(msg.Entity, &gtfs.FeedEntity{
 			Id:    &id,
-			Alert: buildAlert(a, dur),
+			Alert: buildAlert(a, dur, opts),
 		})
 	}
 	return msg
 }
 
-func buildAlert(a Alert, dur time.Duration) *gtfs.Alert {
+func buildAlert(a Alert, dur time.Duration, opts FeedOptions) *gtfs.Alert {
 	start := uint64(a.StartTime.Unix())
 	end := uint64(a.StartTime.Add(dur).Unix())
 	if a.EndTime != nil {
@@ -74,9 +84,20 @@ func buildAlert(a Alert, dur time.Duration) *gtfs.Alert {
 	}
 
 	agencyID := a.AgencyID
-	cause := CauseEnum(a.Cause)
-	effect := EffectEnum(a.Effect)
-	severity := SeverityEnum(a.Severity)
+	cause, causeOK := causeLookup(a.Cause)
+	effect, effectOK := effectLookup(a.Effect)
+	severity, severityOK := severityLookup(a.Severity)
+	if opts.OnUnknownEnum != nil {
+		if !causeOK {
+			opts.OnUnknownEnum("cause", a.Cause)
+		}
+		if !effectOK {
+			opts.OnUnknownEnum("effect", a.Effect)
+		}
+		if !severityOK {
+			opts.OnUnknownEnum("severity", a.Severity)
+		}
+	}
 
 	out := &gtfs.Alert{
 		ActivePeriod:    []*gtfs.TimeRange{{Start: &start, End: &end}},

@@ -17,11 +17,18 @@ UPDATE alerts SET
 WHERE id = ?
 RETURNING *;
 
--- name: SetAlertPublished :exec
-UPDATE alerts SET published = ?, updated_at = ? WHERE id = ?;
+-- name: SetAlertPublished :one
+-- RETURNING id turns a no-op update against a nonexistent id into
+-- sql.ErrNoRows instead of a silent, unreported success -- see
+-- alertRepo.SetPublished in store.go, which maps that into alerts.ErrNotFound.
+UPDATE alerts SET published = ?, updated_at = ? WHERE id = ?
+RETURNING id;
 
--- name: DeleteAlert :exec
-DELETE FROM alerts WHERE id = ?;
+-- name: DeleteAlert :one
+-- RETURNING id, for the same reason as SetAlertPublished above: deleting a
+-- nonexistent id must be reported, not silently accepted.
+DELETE FROM alerts WHERE id = ?
+RETURNING id;
 
 -- name: ListAlerts :many
 -- Every region. Region id 0 (Tampa Bay) is a real region, so "all regions"
