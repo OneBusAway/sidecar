@@ -40,6 +40,11 @@ include alerts authored with `--test`; omit it to see what riders see.
 server over HTTP — it opens the same SQLite database file directly, so run it against a
 copy of (or the same file as) whatever `--db`/`SIDECAR_DB` the server uses.
 
+The steps below are sequential, not independent examples: `region sync` populates the
+regions table that `region set` updates, and `region set` must run before the first
+`alert create` in a fresh database — the regions directory carries no agency id, so
+`alert create` has nothing to fall back on and refuses to guess.
+
 ```sh
 go build -o bin/sidecar-admin ./cmd/sidecar-admin
 
@@ -50,16 +55,18 @@ go build -o bin/sidecar-admin ./cmd/sidecar-admin
 # default agency id stamped onto alerts that don't specify one, and the
 # timezone `alert create`/`alert edit` interpret naive-looking times against
 # (an explicit UTC offset is still required; the timezone is only used to
-# report a helpful error).
+# report a helpful error). Required before the first `alert create` below.
 ./bin/sidecar-admin --db ./sidecar.db region set --id 1 \
   --agency-id 1 --timezone America/Los_Angeles
 
 # Author, then publish, an alert. --start/--end always require an explicit
-# RFC 3339 offset.
-./bin/sidecar-admin --db ./sidecar.db alert create --region 1 \
+# RFC 3339 offset. `alert create` prints `created alert <id>`; publish that
+# id -- it's only 1 on a fresh database.
+id=$(./bin/sidecar-admin --db ./sidecar.db alert create --region 1 \
   --header "Route 44 detoured" --start 2026-08-15T14:00:00-07:00 \
-  --cause CONSTRUCTION --effect DETOUR
-./bin/sidecar-admin --db ./sidecar.db alert publish 1
+  --cause CONSTRUCTION --effect DETOUR | awk '{print $3}')
+echo "created alert $id"
+./bin/sidecar-admin --db ./sidecar.db alert publish "$id"
 
 # Alerts stay drafts -- absent from the feed -- until published.
 ./bin/sidecar-admin --db ./sidecar.db alert list --region 1

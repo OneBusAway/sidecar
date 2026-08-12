@@ -203,6 +203,16 @@ func TestMissingAgencyResolutionRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("alert create with no agency resolution: want error, got nil")
 	}
+	// This is the single most likely first-run failure -- exactly what a user
+	// hits by copying the README's `alert create` without its `region set`
+	// predecessor -- so the message must name both fixes with commands the
+	// user can actually run, not just state the problem.
+	if !strings.Contains(err.Error(), "region set") {
+		t.Errorf("error = %q, want it to name the `region set` fix", err.Error())
+	}
+	if !strings.Contains(err.Error(), "--agency-id") {
+		t.Errorf("error = %q, want it to name the --agency-id fix", err.Error())
+	}
 	assertNoAlerts(t, store, 1)
 }
 

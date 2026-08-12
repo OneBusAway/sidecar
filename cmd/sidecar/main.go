@@ -72,14 +72,14 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// before the sync loop's goroutine can panic and take the whole process
 	// -- including the HTTP server, already serving by then -- down with it.
 	if *refresh <= 0 {
-		return fmt.Errorf("sidecar: --refresh must be positive, got %s", refresh.String())
+		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}
 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
 	store, err := sqlite.Open(*dbPath)
 	if err != nil {
-		return fmt.Errorf("sidecar: open database: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
@@ -91,7 +91,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// regions table, so a directory sync that ran first would fail against
 	// a missing relation. Never serve on an unknown schema.
 	if err := store.Migrate(); err != nil {
-		return fmt.Errorf("sidecar: migrate database: %w", err)
+		return fmt.Errorf("migrate database: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -125,7 +125,7 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("sidecar: listen and serve: %w", err)
+			errCh <- fmt.Errorf("listen and serve: %w", err)
 			return
 		}
 		errCh <- nil
@@ -139,7 +139,7 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("sidecar: shutdown: %w", err)
+			return fmt.Errorf("shutdown: %w", err)
 		}
 		return <-errCh
 	}

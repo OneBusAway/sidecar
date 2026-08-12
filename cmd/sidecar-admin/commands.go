@@ -48,12 +48,12 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("sidecar-admin: missing command; expected region, alert, or migrate")
+		return errors.New("missing command; expected region, alert, or migrate")
 	}
 
 	store, err := sqlite.Open(*dbPath)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: open database: %w", err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
@@ -71,7 +71,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// schema a read-only inspection command was never supposed to touch.
 	if cmd != "migrate" || len(cmdArgs) == 0 || cmdArgs[0] != "status" {
 		if err := store.Migrate(); err != nil {
-			return fmt.Errorf("sidecar-admin: migrate database: %w", err)
+			return fmt.Errorf("migrate database: %w", err)
 		}
 	}
 
@@ -86,7 +86,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
 	default:
-		return fmt.Errorf("sidecar-admin: unknown command %q; expected region, alert, or migrate", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, or migrate", cmd)
 	}
 }
 
@@ -128,13 +128,28 @@ func parseInstant(s string, region regions.Region) (time.Time, error) {
 // subcommand for the error message, e.g. "alert show".
 func parseAlertIDArg(op string, args []string) (int64, error) {
 	if len(args) == 0 {
-		return 0, fmt.Errorf("sidecar-admin: %s requires an alert id", op)
+		return 0, fmt.Errorf("%s requires an alert id", op)
 	}
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("sidecar-admin: %s: invalid alert id %q: %w", op, args[0], err)
+		return 0, fmt.Errorf("%s: invalid alert id %q: %w", op, args[0], err)
 	}
 	return id, nil
+}
+
+// wrapAlertErr frames a store-layer error about an existing alert in terms of
+// the subcommand and id the user supplied (e.g. "alert publish 1: alert not
+// found"), rather than a second copy of the store's own operation name or the
+// storage layer's internal wrapping (e.g. "sqlite: set published for alert
+// 1"). errors.Is(result, alerts.ErrNotFound) still succeeds, since the
+// sentinel is re-wrapped unchanged; any other error keeps the store's full
+// detail, since that detail -- not a restatement of "op id" -- is what's
+// needed to diagnose something unexpected.
+func wrapAlertErr(op string, id int64, err error) error {
+	if errors.Is(err, alerts.ErrNotFound) {
+		return fmt.Errorf("%s %d: %w", op, id, alerts.ErrNotFound)
+	}
+	return fmt.Errorf("%s %d: %w", op, id, err)
 }
 
 // formatInZone renders t in tz alongside UTC, so `alert list`/`alert show`
@@ -158,7 +173,7 @@ func formatInZone(t time.Time, tz string) string {
 
 func runRegion(ctx context.Context, stdout io.Writer, store *sqlite.Store, regionsURL string, now time.Time, args []string) error {
 	if len(args) == 0 {
-		return errors.New("sidecar-admin: region requires a subcommand: list, set, sync")
+		return errors.New("region requires a subcommand: list, set, sync")
 	}
 	switch args[0] {
 	case "list":
@@ -168,14 +183,14 @@ func runRegion(ctx context.Context, stdout io.Writer, store *sqlite.Store, regio
 	case "sync":
 		return regionSync(ctx, store.Regions(), regionsURL, now)
 	default:
-		return fmt.Errorf("sidecar-admin: unknown region subcommand %q; expected list, set, or sync", args[0])
+		return fmt.Errorf("unknown region subcommand %q; expected list, set, or sync", args[0])
 	}
 }
 
 func regionList(ctx context.Context, stdout io.Writer, repo regions.Repository) error {
 	list, err := repo.List(ctx)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: region list: %w", err)
+		return fmt.Errorf("region list: %w", err)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 	for _, r := range list {
@@ -199,12 +214,12 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 	}
 	seen := visitedFlags(fs)
 	if !seen["id"] {
-		return errors.New("sidecar-admin: region set requires --id")
+		return errors.New("region set requires --id")
 	}
 
 	current, err := repo.Get(ctx, *id)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: region set: %w", err)
+		return fmt.Errorf("region set: %w", err)
 	}
 
 	newAgencyID := current.DefaultAgencyID
@@ -225,19 +240,19 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 		// machine-local dependence this design bans everywhere else. Both
 		// are rejected explicitly rather than trusted to LoadLocation.
 		if *timezone == "" {
-			return errors.New("sidecar-admin: region set: --timezone must not be empty")
+			return errors.New("region set: --timezone must not be empty")
 		}
 		if *timezone == "Local" {
-			return errors.New("sidecar-admin: region set: --timezone \"Local\" is machine-dependent; use an explicit IANA zone name")
+			return errors.New("region set: --timezone \"Local\" is machine-dependent; use an explicit IANA zone name")
 		}
 		if _, err := time.LoadLocation(*timezone); err != nil {
-			return fmt.Errorf("sidecar-admin: region set: invalid --timezone %q: %w", *timezone, err)
+			return fmt.Errorf("region set: invalid --timezone %q: %w", *timezone, err)
 		}
 		newTimezone = *timezone
 	}
 
 	if err := repo.SetLocalFields(ctx, *id, newAgencyID, newTimezone, now); err != nil {
-		return fmt.Errorf("sidecar-admin: region set: %w", err)
+		return fmt.Errorf("region set: %w", err)
 	}
 	return nil
 }
@@ -245,7 +260,7 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 func regionSync(ctx context.Context, repo regions.Repository, url string, now time.Time) error {
 	client := regions.NewClient(url, regions.DefaultClientOptions())
 	if err := regions.Sync(ctx, client, repo, func() time.Time { return now }); err != nil {
-		return fmt.Errorf("sidecar-admin: region sync: %w", err)
+		return fmt.Errorf("region sync: %w", err)
 	}
 	return nil
 }
@@ -256,7 +271,7 @@ func regionSync(ctx context.Context, repo regions.Repository, url string, now ti
 
 func runAlert(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert requires a subcommand: create, list, show, edit, publish, unpublish, delete, translate")
+		return errors.New("alert requires a subcommand: create, list, show, edit, publish, unpublish, delete, translate")
 	}
 	cmd, cmdArgs := args[0], args[1:]
 	switch cmd {
@@ -277,7 +292,7 @@ func runAlert(ctx context.Context, stdout io.Writer, store *sqlite.Store, now ti
 	case "translate":
 		return alertTranslate(ctx, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("sidecar-admin: unknown alert subcommand %q", cmd)
+		return fmt.Errorf("unknown alert subcommand %q", cmd)
 	}
 }
 
@@ -310,30 +325,30 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("sidecar-admin: alert create requires %s", strings.Join(missing, ", "))
+		return fmt.Errorf("alert create requires %s", strings.Join(missing, ", "))
 	}
 
 	reg, err := store.Regions().Get(ctx, *regionID)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 
 	startTime, err := parseInstant(*start, reg)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 
 	var endTime *time.Time
 	if seen["end"] {
 		endInstant, endErr := parseInstant(*end, reg)
 		if endErr != nil {
-			return fmt.Errorf("sidecar-admin: alert create: %w", endErr)
+			return fmt.Errorf("alert create: %w", endErr)
 		}
 		endTime = &endInstant
 	}
 
 	if winErr := alerts.ValidateWindow(startTime, endTime, now); winErr != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", winErr)
+		return fmt.Errorf("alert create: %w", winErr)
 	}
 
 	// agency_id resolves at author time: --agency-id, else the region's
@@ -345,20 +360,24 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 		resolvedAgencyID = *agencyID
 	}
 	if resolvedAgencyID == "" {
-		return fmt.Errorf("sidecar-admin: alert create: no --agency-id given and region %d has no default agency id", *regionID)
+		return fmt.Errorf(
+			"alert create: region %d has no default agency id.\n"+
+				"  Set one:              sidecar-admin --db <db> region set --id %d --agency-id <agency>\n"+
+				"  Or pass it per-alert: --agency-id <agency>",
+			*regionID, *regionID)
 	}
 
 	causeName, err := alerts.ParseCause(*cause)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 	effectName, err := alerts.ParseEffect(*effect)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 	severityName, err := alerts.ParseSeverity(*severity)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 
 	a, err := store.Alerts().Create(ctx, alerts.NewAlert{
@@ -375,7 +394,7 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 		IsTest:          *isTest,
 	}, now)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert create: %w", err)
+		return fmt.Errorf("alert create: %w", err)
 	}
 
 	fmt.Fprintf(stdout, "created alert %d\n", a.ID)
@@ -397,10 +416,10 @@ func alertList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 	seen := visitedFlags(fs)
 
 	if seen["region"] && *all {
-		return errors.New("sidecar-admin: alert list: specify only one of --region or --all")
+		return errors.New("alert list: specify only one of --region or --all")
 	}
 	if !seen["region"] && !*all {
-		return errors.New("sidecar-admin: alert list: specify --region N or --all")
+		return errors.New("alert list: specify --region N or --all")
 	}
 
 	filter := alerts.ListFilter{}
@@ -410,7 +429,7 @@ func alertList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 
 	list, err := store.Alerts().List(ctx, filter)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert list: %w", err)
+		return fmt.Errorf("alert list: %w", err)
 	}
 
 	regionCache := map[int64]regions.Region{}
@@ -419,7 +438,7 @@ func alertList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 		if !ok {
 			reg, err = store.Regions().Get(ctx, a.RegionID)
 			if err != nil {
-				return fmt.Errorf("sidecar-admin: alert list: region %d: %w", a.RegionID, err)
+				return fmt.Errorf("alert list: region %d: %w", a.RegionID, err)
 			}
 			regionCache[a.RegionID] = reg
 		}
@@ -447,7 +466,7 @@ func alertShow(ctx context.Context, stdout io.Writer, store alertShowStore, args
 
 	a, err := store.Alerts().Get(ctx, id)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert show: %w", err)
+		return wrapAlertErr("alert show", id, err)
 	}
 
 	// A missing region is tolerated (formatInZone degrades to UTC-only), but
@@ -463,7 +482,7 @@ func alertShow(ctx context.Context, stdout io.Writer, store alertShowStore, args
 	case errors.Is(err, regions.ErrNotFound):
 		// fall through with tz == "" (UTC only).
 	default:
-		return fmt.Errorf("sidecar-admin: alert show: region %d: %w", a.RegionID, err)
+		return fmt.Errorf("alert show: region %d: %w", a.RegionID, err)
 	}
 
 	fmt.Fprintf(stdout, "id: %d\n", a.ID)
@@ -521,19 +540,19 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	seen := visitedFlags(fs)
 
 	if seen["end"] && *noEnd {
-		return errors.New("sidecar-admin: alert edit: specify only one of --end or --no-end")
+		return errors.New("alert edit: specify only one of --end or --no-end")
 	}
 	if seen["test"] && seen["no-test"] {
-		return errors.New("sidecar-admin: alert edit: specify only one of --test or --no-test")
+		return errors.New("alert edit: specify only one of --test or --no-test")
 	}
 
 	current, err := store.Alerts().Get(ctx, id)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert edit: %w", err)
+		return wrapAlertErr("alert edit", id, err)
 	}
 	reg, err := store.Regions().Get(ctx, current.RegionID)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert edit: %w", err)
+		return fmt.Errorf("alert edit: %w", err)
 	}
 
 	var patch alerts.Patch
@@ -542,7 +561,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	if seen["start"] {
 		startInstant, startErr := parseInstant(*start, reg)
 		if startErr != nil {
-			return fmt.Errorf("sidecar-admin: alert edit: %w", startErr)
+			return fmt.Errorf("alert edit: %w", startErr)
 		}
 		patch.StartTime = &startInstant
 		effectiveStart = startInstant
@@ -556,14 +575,14 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	case seen["end"]:
 		endInstant, endErr := parseInstant(*end, reg)
 		if endErr != nil {
-			return fmt.Errorf("sidecar-admin: alert edit: %w", endErr)
+			return fmt.Errorf("alert edit: %w", endErr)
 		}
 		patch.EndTime = &endInstant
 		effectiveEnd = &endInstant
 	}
 
 	if winErr := alerts.ValidateWindow(effectiveStart, effectiveEnd, now); winErr != nil {
-		return fmt.Errorf("sidecar-admin: alert edit: %w", winErr)
+		return fmt.Errorf("alert edit: %w", winErr)
 	}
 
 	if seen["header"] {
@@ -577,28 +596,28 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	}
 	if seen["agency-id"] {
 		if *agencyID == "" {
-			return errors.New("sidecar-admin: alert edit: --agency-id cannot be empty")
+			return errors.New("alert edit: --agency-id cannot be empty")
 		}
 		patch.AgencyID = agencyID
 	}
 	if seen["cause"] {
 		name, causeErr := alerts.ParseCause(*cause)
 		if causeErr != nil {
-			return fmt.Errorf("sidecar-admin: alert edit: %w", causeErr)
+			return fmt.Errorf("alert edit: %w", causeErr)
 		}
 		patch.Cause = &name
 	}
 	if seen["effect"] {
 		name, effectErr := alerts.ParseEffect(*effect)
 		if effectErr != nil {
-			return fmt.Errorf("sidecar-admin: alert edit: %w", effectErr)
+			return fmt.Errorf("alert edit: %w", effectErr)
 		}
 		patch.Effect = &name
 	}
 	if seen["severity"] {
 		name, severityErr := alerts.ParseSeverity(*severity)
 		if severityErr != nil {
-			return fmt.Errorf("sidecar-admin: alert edit: %w", severityErr)
+			return fmt.Errorf("alert edit: %w", severityErr)
 		}
 		patch.Severity = &name
 	}
@@ -627,7 +646,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	}
 
 	if _, err := store.Alerts().Update(ctx, id, patch, now); err != nil {
-		return fmt.Errorf("sidecar-admin: alert edit: %w", err)
+		return wrapAlertErr("alert edit", id, err)
 	}
 	return nil
 }
@@ -642,7 +661,7 @@ func alertSetPublished(ctx context.Context, store *sqlite.Store, now time.Time, 
 		return err
 	}
 	if err := store.Alerts().SetPublished(ctx, id, published, now); err != nil {
-		return fmt.Errorf("sidecar-admin: set published: %w", err)
+		return wrapAlertErr(op, id, err)
 	}
 	return nil
 }
@@ -653,7 +672,7 @@ func alertDelete(ctx context.Context, store *sqlite.Store, args []string) error 
 		return err
 	}
 	if err := store.Alerts().Delete(ctx, id); err != nil {
-		return fmt.Errorf("sidecar-admin: alert delete: %w", err)
+		return wrapAlertErr("alert delete", id, err)
 	}
 	return nil
 }
@@ -679,15 +698,15 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 	seen := visitedFlags(fs)
 
 	if !seen["language"] || strings.TrimSpace(*language) == "" {
-		return errors.New("sidecar-admin: alert translate requires --language")
+		return errors.New("alert translate requires --language")
 	}
 	if !seen["header"] && !seen["description"] {
-		return errors.New("sidecar-admin: alert translate requires --header and/or --description")
+		return errors.New("alert translate requires --header and/or --description")
 	}
 
 	current, err := store.Alerts().Get(ctx, id)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert translate: %w", err)
+		return wrapAlertErr("alert translate", id, err)
 	}
 
 	lang := alerts.NormalizeLanguage(*language)
@@ -700,7 +719,7 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 			SourceSHA256: alerts.SourceHash(current.HeaderText),
 		}
 		if upsertErr := store.Alerts().UpsertTranslation(ctx, id, t, now); upsertErr != nil {
-			return fmt.Errorf("sidecar-admin: alert translate: header: %w", upsertErr)
+			return fmt.Errorf("alert translate: header: %w", upsertErr)
 		}
 	}
 	if seen["description"] {
@@ -711,7 +730,7 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 			SourceSHA256: alerts.SourceHash(current.DescriptionText),
 		}
 		if upsertErr := store.Alerts().UpsertTranslation(ctx, id, t, now); upsertErr != nil {
-			return fmt.Errorf("sidecar-admin: alert translate: description: %w", upsertErr)
+			return fmt.Errorf("alert translate: description: %w", upsertErr)
 		}
 	}
 	return nil
@@ -723,7 +742,7 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 
 func runMigrate(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
 	if len(args) == 0 {
-		return errors.New("sidecar-admin: migrate requires a subcommand: up, status")
+		return errors.New("migrate requires a subcommand: up, status")
 	}
 	switch args[0] {
 	case "up":
@@ -731,14 +750,14 @@ func runMigrate(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 		// explicit, scriptable use (e.g. a deploy step) and is a no-op when
 		// already current.
 		if err := store.Migrate(); err != nil {
-			return fmt.Errorf("sidecar-admin: migrate up: %w", err)
+			return fmt.Errorf("migrate up: %w", err)
 		}
 		fmt.Fprintln(stdout, "database is up to date")
 		return nil
 	case "status":
 		statuses, err := store.MigrationStatuses(ctx)
 		if err != nil {
-			return fmt.Errorf("sidecar-admin: migrate status: %w", err)
+			return fmt.Errorf("migrate status: %w", err)
 		}
 		pending := 0
 		for _, s := range statuses {
@@ -754,6 +773,6 @@ func runMigrate(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 		}
 		return nil
 	default:
-		return fmt.Errorf("sidecar-admin: unknown migrate subcommand %q; expected up or status", args[0])
+		return fmt.Errorf("unknown migrate subcommand %q; expected up or status", args[0])
 	}
 }
