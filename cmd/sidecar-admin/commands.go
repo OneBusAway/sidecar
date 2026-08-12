@@ -26,11 +26,16 @@ const (
 // and a temp database, entirely in-process -- no subprocess. It returns an
 // error rather than exiting so main owns the only exit path.
 //
+// stdin feeds `user create`/`user passwd`'s --password-stdin and interactive
+// prompt; every other command ignores it.
+//
 // Every command runs against a freshly migrated schema: like cmd/sidecar,
 // this never operates against an unknown schema. `migrate up` is still
 // useful on its own for scripted, explicit use (e.g. a deploy step) even
 // though it is redundant here.
-func run(stdout, stderr io.Writer, args []string) error {
+//
+//nolint:unparam // stdin is threaded through in this commit; the next commit's runUser dispatch consumes it.
+func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	fs := flag.NewFlagSet("sidecar-admin", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 

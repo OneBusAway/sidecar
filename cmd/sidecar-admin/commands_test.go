@@ -40,12 +40,13 @@ func seedRegion(t *testing.T, repo regions.Repository, id int64) {
 }
 
 // cli runs one sidecar-admin invocation against dbPath through the run seam
-// -- no subprocess -- and returns stdout, stderr, and the error.
+// -- no subprocess -- with empty stdin (unused by every command exercised in
+// this file), and returns stdout, stderr, and the error.
 func cli(t *testing.T, dbPath string, args ...string) (string, string, error) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	full := append([]string{"--db", dbPath}, args...)
-	err := run(&stdout, &stderr, full)
+	err := run(strings.NewReader(""), &stdout, &stderr, full)
 	return stdout.String(), stderr.String(), err
 }
 
