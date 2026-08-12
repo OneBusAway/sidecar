@@ -3,12 +3,18 @@ package regions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrResponseTooLarge is the sentinel wrapped into the error Fetch returns
+// when the response body exceeds ClientOptions.MaxBytes, distinguishing that
+// failure from an ordinary malformed-JSON or transport error.
+var ErrResponseTooLarge = errors.New("regions: response too large")
 
 // ClientOptions bounds a directory fetch. Every field here is a security
 // control, not a tuning knob: this is an unauthenticated ingest path from
@@ -126,7 +132,7 @@ func (c *Client) Fetch(ctx context.Context) ([]Region, error) {
 		return nil, fmt.Errorf("regions: read response from %s: %w", c.url, err)
 	}
 	if int64(len(body)) > c.opts.MaxBytes {
-		return nil, fmt.Errorf("regions: response from %s exceeds %d bytes", c.url, c.opts.MaxBytes)
+		return nil, fmt.Errorf("regions: response from %s exceeds %d bytes: %w", c.url, c.opts.MaxBytes, ErrResponseTooLarge)
 	}
 
 	var doc directoryResponse

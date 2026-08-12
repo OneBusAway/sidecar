@@ -80,7 +80,7 @@ lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 ## --- Aggregates ------------------------------------------------------------
 
 .PHONY: check
-check: fmt-check vet lint test test-tz ## Everything CI runs
+check: fmt-check vet lint test test-tz test-race ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts

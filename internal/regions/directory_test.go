@@ -3,6 +3,7 @@ package regions_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -83,21 +84,32 @@ func TestFetch_RejectsOversizedBody(t *testing.T) {
 	opts := testOptions()
 	opts.MaxBytes = 1024
 
+	// The body is well-formed JSON that genuinely exceeds MaxBytes (a single
+	// entry padded with a long regionName). If it merely failed to parse,
+	// deleting the size cap would still make this test pass -- json.Unmarshal
+	// would reject it on its own, decoupling the assertion from the cap it's
+	// meant to exercise. Padding well past MaxBytes*2 also keeps the test
+	// robust to the +1-byte boundary the cap enforces at.
+	pad := strings.Repeat("x", int(opts.MaxBytes)*2)
+	body := fmt.Sprintf(`{"version":3,"code":200,"text":"OK","data":{"list":[
+		{"id":1,"regionName":%q,"obaBaseUrl":"https://example.org/","active":true}
+	]}}`, pad)
+	if int64(len(body)) <= opts.MaxBytes {
+		t.Fatalf("test body is %d bytes, want > MaxBytes (%d)", len(body), opts.MaxBytes)
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		// Write MaxBytes+1 bytes so the body itself, independent of JSON
-		// validity, exceeds the cap.
-		buf := make([]byte, opts.MaxBytes+1)
-		for i := range buf {
-			buf[i] = ' '
-		}
-		_, _ = w.Write(buf)
+		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 
 	client := regions.NewClient(srv.URL, opts)
-	if _, err := client.Fetch(context.Background()); err == nil {
+	_, err := client.Fetch(context.Background())
+	if err == nil {
 		t.Fatal("Fetch: want error for oversized body, got nil")
+	}
+	if !errors.Is(err, regions.ErrResponseTooLarge) {
+		t.Fatalf("Fetch error = %v, want errors.Is(err, regions.ErrResponseTooLarge) -- a body this large that fails for some other reason (e.g. JSON parse) would not prove the size cap fired", err)
 	}
 }
 

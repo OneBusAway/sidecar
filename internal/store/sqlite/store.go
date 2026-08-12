@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -20,6 +21,26 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
 )
+
+// gooseConfigureOnce guards goose.SetBaseFS/goose.SetDialect, which mutate
+// goose's own package-level globals rather than anything scoped to a *Store.
+// Calling them from concurrent Migrate calls -- as parallel tests routinely
+// do, each against its own database -- is a data race on those globals even
+// though the migrations themselves target independent *sql.DB handles.
+// goose.Up itself is not guarded here: it operates on the caller's own db
+// and needs no serializing once the globals are set once.
+var (
+	gooseConfigureOnce sync.Once
+	gooseConfigureErr  error
+)
+
+func configureGoose() error {
+	gooseConfigureOnce.Do(func() {
+		goose.SetBaseFS(migrations.FS)
+		gooseConfigureErr = goose.SetDialect("sqlite3")
+	})
+	return gooseConfigureErr
+}
 
 // Store owns the database connection pool and hands out the two
 // repositories. It is safe for concurrent use.
@@ -46,8 +67,7 @@ func Open(path string) (*Store, error) {
 
 // Migrate runs the embedded goose migrations.
 func (s *Store) Migrate() error {
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
+	if err := configureGoose(); err != nil {
 		return fmt.Errorf("sqlite: set dialect: %w", err)
 	}
 	if err := goose.Up(s.db, "."); err != nil {
