@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
 // regionJSONFields are the field names the SPA's region screen (task 11) is
@@ -81,6 +84,40 @@ func TestAdminRegions_List(t *testing.T) {
 	// empty string: the column is NOT NULL DEFAULT 'UTC'.
 	if v := str(t, bare, "timezone"); v != "UTC" {
 		t.Errorf("region 2 timezone = %q, want the schema default UTC", v)
+	}
+}
+
+// emptyRegions is a region store with nothing in it: what a fresh database
+// looks like before the first directory refresh.
+type emptyRegions struct{ failingRegions }
+
+func (emptyRegions) List(context.Context) ([]regions.Region, error) { return nil, nil }
+
+// TestAdminRegions_ListEmptyIsAnArray: the store returns a nil slice for an
+// empty table, and a nil slice marshals to null. `null.map(...)` is the same
+// SPA crash the alerts list has its own test for, and the region screen is the
+// first thing an operator opens on a brand-new deployment -- exactly when the
+// table is empty.
+func TestAdminRegions_ListEmptyIsAnArray(t *testing.T) {
+	t.Parallel()
+
+	repo := newStubAuth()
+	repo.addUser("admin", testHash())
+	h := NewRouter(Deps{
+		Alerts:  failingAlerts{},
+		Regions: emptyRegions{},
+		Auth:    repo,
+		Now:     func() time.Time { return testNow },
+		Logger:  discardLogger(),
+		Sleep:   func(time.Duration) {},
+	})
+
+	rec := sendTo(h, http.MethodGet, "/api/admin/v1/regions", "", adminLogin(t, h))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if body := bodyText(rec); body != "[]" {
+		t.Errorf("body = %q, want %q", body, "[]")
 	}
 }
 

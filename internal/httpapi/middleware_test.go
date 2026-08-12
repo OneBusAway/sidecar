@@ -206,11 +206,18 @@ func (s *stubAuth) DeleteExpiredSessions(_ context.Context, now time.Time) (int6
 
 // newTestRouter builds the router with the admin routes registered, letting a
 // test tweak the deps (FailDelay, Sleep, Now) before NewRouter sees them.
+//
+// The alert and region stores are the always-failing stubs: NewRouter requires
+// both whenever Auth is set, and the session tests must never reach them --
+// a session test that somehow got an alert response would be testing the wrong
+// thing.
 func newTestRouter(repo auth.Repository, mutate func(*Deps)) http.Handler {
 	deps := Deps{
-		Auth:   repo,
-		Now:    func() time.Time { return testNow },
-		Logger: discardLogger(),
+		Alerts:  failingAlerts{},
+		Regions: failingRegions{},
+		Auth:    repo,
+		Now:     func() time.Time { return testNow },
+		Logger:  discardLogger(),
 	}
 	if mutate != nil {
 		mutate(&deps)

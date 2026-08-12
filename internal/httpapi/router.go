@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -95,15 +96,27 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 
-	// Now cannot be defaulted here -- time.Now is banned outside cmd/ -- so an
-	// admin router built without it would nil-deref inside the first login,
-	// which net/http recovers per connection: the operator would see a reset
-	// request after deployment rather than an error at startup. Fail loudly
-	// while there is still a stack trace worth reading.
-	if deps.Auth != nil && deps.Now == nil {
-		panic("httpapi: Deps.Now is required when Deps.Auth is set")
-	}
+	// The admin routes dereference all three of these on the first request that
+	// reaches them, and a nil-deref inside a handler is recovered by net/http
+	// per connection: the operator would see a reset request some time after
+	// deployment rather than an error at startup. Now in particular cannot be
+	// defaulted here, since time.Now is banned outside cmd/. Fail loudly while
+	// there is still a stack trace worth reading, naming everything missing so
+	// the fix is one edit rather than three restarts.
 	if deps.Auth != nil {
+		var missing []string
+		if deps.Now == nil {
+			missing = append(missing, "Deps.Now")
+		}
+		if deps.Alerts == nil {
+			missing = append(missing, "Deps.Alerts")
+		}
+		if deps.Regions == nil {
+			missing = append(missing, "Deps.Regions")
+		}
+		if len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
+		}
 		registerAdminRoutes(mux, deps)
 	}
 	return mux
@@ -159,11 +172,23 @@ func adminRoutes(deps Deps) []adminRoute {
 	}
 }
 
+// routeRegistrar is the one method registerAdminRoutes needs from
+// *http.ServeMux. It is an interface purely so a test can pass a recorder and
+// assert that the set of patterns actually registered equals the set in
+// adminRoutes -- otherwise a stray mux.Handle added inside registerAdminRoutes
+// would mount an admin handler that no test in this package can see, since
+// http.ServeMux offers no way to enumerate what it holds.
+type routeRegistrar interface {
+	Handle(pattern string, handler http.Handler)
+}
+
 // registerAdminRoutes mounts the admin JSON API. Every route passes through
 // crossSiteGuard -- including POST /session, which is the whole reason the
 // guard is separate from requireSession (design spec §4.4) -- and everything
 // except login and logout also requires a live session.
-func registerAdminRoutes(mux *http.ServeMux, deps Deps) {
+//
+// Every registration must come from adminRoutes; see routeRegistrar.
+func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 	mw := &authMiddleware{deps: deps}
 	for _, route := range adminRoutes(deps) {
 		var h http.Handler = route.handler

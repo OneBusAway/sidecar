@@ -417,9 +417,9 @@ func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	language := alerts.NormalizeLanguage(r.PathValue("lang"))
-	if language == "" {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "language must not be empty")
+	language, err := pathLanguage(r)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -474,8 +474,13 @@ func (h *adminAlertsHandler) deleteTranslation(w http.ResponseWriter, r *http.Re
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.deps.Alerts.DeleteTranslation(r.Context(), id, r.PathValue("lang")); err != nil {
-		h.storeError(w, "delete translation", err)
+	language, err := pathLanguage(r)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	if delErr := h.deps.Alerts.DeleteTranslation(r.Context(), id, language); delErr != nil {
+		h.storeError(w, "delete translation", delErr)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -605,6 +610,25 @@ func parseInstantJSON(s string, region regions.Region) (time.Time, error) {
 				"region %d is configured as %s: %w", s, region.ID, region.Timezone, err)
 	}
 	return t.UTC(), nil
+}
+
+// pathLanguage parses and normalizes the {lang} path wildcard.
+//
+// A tag that normalizes to nothing -- ".../translations/%20" is the only way
+// to spell it, since {lang} cannot match an empty path segment -- is rejected
+// rather than passed on. An empty language would otherwise store a translation
+// row with no language tag at all, which the feed would then emit as an
+// unlabelled alternative to the English text. Both translation handlers use
+// this, so identical input gets an identical answer from each: the alternative
+// (PUT rejecting it, DELETE reporting 404 because it matched no rows) is a
+// difference with no meaning behind it.
+func pathLanguage(r *http.Request) (string, error) {
+	raw := r.PathValue("lang")
+	language := alerts.NormalizeLanguage(raw)
+	if language == "" {
+		return "", fmt.Errorf("invalid language %q: must be a BCP-47 tag such as es", raw)
+	}
+	return language, nil
 }
 
 // pathID parses the {id} path wildcard, returning a caller-safe message the

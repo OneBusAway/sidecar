@@ -573,11 +573,14 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 		},
 		{
 			name: "empty agency id", body: `{"region_id":1,"agency_id":"","header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
-			// An empty explicit agency id falls back to the region default,
-			// exactly as an omitted one does -- the CLI cannot tell them apart
-			// either. This row exists to pin that it is not a 400 or an empty
-			// stored agency_id, which would produce a feed entry no OBA app
-			// matches.
+			// With a plain `string` field, JSON cannot distinguish an empty
+			// agency_id from an absent one, so an empty value falls back to the
+			// region default rather than erroring. The CLI *can* tell them
+			// apart -- it tracks which flags were visited, so an explicit
+			// `--agency-id ""` reaches the "no default agency id" error instead
+			// of falling back. This row pins the API's answer, which must
+			// never be an empty stored agency_id: that produces a feed entry
+			// no OBA app matches.
 			wantStatus: http.StatusCreated,
 		},
 		{
@@ -1183,6 +1186,91 @@ func TestAdminAlerts_Translations(t *testing.T) {
 			t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 		}
 	})
+
+	// A tag that normalizes to nothing is the same malformed request whichever
+	// method carries it. PUT must refuse it because an empty language would
+	// store a translation row the feed emits with no language tag at all;
+	// DELETE answers the same way rather than reporting 404 (which is what
+	// "matched no rows" would otherwise produce) so identical input does not
+	// get two different explanations.
+	t.Run("a blank language tag is a 400 on both methods", func(t *testing.T) {
+		for _, m := range []struct {
+			method, body string
+		}{
+			{http.MethodPut, `{"header":"x"}`},
+			{http.MethodDelete, ""},
+		} {
+			rec := f.do(m.method, alertPath(id, "/translations/%20"), m.body)
+			assertContains(t, m.method+" error", errorText(t, rec, http.StatusBadRequest), "language")
+		}
+		for _, tr := range f.storedAlert(t, id).Translations {
+			if alerts.NormalizeLanguage(tr.Language) == "" {
+				t.Errorf("stored a translation with a blank language tag: %+v", tr)
+			}
+		}
+	})
+}
+
+// TestFormatInstant pins the global rule that response timestamps are RFC 3339
+// UTC. The store happens to hand back UTC times today, so nothing that goes
+// through it can catch a dropped .UTC() -- only a value carrying a real offset
+// can.
+func TestFormatInstant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   time.Time
+		want string
+	}{
+		{"offset is converted", time.Date(2026, 8, 15, 14, 0, 0, 0, time.FixedZone("PDT", -7*3600)), "2026-08-15T21:00:00Z"},
+		{"positive offset is converted", time.Date(2026, 8, 16, 2, 45, 0, 0, time.FixedZone("NPT", 5*3600+45*60)), "2026-08-15T21:00:00Z"},
+		{"already UTC", time.Date(2026, 8, 15, 21, 0, 0, 0, time.UTC), "2026-08-15T21:00:00Z"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatInstant(tt.in); got != tt.want {
+				t.Errorf("formatInstant(%v) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// recordingMux collects the patterns registerAdminRoutes registers.
+type recordingMux struct {
+	patterns []string
+}
+
+func (m *recordingMux) Handle(pattern string, _ http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+}
+
+// TestRegisterAdminRoutes_RegistersExactlyTheTable is the other half of the
+// route-wiring assurance. TestAdminRoutes_EveryRouteRequiresASession proves
+// every route *in the table* carries its middleware; this proves nothing is
+// mounted that is not in the table. A bare mux.Handle added inside
+// registerAdminRoutes would otherwise ship an admin handler with no session
+// requirement that no test in this package could see, because http.ServeMux
+// cannot be enumerated.
+func TestRegisterAdminRoutes_RegistersExactlyTheTable(t *testing.T) {
+	t.Parallel()
+
+	deps := Deps{Logger: discardLogger()}
+	rec := &recordingMux{}
+	registerAdminRoutes(rec, deps)
+
+	want := make([]string, 0, len(adminRoutes(deps)))
+	for _, rt := range adminRoutes(deps) {
+		want = append(want, rt.pattern)
+	}
+	got := append([]string(nil), rec.patterns...)
+	sort.Strings(got)
+	sort.Strings(want)
+
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("registered patterns:\n  got  %v\n  want %v (exactly the adminRoutes table)", got, want)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,6 +1374,70 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 			t.Errorf("%s %s leaked the store error: %s", method, target, rec.Body.String())
 		}
 	}
+}
+
+// TestNewRouter_RequiresTheAdminStores extends the fail-loud startup guard to
+// the two stores the admin handlers dereference. Without it, a router wired
+// with Auth but no Alerts or Regions accepts the first admin request and
+// nil-derefs inside the handler, which net/http recovers per connection: the
+// operator sees a reset request some time after deployment instead of a
+// startup error with a stack trace.
+func TestNewRouter_RequiresTheAdminStores(t *testing.T) {
+	t.Parallel()
+
+	base := func() Deps {
+		return Deps{
+			Alerts:  failingAlerts{},
+			Regions: failingRegions{},
+			Auth:    newStubAuth(),
+			Now:     func() time.Time { return testNow },
+			Logger:  discardLogger(),
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Deps)
+		want   []string
+	}{
+		{"alerts missing", func(d *Deps) { d.Alerts = nil }, []string{"Deps.Alerts"}},
+		{"regions missing", func(d *Deps) { d.Regions = nil }, []string{"Deps.Regions"}},
+		{
+			"everything missing names everything",
+			func(d *Deps) { d.Alerts, d.Regions, d.Now = nil, nil, nil },
+			[]string{"Deps.Now", "Deps.Alerts", "Deps.Regions"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("NewRouter returned normally with a required admin dependency missing")
+				}
+				msg, ok := r.(string)
+				if !ok {
+					t.Fatalf("panic value = %v (%T), want a string message", r, r)
+				}
+				assertContains(t, "panic message", msg, tt.want...)
+			}()
+			deps := base()
+			tt.mutate(&deps)
+			NewRouter(deps)
+		})
+	}
+
+	t.Run("a fully wired admin router does not panic", func(t *testing.T) {
+		t.Parallel()
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("NewRouter panicked with every dependency set: %v", r)
+			}
+		}()
+		NewRouter(base())
+	})
 }
 
 // TestParseInstantJSON is the unit-level guard on the rule the whole timestamp
