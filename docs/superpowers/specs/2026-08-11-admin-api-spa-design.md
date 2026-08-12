@@ -64,8 +64,10 @@ the embed directory; `make build` and `make check` depend on it. `dist/` output 
 gitignored.
 
 `go:embed` needs the directory present even when Node hasn't run, so the embed
-directory contains a committed `.gitkeep` and uses an `all:`-prefixed pattern (plain
-patterns ignore dotfiles; `all:` does not). When `index.html` is absent — a Go-only
+directory contains a committed `.gitkeep` and uses an `all:`-prefixed pattern. `all:`
+is load-bearing twice over: plain patterns exclude files beginning with `.` **or
+`_`** — which drops both `.gitkeep` and SvelteKit's entire `_app/` output tree. A
+build without `all:` succeeds and then 404s every asset. When `index.html` is absent — a Go-only
 build — `/admin` returns `503 admin UI not built; run make web`, loudly, instead of a
 blank page or a panic at startup. A binary built by `make build` always has the UI.
 
@@ -133,9 +135,16 @@ type Repository interface {
 
     CreateSession(ctx context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error
     // GetSession returns ErrNotFound for unknown OR expired tokens; expiry is
-    // evaluated against the passed now, never the database clock.
+    // evaluated against the passed now, never the database clock. When it
+    // observes an expired row it DELETES it before returning ErrNotFound --
+    // a deliberate write inside a read path, part of the interface contract
+    // (storetest asserts it), so every implementation including Postgres
+    // must do the same.
     GetSession(ctx context.Context, tokenHash string, now time.Time) (Session, error)
     DeleteSession(ctx context.Context, tokenHash string) error
+    // DeleteUserSessions revokes every session for a user; user passwd calls
+    // it so a password change locks out whoever held the old password.
+    DeleteUserSessions(ctx context.Context, userID int64) (int64, error)
     DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error)
 }
 ```
@@ -143,6 +152,13 @@ type Repository interface {
 `ErrNotFound` follows the `alerts.ErrNotFound` convention. Duplicate usernames
 surface as `auth.ErrUsernameTaken`, mapped from the UNIQUE violation inside the
 store, never by a racy pre-check SELECT.
+
+**Username policy:** usernames are normalized in Go — trimmed of surrounding
+whitespace and lowercased — before every store and every lookup, so `Admin` and
+`admin` are one account on SQLite and Postgres alike. Normalization happens in
+`internal/auth`, never via SQL collation (the same rule the alerts spec applies to
+language tags). After trimming, a username must be 1–64 characters with no
+whitespace.
 
 ## 4. Authentication mechanics
 
@@ -183,20 +199,34 @@ store, never by a racy pre-check SELECT.
    `200 {"username": ...}`.
 
 The fixed delay is a brake on online guessing, not a substitute for rate limiting —
-which is explicitly out of scope and listed in §9.
+which is explicitly out of scope and listed in §9. The delay is an injected field
+beside the injected clock (`FailDelay time.Duration`, production 500 ms, tests 0)
+so the table-driven failure tests in §8 don't sleep half a second per row; a test
+asserts the delay is actually applied on the failure path.
 
 ### 4.4 Middleware
 
 - `RequireSession` wraps every `/api/admin/v1/*` route except `POST /session`:
   extracts the cookie, hashes, `GetSession` with injected now. Missing, unknown, or
-  expired → `401 {"error": "authentication required"}`, and expired rows are deleted
-  on discovery. The authenticated `User` lands in the request context.
-- **Cross-site write protection** on every non-GET admin route: if
-  `Sec-Fetch-Site` is present it must be `same-origin` or `none`; otherwise, if
-  `Origin` is present its host must equal the request `Host`. Anything else →
+  expired → `401 {"error": "authentication required"}` (expired rows are deleted by
+  `GetSession` itself — §3.2's contract, so the middleware needs no
+  expired-vs-unknown distinction). The authenticated `User` lands in the request
+  context.
+- **Cross-site write protection** on every non-GET `/api/admin/v1/*` route
+  **including `POST /session`** — login CSRF (logging a victim into an attacker's
+  account) is cheap to close and the login handler sits outside `RequireSession`,
+  so the check must not be coupled to that middleware. Rule: if `Sec-Fetch-Site` is
+  present it must be `same-origin` or `none`; otherwise, if `Origin` is present its
+  host must equal the request `Host`. Anything else →
   `403 {"error": "cross-site request rejected"}`. With `SameSite=Lax` this is
   defense in depth, not the only line; a token dance adds nothing for a same-origin
   SPA.
+- **Reverse-proxy requirement:** the `Origin`-vs-`Host` fallback assumes the proxy
+  preserves the public `Host` header (nginx: `proxy_set_header Host $host` — its
+  default rewrites `Host` to the upstream address, which would 403 every admin
+  write). This deployment requirement is documented beside the
+  `X-Forwarded-Proto` trust note in the README, and an httpapi test covers the
+  rewritten-`Host` failure mode so the error is at least legible.
 
 ### 4.5 What a 401 means to the SPA
 
@@ -219,7 +249,11 @@ DELETE /session                            logout → 204
 GET    /session                            whoami → 200 {username} | 401
 
 GET    /alerts?region=N                    list; drafts and test alerts included —
-                                           this is the authoring view, not the feed
+                                           this is the authoring view, not the feed.
+                                           region absent → all regions; non-integer
+                                           → 400; unknown id → 200 [] (it is a
+                                           filter, not a resource lookup — and
+                                           region 0 is real, never "unset")
 GET    /alerts/{id}                        → alert with translations
 POST   /alerts                             create draft → 201, Location header
 PATCH  /alerts/{id}                        partial update, CLI edit semantics
@@ -256,26 +290,36 @@ unauthenticated.
 
 ### 6.1 Stack
 
-- **SvelteKit** (Svelte 5), TypeScript, `@sveltejs/adapter-static`.
+- **SvelteKit** (Svelte 5), TypeScript, `@sveltejs/adapter-static`, scaffolded with
+  `npx sv create`.
 - `export const ssr = false` at the root layout and a `fallback: 'index.html'` in the
   adapter config: a pure client-rendered SPA, which is what serving from `go:embed`
-  requires — there is no Node server in production.
+  requires — there is no Node server in production. **No route may set
+  `prerender = true`** — the SvelteKit docs warn an `index.html` fallback conflicts
+  with prerendering, and adapter-static's *generic* recipe (root-layout
+  `prerender = true`) is exactly what not to copy here; the single-page-app recipe
+  governs.
 - No component library, no CSS framework in v1. Hand-written CSS; the surface is
   five screens.
 - Project lives in `web/admin/`.
 
 ### 6.2 Routes
 
-| Route | Screen |
-|---|---|
-| `/admin/login` | username/password form |
-| `/admin` | alerts list: region filter, published/draft/test badges, publish state at a glance |
-| `/admin/alerts/new` | create form |
-| `/admin/alerts/[id]` | edit + translations + publish/unpublish/delete |
-| `/admin/regions` | region list; edit default agency id and timezone inline |
+| Browser URL | `src/routes/` directory | Screen |
+|---|---|---|
+| `/admin/login` | `login/` | username/password form |
+| `/admin` | `+page.svelte` (root) | alerts list: region filter, published/draft/test badges |
+| `/admin/alerts/new` | `alerts/new/` | create form |
+| `/admin/alerts/[id]` | `alerts/[id]/` | edit + translations + publish/unpublish/delete |
+| `/admin/regions` | `regions/` | region list; edit default agency id and timezone inline |
 
 SvelteKit's `paths.base` is set to `/admin` so the static build's asset URLs and
-client router agree with where the Go server mounts it.
+client router agree with where the Go server mounts it. Route directories are
+expressed **without** the base — `src/routes/admin/login/` would produce
+`/admin/admin/login`, the same doubled-prefix failure mode commit `ca99e10` fixed
+in the CLI. In-app links and navigations use `resolve()` from `$app/paths` (the
+current API; bare `base` concatenation is deprecated), never hand-written
+`/admin/...` strings.
 
 ### 6.3 API client
 
@@ -290,14 +334,25 @@ coverage — it is exactly where the CLI's timezone bugs would reappear in the b
 
 `vite.config.ts` proxies `/api` to `http://localhost:8080` (the Go server), so
 `npm run dev` gives hot reload against real data with same-origin cookies intact.
-Production build: `npm run build` → output copied into the embed dir by `make web`.
+Leave `changeOrigin` **unset**: it rewrites `Host` to `localhost:8080` while the
+browser's `Origin` stays the Vite origin, so §4.4's Origin check would 403 every
+write in dev. The proxy does not interact with `paths.base` — API paths are
+root-relative, outside `/admin`. Production build: `npm run build` → output copied
+into the embed dir by `make web`.
 
 ### 6.5 Serving from Go
 
 - `GET /admin` and `GET /admin/{path...}`: serve the embedded file if it exists,
   else `index.html` (client-side routing fallback), else the 503 of §2.3.
-- Hashed immutable assets (`/admin/_app/*`) get `Cache-Control: public, max-age=31536000, immutable`;
-  `index.html` gets `no-cache`. Stale-HTML-fresh-assets is the classic SPA deploy bug.
+  **Exception: paths under `/admin/_app/` never fall back** — a missing asset (a
+  stale tab requesting a chunk from a previous deploy) gets a clean 404, not
+  `index.html` served as JavaScript.
+- Content-hashed assets — **`/admin/_app/immutable/` only** — get
+  `Cache-Control: public, max-age=31536000, immutable`. Everything else, including
+  `index.html` and un-hashed files directly under `_app/` (`version.json`,
+  `env.js`), gets `no-cache`: those exist to be re-fetched, and a year-long cache
+  on them silently breaks any later use of SvelteKit's version polling or dynamic
+  public env. Stale-HTML-fresh-assets is the classic SPA deploy bug.
 - The SPA and its assets are served **unauthenticated** (the login page lives there);
   everything sensitive is behind the API.
 
@@ -312,6 +367,10 @@ sidecar-admin user  create --username NAME   [--password-stdin]
 
 - Interactive path prompts twice with echo off (`golang.org/x/term`); mismatch or
   under-12-chars re-prompts, three strikes and exit 1.
+- `user passwd` calls `DeleteUserSessions` after updating the hash: a password
+  change is the compromised-credential recovery path, and it must log out whoever
+  held the old password — sessions surviving a password change for 30 days would
+  defeat the point.
 - `--password-stdin` reads the password from stdin (trailing newline trimmed) for
   scripting; there is deliberately **no `--password` flag** — passwords do not
   belong in shell history or `ps` output.
@@ -325,16 +384,21 @@ sidecar-admin user  create --username NAME   [--password-stdin]
 
 - **storetest**: conformance subtests for `auth.Repository` — round-trips, unique
   username → `ErrUsernameTaken`, `GetSession` expiry against injected clock (a
-  session expiring one second *after* `now` is alive; *at* `now` is dead),
+  session expiring one second *after* `now` is alive; *at* `now` is dead), the
+  expired row is **gone** after `GetSession` observes it (§3.2's delete-on-read
+  contract), `DeleteUserSessions` revokes all and only that user's sessions,
   cascade on user delete, `DeleteExpiredSessions` count, and an assertion that the
   stored `token_hash` never equals the raw token.
 - **internal/auth**: hash/verify round-trip, wrong password, PHC parse of foreign
   parameters, tampered hash, min/max length enforcement, token uniqueness.
 - **httpapi**: table-driven handler tests — login success/failure sets/omits
   cookies correctly; 401 on missing/garbage/expired cookie; cross-site middleware
-  403s on hostile `Origin`/`Sec-Fetch-Site` and passes same-origin; full alert CRUD
-  through the API including the 400 for naive datetimes; regions PATCH; SPA serving
-  including the fallback-to-index and the 503-when-unbuilt paths; cache headers.
+  403s on hostile `Origin`/`Sec-Fetch-Site` (including on `POST /session`), passes
+  same-origin, and produces a legible 403 on the rewritten-proxy-`Host` case
+  (§4.4); full alert CRUD through the API including the 400 for naive datetimes;
+  regions PATCH; SPA serving including the fallback-to-index path, the
+  no-fallback 404 under `_app/`, the 503-when-unbuilt path, and the cache-header
+  scoping of §6.5.
 - **CLI**: `user` subcommand tests driving the stdin paths.
 - **SPA**: vitest on the datetime mapping module and API client error paths;
   `svelte-check`, eslint, prettier — all wired into `make check` behind a
