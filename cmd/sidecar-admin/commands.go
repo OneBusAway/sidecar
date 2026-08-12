@@ -61,14 +61,23 @@ func run(stdout, stderr io.Writer, args []string) error {
 		}
 	}()
 
-	if err := store.Migrate(); err != nil {
-		return fmt.Errorf("sidecar-admin: migrate database: %w", err)
+	cmd, cmdArgs := rest[0], rest[1:]
+
+	// Every other command runs against a freshly migrated schema (see the
+	// doc comment above). `migrate status` is the one exception: it exists
+	// to report the database's real pre-migration state, so auto-migrating
+	// first would make it apply every pending migration and then report
+	// "up to date" -- the opposite of the truth, having silently mutated the
+	// schema a read-only inspection command was never supposed to touch.
+	if cmd != "migrate" || len(cmdArgs) == 0 || cmdArgs[0] != "status" {
+		if err := store.Migrate(); err != nil {
+			return fmt.Errorf("sidecar-admin: migrate database: %w", err)
+		}
 	}
 
 	ctx := context.Background()
 	now := time.Now()
 
-	cmd, cmdArgs := rest[0], rest[1:]
 	switch cmd {
 	case "region":
 		return runRegion(ctx, stdout, store, *regionsURL, now, cmdArgs)
@@ -108,7 +117,7 @@ func parseInstant(s string, region regions.Region) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf(
 			"%q must be RFC 3339 with an explicit offset (e.g. 2026-08-15T14:00:00-07:00); "+
-				"region %d is configured as %s", s, region.ID, region.Timezone)
+				"region %d is configured as %s: %w", s, region.ID, region.Timezone, err)
 	}
 	return t.UTC(), nil
 }
@@ -208,6 +217,19 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 		// Validated here, at the point of the mistake, rather than later
 		// inside `alert list`/`alert create` where a typo would be far
 		// less obvious.
+		//
+		// time.LoadLocation returns a nil error for both "" and "Local", so
+		// neither is caught by the call below: "" would silently blank a
+		// configured timezone, and "Local" would resolve to whatever zone
+		// the invoking machine happens to have -- exactly the
+		// machine-local dependence this design bans everywhere else. Both
+		// are rejected explicitly rather than trusted to LoadLocation.
+		if *timezone == "" {
+			return errors.New("sidecar-admin: region set: --timezone must not be empty")
+		}
+		if *timezone == "Local" {
+			return errors.New("sidecar-admin: region set: --timezone \"Local\" is machine-dependent; use an explicit IANA zone name")
+		}
 		if _, err := time.LoadLocation(*timezone); err != nil {
 			return fmt.Errorf("sidecar-admin: region set: invalid --timezone %q: %w", *timezone, err)
 		}
@@ -407,7 +429,17 @@ func alertList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 	return nil
 }
 
-func alertShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
+// alertShowStore is the slice of *sqlite.Store that alertShow depends on,
+// factored out so a test can supply a Regions() repository that fails with
+// something other than regions.ErrNotFound -- exercising the branch that
+// must surface an unexpected failure rather than swallow it. *sqlite.Store
+// satisfies this implicitly.
+type alertShowStore interface {
+	Alerts() alerts.Repository
+	Regions() regions.Repository
+}
+
+func alertShow(ctx context.Context, stdout io.Writer, store alertShowStore, args []string) error {
 	id, err := parseAlertIDArg("alert show", args)
 	if err != nil {
 		return err
@@ -418,9 +450,20 @@ func alertShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 		return fmt.Errorf("sidecar-admin: alert show: %w", err)
 	}
 
+	// A missing region is tolerated (formatInZone degrades to UTC-only), but
+	// any other failure -- a corrupt database, a cancelled context -- must
+	// not be treated the same way: silently printing the alert in UTC and
+	// exiting 0 would hide the real problem from whoever is looking at this
+	// output.
 	tz := ""
-	if reg, err := store.Regions().Get(ctx, a.RegionID); err == nil {
+	reg, err := store.Regions().Get(ctx, a.RegionID)
+	switch {
+	case err == nil:
 		tz = reg.Timezone
+	case errors.Is(err, regions.ErrNotFound):
+		// fall through with tz == "" (UTC only).
+	default:
+		return fmt.Errorf("sidecar-admin: alert show: region %d: %w", a.RegionID, err)
 	}
 
 	fmt.Fprintf(stdout, "id: %d\n", a.ID)
@@ -564,11 +607,22 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	// being absent (which is what `if *test` did -- a silent no-op that let
 	// a verified test alert stay flagged as test after an author explicitly
 	// tried to promote it to real).
+	//
+	// --no-test's whole job is to clear IsTest, so --no-test/--no-test=true
+	// do that. --no-test=false is the regression this replaces: an earlier
+	// fix computed `v := !*noTest` here, so --no-test=false (the standard Go
+	// boolean-flag spelling for "don't do what this flag does") evaluated to
+	// v=true and *set* IsTest instead of leaving it alone -- a published,
+	// rider-visible alert edited with `--no-test=false` would silently
+	// vanish from the public feed. There is no reading of "decline to
+	// unmark this as test" that means "mark it as test", so --no-test=false
+	// is treated as a no-op (leaves IsTest whatever it already was) rather
+	// than inverted.
 	if seen["test"] {
 		v := *test
 		patch.IsTest = &v
-	} else if seen["no-test"] {
-		v := !*noTest
+	} else if seen["no-test"] && *noTest {
+		v := false
 		patch.IsTest = &v
 	}
 

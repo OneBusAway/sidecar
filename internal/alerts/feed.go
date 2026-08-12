@@ -100,13 +100,21 @@ func buildAlert(a Alert, dur time.Duration, opts FeedOptions) *gtfs.Alert {
 	}
 
 	out := &gtfs.Alert{
-		ActivePeriod:    []*gtfs.TimeRange{{Start: &start, End: &end}},
-		InformedEntity:  []*gtfs.EntitySelector{{AgencyId: &agencyID}},
-		Cause:           &cause,
-		Effect:          &effect,
-		SeverityLevel:   &severity,
-		HeaderText:      translated(a.HeaderText, a.Translations, FieldHeader),
-		DescriptionText: translated(a.DescriptionText, a.Translations, FieldDescription),
+		ActivePeriod:   []*gtfs.TimeRange{{Start: &start, End: &end}},
+		InformedEntity: []*gtfs.EntitySelector{{AgencyId: &agencyID}},
+		Cause:          &cause,
+		Effect:         &effect,
+		SeverityLevel:  &severity,
+		HeaderText:     translated(a.HeaderText, a.Translations, FieldHeader),
+	}
+	if a.DescriptionText != "" {
+		// description_text is optional in the CLI and NOT NULL DEFAULT ''
+		// in storage, so "" means "no description", not "a blank one" --
+		// guarded the same way url is guarded below. Emitting an empty
+		// TranslatedString here would make a consumer that branches on
+		// presence see a description that exists but is blank, rather than
+		// correctly seeing none.
+		out.DescriptionText = translated(a.DescriptionText, a.Translations, FieldDescription)
 	}
 	if a.URL != "" {
 		// url is English-only per the feed contract.

@@ -52,6 +52,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("SetPublishedAndDeleteReportUnknownID", func(t *testing.T) { testSetPublishedAndDeleteReportUnknownID(t, newStore) })
 	t.Run("CreateRejectsInvalidWindow", func(t *testing.T) { testCreateRejectsInvalidWindow(t, newStore) })
 	t.Run("CreateRejectsEmptyAgencyID", func(t *testing.T) { testCreateRejectsEmptyAgencyID(t, newStore) })
+	t.Run("UpdateRejectsEmptyAgencyID", func(t *testing.T) { testUpdateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
 }
 
@@ -752,6 +753,36 @@ func testCreateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
 	in.AgencyID = ""
 	if _, err := repo.Create(ctx, in, base); err == nil {
 		t.Error("Create with empty AgencyID: want error, got nil")
+	}
+}
+
+// testUpdateRejectsEmptyAgencyID asserts that Update enforces the same
+// non-empty-AgencyID invariant Create does. The check was originally added
+// only to Create; Patch{AgencyID: &""} would otherwise succeed and write an
+// empty agency_id, producing an informed_entity{agency_id:""} in the feed
+// that no OBA app matches by agency. A future Postgres adapter inherits this
+// requirement because it runs against this same suite.
+func testUpdateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	empty := ""
+	if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{AgencyID: &empty}, base.Add(time.Minute)); updateErr == nil {
+		t.Error("Update with empty AgencyID: want error, got nil")
+	}
+
+	got, err := repo.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.AgencyID != created.AgencyID {
+		t.Errorf("AgencyID = %q after a rejected Update, want unchanged %q", got.AgencyID, created.AgencyID)
 	}
 }
 

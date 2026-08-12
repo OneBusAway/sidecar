@@ -27,10 +27,21 @@ func Sync(ctx context.Context, client *Client, repo Repository, now func() time.
 	return nil
 }
 
+// minSyncInterval is the floor RunSyncLoop enforces on interval.
+// time.NewTicker panics on a duration <= 0; cmd/sidecar validates --refresh
+// before it ever reaches here, but RunSyncLoop is exported and this is a
+// goroutine with no recover, so a bad value from any other caller (a test, a
+// future caller) must not be able to crash the process this way.
+const minSyncInterval = time.Minute
+
 // RunSyncLoop runs Sync once immediately, then again every interval, until
 // ctx is cancelled. A failed Sync is logged and does not stop the loop: the
 // next tick tries again, and existing rows are left untouched by the
 // failure.
+//
+// interval must be positive; a non-positive value is logged and replaced
+// with minSyncInterval rather than being passed to time.NewTicker, which
+// panics on one.
 func RunSyncLoop(ctx context.Context, client *Client, repo Repository, interval time.Duration, now func() time.Time, logger *slog.Logger) {
 	runOnce := func() {
 		if err := Sync(ctx, client, repo, now); err != nil {
@@ -39,6 +50,11 @@ func RunSyncLoop(ctx context.Context, client *Client, repo Repository, interval 
 	}
 
 	runOnce()
+
+	if interval <= 0 {
+		logger.Error("regions: invalid refresh interval, using fallback", "interval", interval, "fallback", minSyncInterval)
+		interval = minSyncInterval
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -414,5 +416,300 @@ func TestTranslateThenEditWithholdsStaleTranslation(t *testing.T) {
 	msg2 := alerts.BuildFeed(feed2, alerts.FeedOptions{Now: time.Now()})
 	if hasTranslation(msg2, "es") {
 		t.Fatal("stale es translation still present in feed after the English edit; want it withheld")
+	}
+}
+
+// TestEditNoTestSpellings exercises all five --test/--no-test spellings
+// against a fixed starting IsTest value, reproducing the finding that
+// `alert edit --no-test=false` inverted the flag. An earlier fix changed the
+// branch to key off which flags were *visited* rather than their values
+// (see TestEditTestFalseClearsTestFlag above), but computed
+// `v := !*noTest` for the --no-test arm: --no-test=false (the standard Go
+// spelling for "don't do what this flag does") made seen["no-test"] true and
+// *noTest false, so v became true and a published, rider-visible alert
+// edited with `alert edit ID --no-test=false --header "..."` silently
+// vanished from the public feed. --no-test=false is now a no-op: there is
+// no reading of "decline to unmark this as test" that means "mark it as
+// test".
+func TestEditNoTestSpellings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		startIsTest bool
+		flag        string
+		wantIsTest  bool
+	}{
+		{"--test marks as test", false, "--test", true},
+		{"--test=true marks as test", false, "--test=true", true},
+		{"--test=false clears test", true, "--test=false", false},
+		{"--no-test clears test", true, "--no-test", false},
+		{"--no-test=true clears test", true, "--no-test=true", false},
+		// This is the regression: --no-test=false must be a no-op, not an
+		// inversion that sets IsTest to true.
+		{"--no-test=false is a no-op (regression)", false, "--no-test=false", false},
+		{"--no-test=false is a no-op even starting true", true, "--no-test=false", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dbPath, store := newDB(t)
+			seedRegion(t, store.Regions(), 1)
+
+			created, err := store.Alerts().Create(context.Background(), alerts.NewAlert{
+				RegionID: 1, AgencyID: "40", HeaderText: "Alert",
+				Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+				StartTime: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC), IsTest: tt.startIsTest,
+			}, time.Now())
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if _, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(created.ID, 10), tt.flag); editErr != nil {
+				t.Fatalf("alert edit %s: %v", tt.flag, editErr)
+			}
+
+			got, err := store.Alerts().Get(context.Background(), created.ID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.IsTest != tt.wantIsTest {
+				t.Errorf("after %s (starting IsTest=%t): IsTest = %t, want %t", tt.flag, tt.startIsTest, got.IsTest, tt.wantIsTest)
+			}
+		})
+	}
+}
+
+// TestMigrateStatusDoesNotMigrate reproduces the finding that `run` migrated
+// the database unconditionally before dispatch, so `migrate status` -- a
+// read-only inspection command -- applied every pending migration and then
+// reported "up to date": the opposite of the truth, having silently mutated
+// the schema. Run against a database that has never been touched, this must
+// report pending work and leave the schema untouched.
+func TestMigrateStatusDoesNotMigrate(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	stdout, _, err := cli(t, dbPath, "migrate", "status")
+	if err != nil {
+		t.Fatalf("migrate status: %v", err)
+	}
+	if !strings.Contains(stdout, "pending") {
+		t.Errorf("stdout = %q, want it to report pending migrations on a never-touched database", stdout)
+	}
+	if strings.Contains(stdout, "up to date") {
+		t.Errorf("stdout = %q, want it to NOT report up to date -- migrate status must not migrate first", stdout)
+	}
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	statuses, err := store.MigrationStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("MigrationStatuses: %v", err)
+	}
+	pending := 0
+	for _, s := range statuses {
+		if s.Pending {
+			pending++
+		}
+	}
+	if pending == 0 {
+		t.Error("pending migrations = 0 after `migrate status`, want > 0 (it must leave the schema untouched)")
+	}
+}
+
+// TestMigrateUpStillMigrates guards against a fix that skips auto-migrate
+// too broadly: every subcommand other than `migrate status` -- including
+// `migrate up` itself -- must still run against a migrated schema.
+func TestMigrateUpStillMigrates(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	stdout, _, err := cli(t, dbPath, "migrate", "up")
+	if err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	if !strings.Contains(stdout, "up to date") {
+		t.Errorf("stdout = %q, want it to report up to date after migrating", stdout)
+	}
+
+	statusOut, _, err := cli(t, dbPath, "migrate", "status")
+	if err != nil {
+		t.Fatalf("migrate status: %v", err)
+	}
+	if !strings.Contains(statusOut, "up to date") {
+		t.Errorf("stdout = %q, want up to date after a prior `migrate up`", statusOut)
+	}
+}
+
+// TestRegionSetRejectsEmptyTimezone and TestRegionSetRejectsLocalTimezone
+// assert that region set rejects "" and "Local" explicitly. Both make
+// time.LoadLocation return a nil error, so neither was caught by the
+// pre-existing LoadLocation check: "" would silently blank a configured
+// timezone, and "Local" resolves to whatever zone the invoking machine
+// happens to have -- exactly the machine-local dependence this design bans
+// everywhere else.
+func TestRegionSetRejectsEmptyTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "")
+	if err == nil {
+		t.Fatal("region set --timezone \"\": want error, got nil")
+	}
+
+	got, gerr := store.Regions().Get(context.Background(), 1)
+	if gerr != nil {
+		t.Fatalf("Get: %v", gerr)
+	}
+	if got.Timezone != "UTC" {
+		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	}
+}
+
+func TestRegionSetRejectsLocalTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "Local")
+	if err == nil {
+		t.Fatal("region set --timezone Local: want error, got nil")
+	}
+
+	got, gerr := store.Regions().Get(context.Background(), 1)
+	if gerr != nil {
+		t.Fatalf("Get: %v", gerr)
+	}
+	if got.Timezone != "UTC" {
+		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	}
+}
+
+// erroringRegionRepo satisfies regions.Repository but fails every Get with
+// something other than regions.ErrNotFound, letting a test exercise
+// alertShow's "surface anything else" branch without needing a genuinely
+// corrupt database.
+type erroringRegionRepo struct {
+	regions.Repository
+}
+
+var errRegionLookupBroken = errors.New("regions: simulated corrupt row")
+
+func (erroringRegionRepo) Get(context.Context, int64) (regions.Region, error) {
+	return regions.Region{}, errRegionLookupBroken
+}
+
+// notFoundRegionRepo satisfies regions.Repository but always reports
+// regions.ErrNotFound, for asserting the other side of the same branch: a
+// genuinely missing region is still tolerated.
+type notFoundRegionRepo struct {
+	regions.Repository
+}
+
+func (notFoundRegionRepo) Get(context.Context, int64) (regions.Region, error) {
+	return regions.Region{}, regions.ErrNotFound
+}
+
+type fakeAlertShowStore struct {
+	alertsRepo  alerts.Repository
+	regionsRepo regions.Repository
+}
+
+func (f fakeAlertShowStore) Alerts() alerts.Repository   { return f.alertsRepo }
+func (f fakeAlertShowStore) Regions() regions.Repository { return f.regionsRepo }
+
+// TestAlertShowSurfacesNonNotFoundRegionError reproduces the finding that
+// alertShow treated every region lookup failure -- a corrupt database, a
+// cancelled context, not just a missing region -- identically: print the
+// alert in UTC and exit 0. Anything other than regions.ErrNotFound must be
+// surfaced, not swallowed.
+func TestAlertShowSurfacesNonNotFoundRegionError(t *testing.T) {
+	t.Parallel()
+	_, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	created, err := store.Alerts().Create(context.Background(), alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "H",
+		Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+		StartTime: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC),
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fake := fakeAlertShowStore{alertsRepo: store.Alerts(), regionsRepo: erroringRegionRepo{}}
+
+	var stdout bytes.Buffer
+	err = alertShow(context.Background(), &stdout, fake, []string{strconv.FormatInt(created.ID, 10)})
+	if err == nil {
+		t.Fatal("alertShow with a non-ErrNotFound region lookup error: want error, got nil")
+	}
+	if !errors.Is(err, errRegionLookupBroken) {
+		t.Errorf("error = %v, want it to wrap the underlying region lookup error", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing written (exit 0 with UTC output would hide the real failure)", stdout.String())
+	}
+}
+
+// TestAlertShowToleratesUnknownRegion is the other side of the same branch:
+// a genuinely missing region must still degrade to UTC-only output rather
+// than becoming an error.
+func TestAlertShowToleratesUnknownRegion(t *testing.T) {
+	t.Parallel()
+	_, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	created, err := store.Alerts().Create(context.Background(), alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "H",
+		Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "WARNING",
+		StartTime: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC),
+	}, time.Now())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	fake := fakeAlertShowStore{alertsRepo: store.Alerts(), regionsRepo: notFoundRegionRepo{}}
+
+	var stdout bytes.Buffer
+	if err := alertShow(context.Background(), &stdout, fake, []string{strconv.FormatInt(created.ID, 10)}); err != nil {
+		t.Fatalf("alertShow with an unknown region: %v, want no error", err)
+	}
+	if !strings.Contains(stdout.String(), "id: ") {
+		t.Errorf("stdout = %q, want the alert printed despite the missing region", stdout.String())
+	}
+}
+
+// TestParseInstantWrapsUnderlyingError reproduces the finding that
+// parseInstant checked time.Parse's error but never wrapped it, so a
+// truncated offset and an out-of-range month produced the identical generic
+// message -- indistinguishable to whoever is debugging a rejected --start.
+func TestParseInstantWrapsUnderlyingError(t *testing.T) {
+	t.Parallel()
+	reg := regions.Region{ID: 1, Timezone: "America/Los_Angeles"}
+
+	_, truncatedErr := parseInstant("2026-08-15T14:00:00-07:0", reg)
+	_, monthErr := parseInstant("2026-13-15T14:00:00-07:00", reg)
+
+	if truncatedErr == nil || monthErr == nil {
+		t.Fatalf("want both malformed inputs to fail; got %v / %v", truncatedErr, monthErr)
+	}
+	if truncatedErr.Error() == monthErr.Error() {
+		t.Errorf("truncated-offset and out-of-range-month errors are identical (%q); want the underlying time.Parse detail wrapped in with %%w so they're distinguishable", truncatedErr.Error())
+	}
+	for _, err := range []error{truncatedErr, monthErr} {
+		if !strings.Contains(err.Error(), "RFC 3339") {
+			t.Errorf("error = %q, want it to still mention the RFC 3339 guidance", err.Error())
+		}
+		if !strings.Contains(err.Error(), "America/Los_Angeles") {
+			t.Errorf("error = %q, want it to still mention the region's configured timezone", err.Error())
+		}
 	}
 }

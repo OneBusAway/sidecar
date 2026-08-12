@@ -65,6 +65,16 @@ func run(stdout, stderr io.Writer, args []string) error {
 		return err
 	}
 
+	// time.NewTicker panics on a duration <= 0. --refresh=0 is a natural way
+	// to try to disable the sync loop, and --refresh=nonsense is already
+	// rejected by fs.Parse above; a non-positive value that parses cleanly
+	// (0 or a negative duration) must be rejected the same clean way here,
+	// before the sync loop's goroutine can panic and take the whole process
+	// -- including the HTTP server, already serving by then -- down with it.
+	if *refresh <= 0 {
+		return fmt.Errorf("sidecar: --refresh must be positive, got %s", refresh.String())
+	}
+
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 
 	store, err := sqlite.Open(*dbPath)

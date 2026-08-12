@@ -173,6 +173,41 @@ func TestTranslationsAreFieldScoped(t *testing.T) {
 	}
 }
 
+// TestDescriptionTextOmittedWhenEmpty reproduces the finding that buildAlert
+// guarded url with `if a.URL != ""` but not DescriptionText, which defaults
+// to an empty string in storage and is optional in the CLI: an alert with
+// only a header rendered description_text:{translation:{text:"" language:
+// "en"}} instead of omitting the field, so a consumer branching on presence
+// saw a description that existed but was blank rather than correctly seeing
+// none.
+func TestDescriptionTextOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	a := base()
+	a.DescriptionText = ""
+
+	got := alerts.BuildFeed([]alerts.Alert{a}, opts()).GetEntity()[0].GetAlert().GetDescriptionText()
+	if got != nil {
+		t.Errorf("description_text = %v, want nil (omitted) when DescriptionText is empty", got)
+	}
+}
+
+func TestDescriptionTextPresentWhenNonEmpty(t *testing.T) {
+	t.Parallel()
+
+	// base() already carries a non-empty DescriptionText; this is the
+	// complement to TestDescriptionTextOmittedWhenEmpty, guarding against an
+	// overzealous fix that omits description_text unconditionally.
+	got := alerts.BuildFeed([]alerts.Alert{base()}, opts()).GetEntity()[0].GetAlert().GetDescriptionText()
+	if got == nil {
+		t.Fatal("description_text = nil, want present when DescriptionText is non-empty")
+	}
+	tr := got.GetTranslation()
+	if len(tr) != 1 || tr[0].GetLanguage() != "en" || tr[0].GetText() != "Signal problem" {
+		t.Errorf("description_text translations = %+v, want exactly one English entry with the alert's description", tr)
+	}
+}
+
 func TestURLIsEnglishOnlyAndOmittedWhenEmpty(t *testing.T) {
 	t.Parallel()
 

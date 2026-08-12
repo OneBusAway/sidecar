@@ -124,7 +124,7 @@ func (s *Store) Alerts() alerts.Repository {
 
 // Regions returns the regions.Repository backed by this store.
 func (s *Store) Regions() regions.Repository {
-	return &regionRepo{q: s.q}
+	return &regionRepo{db: s.db, q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
@@ -156,7 +156,8 @@ func timeToNullUnix(t *time.Time) sql.NullInt64 {
 // ---------------------------------------------------------------------------
 
 type regionRepo struct {
-	q *gen.Queries
+	db *sql.DB
+	q  *gen.Queries
 }
 
 func regionFromRow(r gen.Region) regions.Region {
@@ -195,10 +196,25 @@ func (r *regionRepo) List(ctx context.Context) ([]regions.Region, error) {
 	return out, nil
 }
 
+// UpsertFromDirectory runs the whole batch in one write transaction: a
+// per-row upsert with no enclosing transaction would let a mid-loop failure
+// (e.g. SQLITE_BUSY past the busy_timeout) leave the table half-refreshed
+// while Sync logs the refresh as failed -- an operator reading that log
+// would believe nothing changed when rows are actually a mix of new and
+// stale. Wrapping the loop makes it all-or-nothing.
 func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Region, now time.Time) error {
 	ts := now.Unix()
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: upsert regions: begin tx: %w", err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+
+	q := r.q.WithTx(tx)
 	for _, reg := range in {
-		if err := r.q.UpsertRegionFromDirectory(ctx, gen.UpsertRegionFromDirectoryParams{
+		if err := q.UpsertRegionFromDirectory(ctx, gen.UpsertRegionFromDirectoryParams{
 			ID:             reg.ID,
 			RegionName:     reg.Name,
 			ObaBaseUrl:     reg.OBABaseURL,
@@ -211,6 +227,10 @@ func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Regio
 		}); err != nil {
 			return fmt.Errorf("sqlite: upsert region %d: %w", reg.ID, err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: upsert regions: commit: %w", err)
 	}
 	return nil
 }
@@ -319,8 +339,25 @@ func (r *alertRepo) Get(ctx context.Context, id int64) (alerts.Alert, error) {
 	return a, nil
 }
 
+// Update wraps its read-modify-write in a single write transaction: GetAlert
+// and UpdateAlert with no enclosing transaction would let two concurrent
+// edits both read the same pre-edit row, each merge only its own Patch
+// field, and both write every column back -- silently discarding whichever
+// edit wrote second. The Repository doc comment promises implementations are
+// safe for concurrent use; this is what makes that true. Follows the same
+// BeginTx/WithTx pattern Feed already uses for its own two-query
+// consistency.
 func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now time.Time) (alerts.Alert, error) {
-	current, err := r.q.GetAlert(ctx, id)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: begin tx: %w", id, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+
+	q := r.q.WithTx(tx)
+
+	current, err := q.GetAlert(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, alerts.ErrNotFound)
@@ -361,11 +398,19 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 		current.IsTest = *p.IsTest
 	}
 
+	// Same invariant Create enforces (see the comment there): the column is
+	// NOT NULL but not non-empty, so without this check Patch{AgencyID: &""}
+	// would succeed and write agency_id = '', producing an
+	// informed_entity{agency_id:""} in the feed that no OBA app matches.
+	if current.AgencyID == "" {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: agency id must not be empty", id)
+	}
+
 	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
 	}
 
-	row, err := r.q.UpdateAlert(ctx, gen.UpdateAlertParams{
+	row, err := q.UpdateAlert(ctx, gen.UpdateAlertParams{
 		AgencyID:        current.AgencyID,
 		HeaderText:      current.HeaderText,
 		DescriptionText: current.DescriptionText,
@@ -384,6 +429,10 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 			return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, alerts.ErrNotFound)
 		}
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: commit: %w", id, err)
 	}
 	return alertFromRow(row), nil
 }
