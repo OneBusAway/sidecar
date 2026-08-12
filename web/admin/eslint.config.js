@@ -10,6 +10,15 @@ export default ts.config(
 	{
 		files: ['**/*.svelte', '**/*.svelte.ts'],
 		languageOptions: { parserOptions: { parser: ts.parser, svelteConfig } },
+		rules: {
+			// typescript-eslint turns no-undef off for .ts files because the
+			// compiler already reports undefined identifiers and does it
+			// correctly -- no-undef has no idea about DOM lib types, so a
+			// `SubmitEvent` annotation reads as an undefined global. These
+			// components are TypeScript too, so they need the same treatment;
+			// svelte-check is what actually catches typos here.
+			'no-undef': 'off',
+		},
 	},
 	{ ignores: ['build/', '.svelte-kit/', 'node_modules/'] },
 );

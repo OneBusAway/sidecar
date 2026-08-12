@@ -21,7 +21,10 @@ export default defineConfig({
 		proxy: { '/api': { target: 'http://localhost:8080', changeOrigin: false } },
 	},
 	test: {
-		// Task 10 adds the first tests; keep `make web-check` green until then.
-		passWithNoTests: true,
+		// The unit tests cover plain modules ($lib/datetime, $lib/api,
+		// $lib/redirect), so they need no DOM -- fetch, Response and Intl all
+		// come from Node. Stated rather than left to the default so that
+		// adding a component test is a visible decision.
+		environment: 'node',
 	},
 });
