@@ -1,8 +1,8 @@
-// Package sqlite is the SQLite adapter for the alerts and regions
+// Package sqlite is the SQLite adapter for the alerts, regions, and auth
 // repositories. It maps generated sqlc rows to the domain types defined in
-// internal/alerts and internal/regions — nothing outside this package ever
-// sees a gen.* struct, which is what lets a Postgres adapter satisfy the same
-// interfaces later without touching any other package.
+// internal/alerts, internal/regions, and internal/auth — nothing outside this
+// package ever sees a gen.* struct, which is what lets a Postgres adapter
+// satisfy the same interfaces later without touching any other package.
 package sqlite
 
 import (
@@ -17,6 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
@@ -43,8 +44,8 @@ func configureGoose() error {
 	return gooseConfigureErr
 }
 
-// Store owns the database connection pool and hands out the two
-// repositories. It is safe for concurrent use.
+// Store owns the database connection pool and hands out the three
+// repositories: alerts, regions, and auth. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
 	q  *gen.Queries
@@ -125,6 +126,11 @@ func (s *Store) Alerts() alerts.Repository {
 // Regions returns the regions.Repository backed by this store.
 func (s *Store) Regions() regions.Repository {
 	return &regionRepo{db: s.db, q: s.q}
+}
+
+// Auth returns the auth.Repository backed by this store.
+func (s *Store) Auth() auth.Repository {
+	return &authRepo{db: s.db, q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
@@ -271,6 +277,8 @@ func alertFromRow(a gen.Alert) alerts.Alert {
 		EndTime:         nullUnixToTime(a.EndTime),
 		Published:       a.Published,
 		IsTest:          a.IsTest,
+		CreatedAt:       unixToTime(a.CreatedAt),
+		UpdatedAt:       unixToTime(a.UpdatedAt),
 	}
 }
 
@@ -292,6 +300,15 @@ func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Tim
 	// caller of this Repository.
 	if in.AgencyID == "" {
 		return alerts.Alert{}, errors.New("sqlite: create alert: agency id must not be empty")
+	}
+	// HeaderText is the one piece of text riders cannot do without:
+	// alerts.BuildFeed passes it straight through to the feed's
+	// alert_header_text with no fallback, so an empty value ships a
+	// header-less alert. The column is NOT NULL but not non-empty; enforcing
+	// it here, rather than trusting every caller to have checked already,
+	// protects every caller of this Repository.
+	if in.HeaderText == "" {
+		return alerts.Alert{}, errors.New("sqlite: create alert: header text must not be empty")
 	}
 	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
 		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
@@ -404,6 +421,14 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	// informed_entity{agency_id:""} in the feed that no OBA app matches.
 	if current.AgencyID == "" {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: agency id must not be empty", id)
+	}
+
+	// Same invariant Create enforces (see the comment there): alerts.BuildFeed
+	// passes HeaderText straight through with no fallback, so without this
+	// check Patch{HeaderText: &""} would succeed and blank the header of an
+	// already-published alert riders are reading right now.
+	if current.HeaderText == "" {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: header text must not be empty", id)
 	}
 
 	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {
@@ -547,6 +572,24 @@ func (r *alertRepo) UpsertTranslation(ctx context.Context, alertID int64, t aler
 		UpdatedAt:    ts,
 	}); err != nil {
 		return fmt.Errorf("sqlite: upsert translation for alert %d: %w", alertID, err)
+	}
+	return nil
+}
+
+// DeleteTranslation removes every field row for one (alert, language) pair.
+// It normalizes language itself for the same reason UpsertTranslation does:
+// the schema's language column is case-sensitive, so an un-normalized
+// caller-supplied tag would silently match zero rows against the normalized
+// values UpsertTranslation actually wrote.
+func (r *alertRepo) DeleteTranslation(ctx context.Context, alertID int64, language string) error {
+	n, err := r.q.DeleteAlertTranslations(ctx, gen.DeleteAlertTranslationsParams{
+		AlertID: alertID, Language: alerts.NormalizeLanguage(language),
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: delete translations for alert %d: %w", alertID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("sqlite: delete translations for alert %d: %w", alertID, alerts.ErrNotFound)
 	}
 	return nil
 }

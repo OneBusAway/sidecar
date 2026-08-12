@@ -50,3 +50,18 @@ type Region struct {
 	CreatedAt       int64
 	UpdatedAt       int64
 }
+
+type Session struct {
+	TokenHash string
+	UserID    int64
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+type User struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+	CreatedAt    int64
+	UpdatedAt    int64
+}

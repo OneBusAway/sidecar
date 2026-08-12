@@ -5,11 +5,22 @@ CMD         := ./cmd/sidecar
 BIN_DIR     := bin
 COVER_FILE  := coverage.out
 GO          ?= go
+WEB_DIR     := web/admin
+EMBED_DIR   := internal/httpapi/adminui/dist
 
 # Pin the linter so local runs and CI agree.
 GOLANGCI_LINT_VERSION := v2.12.2
 
 .DEFAULT_GOAL := help
+
+# Targets here share two mutable trees -- the embed directory that `web`
+# empties and refills, and web/admin/.svelte-kit, which both `vite build` and
+# `svelte-kit sync` write. Running them concurrently races: a Go compile can
+# catch dist/ mid-swap. Prerequisites order the cases make can see; this
+# covers the rest, so `make -j8 check` is as deterministic as `make check`.
+# Nothing is lost -- go test, golangci-lint and vite all parallelize inside
+# their own recipes.
+.NOTPARALLEL:
 
 .PHONY: help
 help: ## Show this help
@@ -19,8 +30,25 @@ help: ## Show this help
 ## --- Build & run -----------------------------------------------------------
 
 .PHONY: build
-build: ## Build the sidecar binary into bin/
+build: web ## Build the sidecar binary into bin/ (SPA first, so it is embedded)
 	$(GO) build -o $(BIN_DIR)/$(BINARY) $(CMD)
+
+# Shared by web and web-check so a single make invocation installs once:
+# make builds a phony target at most once, and npm ci wipes and reinstalls
+# the whole tree every time it runs.
+.PHONY: web-deps
+web-deps:
+	cd $(WEB_DIR) && npm ci
+
+.PHONY: web
+web: web-deps ## Build the admin SPA into the Go embed directory
+	cd $(WEB_DIR) && npm run build
+	find $(EMBED_DIR) -mindepth 1 ! -name '.gitkeep' -delete
+	cp -R $(WEB_DIR)/build/. $(EMBED_DIR)/
+
+.PHONY: web-check
+web-check: web-deps ## Frontend checks: svelte-check, prettier, eslint, vitest
+	cd $(WEB_DIR) && npm run check && npm run lint && npm run test:unit
 
 .PHONY: run
 run: ## Run the sidecar server (make run ARGS="--addr :8080")
@@ -32,16 +60,20 @@ tidy: ## Sync go.mod/go.sum
 
 ## --- Tests -----------------------------------------------------------------
 
+# The Go tests include an embed assertion that needs a populated dist/ (see
+# internal/httpapi/adminui/adminui_test.go), so every target that runs them
+# builds the SPA first. web is phony, so it still runs exactly once per make
+# invocation no matter how many of these are named.
 .PHONY: test
-test: ## Run unit tests
+test: web ## Run unit tests
 	$(GO) test ./...
 
 .PHONY: test-race
-test-race: ## Run unit tests with the race detector
+test-race: web ## Run unit tests with the race detector
 	$(GO) test -race ./...
 
 .PHONY: cover
-cover: ## Run tests and report coverage
+cover: web ## Run tests and report coverage
 	$(GO) test -coverprofile=$(COVER_FILE) -covermode=atomic ./...
 	$(GO) tool cover -func=$(COVER_FILE)
 
@@ -57,7 +89,11 @@ fmt: ## Format all Go source
 
 .PHONY: fmt-check
 fmt-check: ## Fail if any Go source is unformatted
-	@unformatted="$$(gofmt -l .)"; \
+	@# Prune node_modules: npm dependencies vendor Go source we neither own
+	@# nor format (the go tool skips node_modules on its own; gofmt does not).
+	@# Scoped to node_modules rather than web/ so first-party Go anywhere,
+	@# including under web/, is still checked.
+	@unformatted="$$(find . -name node_modules -prune -o -name '*.go' -print | xargs gofmt -l)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "These files need gofmt:"; \
 		echo "$$unformatted"; \
@@ -80,11 +116,14 @@ lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 ## --- Aggregates ------------------------------------------------------------
 
 .PHONY: check
-check: fmt-check vet lint test test-tz test-race ## Everything CI runs
+check: fmt-check vet lint test test-tz test-race web-check ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
 	rm -rf $(BIN_DIR) $(COVER_FILE)
+	@# Empty the embed directory too: a `go build ./cmd/sidecar` after clean
+	@# would otherwise bake in whatever SPA happened to be sitting there.
+	find $(EMBED_DIR) -mindepth 1 ! -name '.gitkeep' -delete
 
 ## --- Tooling ---------------------------------------------------------------
 
@@ -108,6 +147,11 @@ generate-check: ## Fail if committed sqlc output is stale
 	sqlc diff
 
 .PHONY: test-tz
-test-tz: ## Run tests under two timezones to catch local-time leaks
+test-tz: web ## Run tests under two timezones to catch local-time leaks
 	TZ=UTC go test ./...
 	TZ=Asia/Kathmandu go test ./...
+	@# The SPA needs this as badly as the Go side does. A datetime assertion
+	@# written against the region zone cannot fail when the host zone happens
+	@# to match it, so a Pacific-time laptop silently loses coverage that a
+	@# UTC CI box still has -- and vice versa. Two zones, no host can hide it.
+	cd $(WEB_DIR) && TZ=UTC npm run test:unit && TZ=Asia/Kathmandu npm run test:unit

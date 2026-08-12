@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	if err := run(os.Stdout, os.Stderr, os.Args[1:]); err != nil {
+	if err := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "sidecar-admin:", err)
 		os.Exit(1)
 	}

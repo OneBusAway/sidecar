@@ -129,6 +129,10 @@ from a one-row model. The cost over a singleton is one CLI noun.
 type Repository interface {
     CreateUser(ctx context.Context, username, passwordHash string, now time.Time) (User, error)
     GetUserByUsername(ctx context.Context, username string) (User, error)
+    // GetUserByID looks up the account behind a session's UserID; the
+    // session middleware calls it on every authenticated request, once
+    // GetSession has resolved the cookie to a live session row.
+    GetUserByID(ctx context.Context, id int64) (User, error)
     ListUsers(ctx context.Context) ([]User, error)
     DeleteUser(ctx context.Context, username string) error
     UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error
@@ -206,7 +210,14 @@ asserts the delay is actually applied on the failure path.
 
 ### 4.4 Middleware
 
-- `RequireSession` wraps every `/api/admin/v1/*` route except `POST /session`:
+- `RequireSession` wraps every `/api/admin/v1/*` route except `POST /session` and
+  `DELETE /session`. Logout is deliberately outside it so it stays idempotent —
+  §5's endpoint table gives it a 204 with no 401 variant, unlike `GET /session`.
+  It is not an authentication hole: the handler deletes only the row whose raw
+  256-bit token the caller presented, never reads the authenticated user, and
+  returns the same empty 204 whether or not the token existed, so it cannot be
+  used to probe token validity. Forced-logout CSRF stays closed by the
+  cross-site guard below and independently by `SameSite=Lax`. The rest:
   extracts the cookie, hashes, `GetSession` with injected now. Missing, unknown, or
   expired → `401 {"error": "authentication required"}` (expired rows are deleted by
   `GetSession` itself — §3.2's contract, so the middleware needs no
@@ -250,6 +261,11 @@ GET    /session                            whoami → 200 {username} | 401
 
 GET    /alerts?region=N                    list; drafts and test alerts included —
                                            this is the authoring view, not the feed.
+                                           List items ALWAYS carry `translations: []`
+                                           regardless of what the alert actually has;
+                                           only GET /alerts/{id} populates them. An
+                                           empty array here means "not loaded", never
+                                           "none exist".
                                            region absent → all regions; non-integer
                                            → 400; unknown id → 200 [] (it is a
                                            filter, not a resource lookup — and

@@ -52,6 +52,8 @@ type Alert struct {
 	EndTime         *time.Time
 	Published       bool
 	IsTest          bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 	Translations    []Translation
 }
 

@@ -45,6 +45,12 @@ linters:
 
   exclusions:
     generated: strict
+    paths:
+      # npm dependencies vendor Go source of their own (flatted, for one).
+      # The go tool skips node_modules automatically; golangci-lint does not.
+      # Scoped to node_modules, not web/, so first-party Go anywhere stays
+      # linted and a second npm tree added later is covered too.
+      - '(^|/)node_modules/'
     presets:
       # Note: the "comments" preset is deliberately omitted — it suppresses
       # revive's exported/package-comments rules, which we want enforced.
@@ -77,3 +83,5 @@ formatters:
         - github.com/OneBusAway/sidecar
   exclusions:
     generated: strict
+    paths:
+      - '(^|/)node_modules/'

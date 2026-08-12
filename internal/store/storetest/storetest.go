@@ -1,5 +1,5 @@
-// Package storetest is the shared conformance suite for alerts and regions
-// repositories. It runs against the SQLite adapter today; when a Postgres
+// Package storetest is the shared conformance suite for the alerts, regions,
+// and auth repositories. It runs against the SQLite adapter today; when a Postgres
 // adapter is added it runs unchanged against that store too, which is what
 // makes database portability real rather than aspirational.
 //
@@ -53,7 +53,11 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("CreateRejectsInvalidWindow", func(t *testing.T) { testCreateRejectsInvalidWindow(t, newStore) })
 	t.Run("CreateRejectsEmptyAgencyID", func(t *testing.T) { testCreateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("UpdateRejectsEmptyAgencyID", func(t *testing.T) { testUpdateRejectsEmptyAgencyID(t, newStore) })
+	t.Run("CreateRejectsEmptyHeaderText", func(t *testing.T) { testCreateRejectsEmptyHeaderText(t, newStore) })
+	t.Run("UpdateRejectsEmptyHeaderText", func(t *testing.T) { testUpdateRejectsEmptyHeaderText(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
+	t.Run("AlertTimestampsPopulated", func(t *testing.T) { testAlertTimestampsPopulated(t, newStore) })
+	t.Run("DeleteTranslationRemovesBothFields", func(t *testing.T) { testDeleteTranslationRemovesBothFields(t, newStore) })
 }
 
 // putRegion inserts a minimal directory-sourced region with the given id.
@@ -786,6 +790,56 @@ func testUpdateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
 	}
 }
 
+// testCreateRejectsEmptyHeaderText asserts that Create rejects an empty
+// HeaderText rather than storing it: alerts.BuildFeed passes HeaderText
+// straight through to the feed's alert_header_text with no fallback, so a
+// caller that reaches the repository directly (an HTTP admin API, a bulk
+// importer) -- not through the CLI, which validates independently -- must
+// get the same protection, or riders receive an alert with no header text. A
+// future Postgres adapter inherits this requirement because it runs against
+// this same suite.
+func testCreateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	in := newAlertIn(1, base)
+	in.HeaderText = ""
+	if _, err := repo.Create(ctx, in, base); err == nil {
+		t.Error("Create with empty HeaderText: want error, got nil")
+	}
+}
+
+// testUpdateRejectsEmptyHeaderText asserts that Update enforces the same
+// non-empty-HeaderText invariant Create does. The check was originally added
+// only to Create; Patch{HeaderText: &""} would otherwise succeed and blank
+// the header of an already-published alert riders are reading right now. A
+// future Postgres adapter inherits this requirement because it runs against
+// this same suite.
+func testUpdateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	empty := ""
+	if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &empty}, base.Add(time.Minute)); updateErr == nil {
+		t.Error("Update with empty HeaderText: want error, got nil")
+	}
+
+	got, err := repo.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.HeaderText != created.HeaderText {
+		t.Errorf("HeaderText = %q after a rejected Update, want unchanged %q", got.HeaderText, created.HeaderText)
+	}
+}
+
 // testUpsertTranslationNormalizesLanguage asserts that UpsertTranslation
 // normalizes the language tag itself. The schema's UNIQUE(alert_id,
 // language, field) is case-sensitive, so a caller that forgot to normalize
@@ -832,5 +886,98 @@ func testUpsertTranslationNormalizesLanguage(t *testing.T, newStore newStoreFunc
 	}
 	if matches[0].Text != "Segundo" {
 		t.Errorf("Text = %q, want %q (second upsert should win)", matches[0].Text, "Segundo")
+	}
+}
+
+// testAlertTimestampsPopulated asserts that Get surfaces CreatedAt/UpdatedAt
+// read back from storage as UTC instants -- an instant-only comparison (e.g.
+// Equal) would pass even if the adapter attached the wrong zone, so this
+// checks .Location() explicitly -- and that Update advances UpdatedAt while
+// leaving CreatedAt untouched. A future Postgres adapter inherits this
+// requirement because it runs against this same suite.
+func testAlertTimestampsPopulated(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := repo.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, base)
+	}
+	if got.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt.Location() = %v, want %v", got.CreatedAt.Location(), time.UTC)
+	}
+	if !got.UpdatedAt.Equal(base) {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, base)
+	}
+	if got.UpdatedAt.Location() != time.UTC {
+		t.Errorf("UpdatedAt.Location() = %v, want %v", got.UpdatedAt.Location(), time.UTC)
+	}
+
+	later := base.Add(time.Hour)
+	newHeader := "Updated"
+	updated, err := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &newHeader}, later)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !updated.UpdatedAt.Equal(later) {
+		t.Errorf("UpdatedAt after Update = %v, want %v (must advance)", updated.UpdatedAt, later)
+	}
+	if !updated.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt after Update = %v, want unchanged %v", updated.CreatedAt, base)
+	}
+}
+
+// testDeleteTranslationRemovesBothFields asserts that DeleteTranslation
+// removes every field row for one (alert, language) pair -- both header and
+// description -- and normalizes the language it is given: the test passes
+// "ES" specifically to prove that, since the schema stores the normalized
+// "es" the earlier upserts wrote. A second delete against the same
+// now-empty language must report alerts.ErrNotFound rather than silently
+// succeeding a second time.
+func testDeleteTranslationRemovesBothFields(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	a, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "es", Field: alerts.FieldHeader, Text: "Encabezado",
+		SourceSHA256: alerts.SourceHash("Header"),
+	}, base); err != nil {
+		t.Fatalf("UpsertTranslation(header): %v", err)
+	}
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "es", Field: alerts.FieldDescription, Text: "Detalle",
+		SourceSHA256: alerts.SourceHash("Description"),
+	}, base); err != nil {
+		t.Fatalf("UpsertTranslation(description): %v", err)
+	}
+
+	if err = repo.DeleteTranslation(ctx, a.ID, "ES"); err != nil {
+		t.Fatalf("DeleteTranslation(ES): %v", err)
+	}
+
+	got, err := repo.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Translations) != 0 {
+		t.Fatalf("Translations after DeleteTranslation = %+v, want none", got.Translations)
+	}
+
+	if err = repo.DeleteTranslation(ctx, a.ID, "ES"); !errors.Is(err, alerts.ErrNotFound) {
+		t.Errorf("second DeleteTranslation(ES) = %v, want alerts.ErrNotFound", err)
 	}
 }

@@ -69,4 +69,9 @@ type Repository interface {
 	Feed(ctx context.Context, regionID int64, includeTest bool, limit int) ([]Alert, error)
 
 	UpsertTranslation(ctx context.Context, alertID int64, t Translation, now time.Time) error
+
+	// DeleteTranslation removes every field row for one language on one
+	// alert (language is normalized first). It returns ErrNotFound when no
+	// rows matched, so the HTTP layer can 404.
+	DeleteTranslation(ctx context.Context, alertID int64, language string) error
 }

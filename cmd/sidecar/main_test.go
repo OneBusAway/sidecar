@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // TestRun_ArgHandling covers flag parsing outcomes that don't require
@@ -99,5 +103,59 @@ func TestRun_MigrationFailure(t *testing.T) {
 	err := run(&stdout, &stderr, []string{"--db", badPath})
 	if err == nil {
 		t.Fatalf("run() with unmigratable --db returned nil error, want non-nil")
+	}
+}
+
+// TestBuildDeps_WiresFailDelay pins the one value httpapi.NewRouter will
+// never catch for us: Deps.FailDelay is not defaulted there (unlike Logger,
+// Sleep, and VerifyPassword), so a binary that forgot to set it would wire
+// up Sleep(0) -- the brake on online login guessing (design spec §4.3)
+// silently absent, with no panic and no other failing test. buildDeps is
+// exercised directly, against a real migrated store, rather than through
+// run/serve, because asserting on the constructed Deps needs no listening
+// socket and no signal handling.
+func TestBuildDeps_WiresFailDelay(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	deps := buildDeps(store, slog.New(slog.DiscardHandler))
+
+	if deps.FailDelay != 500*time.Millisecond {
+		t.Errorf("Deps.FailDelay = %v, want 500ms", deps.FailDelay)
+	}
+}
+
+// TestBuildDeps_WiresAdminSurface checks the fields Task 7 adds: without
+// Auth or AdminUI, httpapi.NewRouter either panics (Auth set, admin deps
+// missing) or never registers the admin surface at all (AdminUI nil); and
+// Now must be the real wall clock -- forbidigo does not catch a wrong clock
+// here, since .golangci.yml explicitly excludes the time.Now/time.Local
+// rule for path '^cmd/' (rightly so: cmd/ is the one place allowed to read
+// it). A clock pinned to some fixed instant would compile and lint clean
+// while minting every session already-expired, so Now is checked by bounds
+// rather than by nil-ness: two func values can never be compared with ==,
+// and a nil check alone would let a wrong-but-non-nil clock through.
+// None of these failure modes would be visible from run's own tests, which
+// never reach a request handler.
+func TestBuildDeps_WiresAdminSurface(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	deps := buildDeps(store, slog.New(slog.DiscardHandler))
+
+	if deps.Auth == nil {
+		t.Error("Deps.Auth = nil, want store.Auth()")
+	}
+	if deps.AdminUI == nil {
+		t.Error("Deps.AdminUI = nil, want adminui.FS()")
+	}
+	if deps.Now == nil {
+		t.Fatal("Deps.Now = nil, want time.Now")
+	}
+	before := time.Now()
+	got := deps.Now()
+	after := time.Now()
+	if got.Before(before) || got.After(after) {
+		t.Errorf("Deps.Now() = %v, want a value between %v and %v (i.e. the real wall clock)", got, before, after)
 	}
 }

@@ -6,8 +6,11 @@ require (
 	github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs v1.0.0
 	github.com/google/go-cmp v0.7.0
 	github.com/pressly/goose/v3 v3.27.3
+	golang.org/x/crypto v0.55.0
 	modernc.org/sqlite v1.56.0
 )
+
+require golang.org/x/term v0.45.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

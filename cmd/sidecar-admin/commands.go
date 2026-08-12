@@ -26,11 +26,14 @@ const (
 // and a temp database, entirely in-process -- no subprocess. It returns an
 // error rather than exiting so main owns the only exit path.
 //
+// stdin feeds `user create`/`user passwd`'s --password-stdin and interactive
+// prompt; every other command ignores it.
+//
 // Every command runs against a freshly migrated schema: like cmd/sidecar,
 // this never operates against an unknown schema. `migrate up` is still
 // useful on its own for scripted, explicit use (e.g. a deploy step) even
 // though it is redundant here.
-func run(stdout, stderr io.Writer, args []string) error {
+func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	fs := flag.NewFlagSet("sidecar-admin", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -48,7 +51,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing command; expected region, alert, or migrate")
+		return errors.New("missing command; expected region, alert, migrate, or user")
 	}
 
 	store, err := sqlite.Open(*dbPath)
@@ -85,8 +88,10 @@ func run(stdout, stderr io.Writer, args []string) error {
 		return runAlert(ctx, stdout, store, now, cmdArgs)
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
+	case "user":
+		return runUser(ctx, stdin, stdout, stderr, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown command %q; expected region, alert, or migrate", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, migrate, or user", cmd)
 	}
 }
 
@@ -326,6 +331,9 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("alert create requires %s", strings.Join(missing, ", "))
+	}
+	if *header == "" {
+		return errors.New("alert create: --header cannot be empty")
 	}
 
 	reg, err := store.Regions().Get(ctx, *regionID)
@@ -586,6 +594,9 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	}
 
 	if seen["header"] {
+		if *header == "" {
+			return errors.New("alert edit: --header cannot be empty")
+		}
 		patch.HeaderText = header
 	}
 	if seen["description"] {

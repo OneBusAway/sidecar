@@ -1569,6 +1569,44 @@ kill %1; rm -f /tmp/spa-smoke.db*
 git status --short   # dist/ contents must NOT appear (gitignore from Task 7)
 ```
 
+- [ ] **Step 5b: Add the embed regression test** (`internal/httpapi/adminui/adminui_test.go`).
+
+Until now `dist/` held only `.gitkeep`, so dropping the `all:` prefix from the
+`go:embed` directive failed to compile — accidental protection that disappears the
+moment this task populates `dist/` with real output. From here on, `//go:embed dist`
+(no `all:`) would compile cleanly while silently dropping every `.`- and
+`_`-prefixed path, including the whole `_app/` tree: the binary builds, the server
+starts, and every asset 404s. Assert what the comment claims:
+
+```go
+func TestEmbedIncludesUnderscoreAndDotPaths(t *testing.T) {
+	fsys := FS()
+	if _, err := fs.Stat(fsys, "index.html"); err != nil {
+		t.Fatalf("index.html missing from the embed -- run make web: %v", err)
+	}
+	var sawUnderscore bool
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(path.Base(p), "_") {
+			sawUnderscore = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawUnderscore {
+		t.Error("no _-prefixed path in the embed: the go:embed directive lost its all: prefix, " +
+			"so SvelteKit's _app/ tree is silently excluded and every asset will 404")
+	}
+}
+```
+
+Verify it discriminates: drop `all:` from the directive, confirm this test fails
+(not just that the build breaks), then revert.
+
 - [ ] **Step 6: `make check`** (now including web-check). Expected: PASS.
 - [ ] **Step 7: Commit.**
 
@@ -1591,6 +1629,8 @@ git commit -m "Scaffold the SvelteKit admin SPA and wire it into make"
 - Produces: `api` object (`get/post/patch/put/del`), `ApiError`, types `Alert`, `Region`, `Translation`, `whoami()`; datetime functions `offsetMinutes`, `localInputToRFC3339`, `instantToLocalInput` — Task 11's screens import these exact names.
 
 - [ ] **Step 1: `types.ts`** — mirror the wire shapes exactly (`Alert` with `region_id`, `start_time: string`, `end_time: string | null`, `translations: Translation[]`; `Region` with `default_agency_id`, `timezone`; keep snake_case — no mapping layer to drift).
+
+  **Trap:** `GET /alerts` (the list) always returns `translations: []` on every item, whatever the alert really has — only `GET /alerts/{id}` populates them. An empty array on a list item means "not loaded", never "none exist". Never render a translation count or a "no translations" state from a list response. Put this warning in a comment on the `Alert` type itself, where a reader of `types.ts` will see it.
 
 - [ ] **Step 2: Failing datetime tests** (`datetime.test.ts`, vitest — this module is the one place the CLI's timezone lessons could regress in the browser):
 
@@ -1823,6 +1863,29 @@ git commit -m "Add SPA core: API client, timezone-explicit datetime module, logi
 **Interfaces:**
 - Consumes: Task 10's `api`, `types`, `datetime`; the admin API.
 - Produces: the five screens of spec §6.2.
+
+**Carried forward from Task 10's review — three required items:**
+
+- **Overwrite `src/routes/regions/+page.svelte`.** Task 10 created it as a bare
+  placeholder (an HTML comment plus `<h1>Regions</h1>`) purely so `resolve()`'s
+  route-union argument type would compile. Left alone it renders as a
+  finished-looking empty screen with no signal that it is unimplemented.
+- **Add `src/routes/+error.svelte`.** `whoami()` now rethrows non-401 failures, so a
+  500 on the session probe currently surfaces as SvelteKit's unstyled default error
+  page. Give it the app's shell and a way back to `/admin`.
+- **Every new datetime-dependent test must be TZ-robust.** Task 10 proved two
+  brief-prescribed assertions were vacuous on a Pacific-time machine: an
+  `instantToLocalInput` mutation formatting in the browser's zone still passed an
+  `America/Los_Angeles` case, because the dev machine *is* Pacific. Choose fixture
+  zones that differ from any plausible dev machine (`Asia/Kathmandu`'s +05:45 is the
+  house choice) and include a DST-transition case where offsets are in play.
+  `make test-tz` now runs vitest under two zones — keep it green.
+
+Optional but worth deciding explicitly rather than by omission: `environment: 'node'`
+means there is no DOM, so component behavior (the login form's submit wiring, error
+banners, the sign-out error path) has no automated coverage. If any screen here
+carries real logic in its markup rather than in a `.ts` module, add a jsdom vitest
+project for it; otherwise keep the logic in testable modules.
 
 - [ ] **Step 1: `enums.ts`** — the option lists, copied from `internal/alerts/enums.go` (12 causes, 11 effects, 4 severities — copy the exact names from that file at implementation time; a drifted list turns into a 400 at submit, which the form surfaces, so drift is visible not silent).
 

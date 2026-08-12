@@ -11,3 +11,10 @@ coverage.html
 *.db
 *.db-wal
 *.db-shm
+
+# Built admin SPA (populated by `make web`; .gitkeep keeps the embed dir)
+internal/httpapi/adminui/dist/*
+!internal/httpapi/adminui/dist/.gitkeep
+web/admin/node_modules/
+web/admin/.svelte-kit/
+web/admin/build/

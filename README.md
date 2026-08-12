@@ -90,12 +90,80 @@ sidecar-admin alert   create --region N --header TEXT --start RFC3339
                                [--severity S] [--test | --no-test]
                        publish ID | unpublish ID | delete ID
                        translate ID --language es [--header TEXT] [--description TEXT]
+sidecar-admin user    create --username NAME [--password-stdin]
+                       passwd --username NAME [--password-stdin]
+                       list
+                       delete --username NAME [--force]
 sidecar-admin migrate  up | status
 ```
 
+## Admin UI
+
+The sidecar server also serves a small admin single-page app at `/admin` for
+authoring alerts through a browser instead of the CLI above. It reads and
+writes the same database as `sidecar-admin` and `sidecar` itself -- there is
+no separate admin database, and no web signup: the only way to create an
+account is `sidecar-admin user create`.
+
+The steps below are sequential, like the CLI quickstart above: `user create`
+bootstraps the one account that can sign in, and `make build` embeds the SPA
+into the binary that then serves it.
+
+```sh
+# Create the first admin user (prompts for a password; 12 char minimum).
+./bin/sidecar-admin --db ./sidecar.db user create --username admin
+
+# Build the admin SPA into the server binary, then run it.
+make build
+./bin/sidecar --db ./sidecar.db
+# open http://localhost:8080/admin and sign in
+```
+
+`make run` does not build the SPA -- it runs `go run` directly and skips the
+`web` prerequisite that `make build` has. A server started with `make run`
+(or from a `go build` run before the first `make web`) serves a 503 "admin
+UI not built; run make web" response at `/admin` instead of a login page.
+That is expected, not a bug -- run `make web` (or `make build`, which
+includes it) once first.
+
+### Deployment
+
+Sessions rely on the request's `Host` header and TLS status to reject
+cross-site writes and to mark the session cookie `Secure`. A reverse proxy
+in front of sidecar must:
+
+- Preserve the public `Host` header (nginx: `proxy_set_header Host $host;`
+  -- nginx's default rewrites `Host` to the upstream address, which makes
+  every admin write look cross-site and get rejected with a 403).
+- Set `X-Forwarded-Proto: https` when terminating TLS, or the session
+  cookie is issued without `Secure`, so it will also be sent over any
+  plain-HTTP connection to the same host instead of being restricted to
+  HTTPS.
+
+### Development
+
+Run the SPA against a live server with hot reload instead of rebuilding the
+embedded copy on every change:
+
+```sh
+cd web/admin && npm run dev
+```
+
+This proxies `/api` requests to `localhost:8080` (see
+`web/admin/vite.config.ts`), so start `./bin/sidecar` (or `make run`)
+alongside it. There is deliberately no CORS configuration anywhere in this
+repo -- every legitimate client is same-origin, either directly or through
+this dev proxy, and blocking cross-origin admin API access is exactly what
+the cross-site guard exists to do.
+
+`make web` rebuilds the embedded copy that ships inside the `sidecar`
+binary from `web/admin`'s current source; `make build` and the `test`/
+`test-tz`/`test-race`/`check` targets all run it for you first (see the CI
+note in the "## Development" section below if you're wiring up a workflow).
+
 ## Development
 
-Requires Go 1.26+ (`mise install` will set it up) and [golangci-lint](https://golangci-lint.run) 2.12+.
+Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golangci-lint.run) 2.12+, and Node (for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
 
 ```sh
 make tools   # install pinned dev tooling
@@ -104,7 +172,13 @@ make run     # build and run the server
 make help    # list all targets
 ```
 
-Run `make check` before opening a pull request.
+Run `make check` before opening a pull request. There is no CI workflow in
+this repo yet (no `.github/`), but whoever adds one needs to route it
+through `make check`, or run `make web` before any `go test` step: the Go
+suite includes an embed regression test
+(`internal/httpapi/adminui/adminui_test.go`) that needs a populated
+`internal/httpapi/adminui/dist/`, and a bare `go test ./...` against the
+empty, gitignored `dist/` fails it.
 
 ## License
 

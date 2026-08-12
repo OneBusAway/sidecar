@@ -2,15 +2,19 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestOpenMigrateAndRoundTrip(t *testing.T) {
@@ -41,6 +45,93 @@ func TestOpenMigrateAndRoundTrip(t *testing.T) {
 	if _, err := store.Alerts().Get(ctx, 999); !errors.Is(err, alerts.ErrNotFound) {
 		t.Errorf("Get(999) error = %v, want alerts.ErrNotFound", err)
 	}
+}
+
+// TestMigrateCreatesAuthTables checks that migrating creates the users and
+// sessions tables. It opens its own *sql.DB on the path OpenAt returns
+// rather than going through store.Regions()/store.Alerts(): this test file
+// is package sqlite_test (external), so it cannot reach the Store's
+// unexported db field, and Store intentionally has no public DB() accessor.
+func TestMigrateCreatesAuthTables(t *testing.T) {
+	t.Parallel()
+
+	path, _ := sqlitetest.OpenAt(t)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	for _, table := range []string{"users", "sessions"} {
+		var n int
+		err := db.QueryRowContext(ctx,
+			"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&n)
+		if err != nil || n != 1 {
+			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
+		}
+	}
+
+	// Every timestamp is epoch seconds in an INTEGER column, never DATETIME or
+	// TEXT. Nothing else in the suite can hold this: SQLite's dynamic typing
+	// round-trips an int64 unchanged through a TEXT- or DATETIME-declared
+	// column, so the storetest conformance suite stays green against a
+	// mis-declared schema and cannot be the check. Reading the declared types
+	// back out of the catalog is the only assertion that bites, and it is
+	// engine-specific, which is why it lives here rather than in storetest.
+	wantIntegerColumns := map[string][]string{
+		"users":    {"created_at", "updated_at"},
+		"sessions": {"created_at", "expires_at"},
+	}
+	for table, columns := range wantIntegerColumns {
+		types, err := columnTypes(ctx, db, table)
+		if err != nil {
+			t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+		}
+		for _, column := range columns {
+			got, ok := types[column]
+			if !ok {
+				t.Errorf("%s.%s missing after migrate", table, column)
+				continue
+			}
+			if got != "INTEGER" {
+				t.Errorf("%s.%s declared type = %q, want INTEGER (epoch seconds, never DATETIME/TEXT)", table, column, got)
+			}
+		}
+	}
+}
+
+// columnTypes returns each column's declared type for one table, as SQLite
+// recorded it at CREATE TABLE time.
+func columnTypes(ctx context.Context, db *sql.DB, table string) (map[string]string, error) {
+	// PRAGMA does not accept a bound parameter for the table name; the values
+	// here are test-local literals, not input.
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			declType   string
+			notNull    int
+			defaultVal sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &declType, &notNull, &defaultVal, &primaryKey); err != nil {
+			return nil, err
+		}
+		out[name] = declType
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // TestFeed exercises Feed through the generated Go bindings rather than by
@@ -222,5 +313,18 @@ func TestConformance(t *testing.T) {
 		t.Helper()
 		store := sqlitetest.Open(t)
 		return store.Alerts(), store.Regions()
+	})
+}
+
+// TestAuthRepositoryConformance runs the shared auth conformance suite against
+// the SQLite adapter. The users/sessions migration test above asserts only
+// that the tables exist; this suite is what pins the behavior that depends on
+// their column types, foreign key, and expiry semantics.
+func TestAuthRepositoryConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAuthRepository(t, func(t *testing.T) auth.Repository {
+		t.Helper()
+		return sqlitetest.Open(t).Auth()
 	})
 }
