@@ -2,11 +2,32 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	"github.com/OneBusAway/sidecar/internal/greeting"
+	"github.com/OneBusAway/sidecar/internal/httpapi"
+	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+)
+
+const (
+	defaultDB         = "./sidecar.db"
+	defaultAddr       = ":8080"
+	defaultRegionsURL = "https://regions.onebusaway.org/regions-v3.json"
+	defaultRefresh    = 60 * time.Minute
+
+	// shutdownTimeout bounds how long a graceful shutdown waits for
+	// in-flight requests to finish before giving up.
+	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
@@ -16,15 +37,109 @@ func main() {
 	}
 }
 
-// run holds main's logic so tests can supply their own streams and arguments.
-// It returns an error rather than exiting so main owns the only exit path.
+// run holds main's logic so tests can supply their own streams and
+// arguments. It returns an error rather than exiting so main owns the only
+// exit path.
 //
-//nolint:unparam // seam intentionally always returns nil today; later tasks add fallible logic here.
-func run(stdout, _ io.Writer, args []string) error {
-	var name string
-	if len(args) > 0 {
-		name = args[0]
+// Flag parsing errors are deliberately kept off stdout: flag.FlagSet's
+// output is discarded during Parse, so a malformed flag produces only the
+// returned error (which main reports on stderr). The one exception is
+// -h/-help, which is a request for usage, not a failure, so it is printed to
+// stdout and reported as success (nil), following the convention that
+// --help is not an error condition.
+func run(stdout, stderr io.Writer, args []string) error {
+	fs := flag.NewFlagSet("sidecar", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	dbPath := fs.String("db", envOrDefault("SIDECAR_DB", defaultDB), "path to the sqlite database file")
+	addr := fs.String("addr", defaultAddr, "address for the HTTP server to listen on")
+	regionsURL := fs.String("regions-url", envOrDefault("SIDECAR_REGIONS_URL", defaultRegionsURL), "URL of the regions directory document")
+	refresh := fs.Duration("refresh", defaultRefresh, "interval between regions directory refreshes")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fs.SetOutput(stdout)
+			fs.Usage()
+			return nil
+		}
+		return err
 	}
-	fmt.Fprintln(stdout, greeting.Greet(name))
-	return nil
+
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
+
+	store, err := sqlite.Open(*dbPath)
+	if err != nil {
+		return fmt.Errorf("sidecar: open database: %w", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			logger.Error("sidecar: close database", "error", closeErr)
+		}
+	}()
+
+	// Migrate before anything touches a table: a fresh database has no
+	// regions table, so a directory sync that ran first would fail against
+	// a missing relation. Never serve on an unknown schema.
+	if err := store.Migrate(); err != nil {
+		return fmt.Errorf("sidecar: migrate database: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// The sync loop runs in its own goroutine so boot never blocks on the
+	// first directory fetch beyond the client's own timeout: the server
+	// starts serving from whatever rows already exist while the loop keeps
+	// trying in the background.
+	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
+	go regions.RunSyncLoop(ctx, client, store.Regions(), *refresh, time.Now, logger)
+
+	server := httpapi.NewServer(httpapi.ServerConfig{
+		Addr: *addr,
+		Deps: httpapi.Deps{
+			Alerts:  store.Alerts(),
+			Regions: store.Regions(),
+			Now:     time.Now,
+			Logger:  logger,
+		},
+	})
+
+	logger.Info("sidecar: listening", "addr", *addr)
+	return serve(ctx, server, logger)
+}
+
+// serve runs server until ctx is cancelled (by SIGINT/SIGTERM), then shuts
+// it down gracefully, giving in-flight requests up to shutdownTimeout to
+// finish.
+func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error {
+	errCh := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("sidecar: listen and serve: %w", err)
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		logger.Info("sidecar: shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("sidecar: shutdown: %w", err)
+		}
+		return <-errCh
+	}
+}
+
+// envOrDefault returns the value of the environment variable key, or def if
+// key is unset or empty.
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
