@@ -211,6 +211,26 @@
 			/>
 		</label>
 	{:else}
+		{#if zone === 'UTC'}
+			<!--
+				`regions.timezone` is NOT NULL DEFAULT 'UTC' and the directory sync
+				never sets it, so 'UTC' is indistinguishable from "nobody has
+				configured this region yet" -- the schema makes the guess this
+				form is otherwise careful not to. An author typing 17:00 for an
+				unconfigured Tampa Bay stores 17:00Z, four hours off, with the
+				"(UTC)" label as the only clue.
+				This over-warns for a region that really is on UTC. That is the
+				right direction to err: a redundant hint costs a reading, a
+				silently mis-stamped alert costs riders.
+			-->
+			<p class="hint">
+				{region ? region.name : 'This region'} reads as
+				<code>UTC</code>, which is also the default for a region nobody has
+				configured yet — times you enter will be read as UTC.
+				<a href={resolve('/regions')}>Set its timezone on the Regions screen</a>
+				if that is not what you want.
+			</p>
+		{/if}
 		<label>
 			Start <span class="zone">({zone})</span>
 			<input type="datetime-local" bind:value={values.start} required />

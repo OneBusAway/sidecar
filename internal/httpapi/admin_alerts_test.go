@@ -1484,4 +1484,19 @@ func TestParseInstantJSON(t *testing.T) {
 			t.Errorf("parseInstantJSON(Z form): %v", err)
 		}
 	})
+
+	// A region with no timezone used to render as "region 16 is configured as
+	// :" -- a sentence that stops mid-clause and reads like a bug in the error
+	// message rather than the fact it is reporting.
+	t.Run("an unconfigured timezone reads as a sentence", func(t *testing.T) {
+		_, err := parseInstantJSON("2026-08-15T14:00:00", regions.Region{ID: 16})
+		if err == nil {
+			t.Fatal("parseInstantJSON accepted a naive datetime")
+		}
+		assertContains(t, "unconfigured-zone error", err.Error(),
+			"RFC 3339", "explicit offset", "region 16 has no configured timezone")
+		if strings.Contains(err.Error(), "configured as :") {
+			t.Errorf("error still has the truncated clause: %v", err)
+		}
+	})
 }

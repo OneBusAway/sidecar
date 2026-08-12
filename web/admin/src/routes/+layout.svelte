@@ -49,6 +49,22 @@
 	{#if signOutError}
 		<p class="error" role="alert">{signOutError}</p>
 	{/if}
+	{#if data.sessionError}
+		<!--
+			The session probe failed with something other than a 401. This cannot
+			be shown on +error.svelte: that page lives inside this layout, so a
+			root-layout failure falls through to SvelteKit's built-in error page
+			instead. Reporting it here is the only way the operator sees the
+			server's own words and keeps the shell.
+		-->
+		<p class="error" role="alert">
+			Could not check your session: {data.sessionError}. You are seeing this
+			page without a confirmed sign-in.
+			<button type="button" class="link" onclick={() => location.reload()}>
+				Reload
+			</button>
+		</p>
+	{/if}
 	{@render children()}
 </main>
 
@@ -127,5 +143,15 @@
 		border-radius: 4px;
 		background: #fdecea;
 		color: #7f1d1a;
+	}
+
+	button.link {
+		font: inherit;
+		padding: 0;
+		border: none;
+		background: none;
+		color: inherit;
+		text-decoration: underline;
+		cursor: pointer;
 	}
 </style>

@@ -118,7 +118,22 @@ export function toInstant(value: string, timezone: string): string {
  * instant. With a region timezone the field is a `datetime-local` value in
  * THAT zone -- an operator in Seattle editing a Tampa alert must see Tampa's
  * wall clock, not their own. With no configured zone the raw RFC 3339 string
- * goes into the raw text input unchanged, so the pair round-trips.
+ * goes into the raw text input unchanged, so that pair round-trips exactly.
+ *
+ * THE ZONED PAIR IS PRECISE TO THE MINUTE, NOT THE SECOND. `datetime-local`
+ * without `step` is a minute-granularity control, `instantToLocalInput` emits
+ * `YYYY-MM-DDTHH:MM`, and `localInputToRFC3339` appends `:00`. So an alert
+ * created by the CLI at 21:00:30Z, opened here and saved untouched, is stored
+ * back as 21:00:00Z.
+ *
+ * That is deliberate rather than overlooked. This form authors service alerts,
+ * where the meaningful unit is the minute; carrying seconds through would mean
+ * `step="1"` and a seconds spinner in every picker, making the common case
+ * worse to serve a precision nothing in the product uses. The rounding is at
+ * most 59 seconds, it is visible in the field before the operator saves, and
+ * `alerts.test.ts` pins it ("truncates seconds..."), so it is a stated
+ * behaviour and not a silent one. Change both helpers together, and add
+ * `step="1"` to both inputs, if that ever stops being true.
  */
 export function fromInstant(iso: string, timezone: string): string {
 	if (timezone === '') return iso;

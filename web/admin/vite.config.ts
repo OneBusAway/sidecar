@@ -1,4 +1,5 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import { svelteTesting } from '@testing-library/svelte/vite';
 // vitest/config re-exports Vite's defineConfig with the `test` block typed;
 // importing it from 'vite' makes svelte-check reject `test` as unknown.
 import { defineConfig } from 'vitest/config';
@@ -21,10 +22,35 @@ export default defineConfig({
 		proxy: { '/api': { target: 'http://localhost:8080', changeOrigin: false } },
 	},
 	test: {
-		// The unit tests cover plain modules ($lib/datetime, $lib/api,
-		// $lib/redirect), so they need no DOM -- fetch, Response and Intl all
-		// come from Node. Stated rather than left to the default so that
-		// adding a component test is a visible decision.
-		environment: 'node',
+		projects: [
+			{
+				// Plain modules: $lib/alerts, $lib/api, $lib/datetime,
+				// $lib/loaderror, $lib/redirect, $lib/regions and the layout
+				// guard. No DOM needed -- fetch, Response and Intl all come from
+				// Node -- and no jsdom means these stay fast.
+				extends: true,
+				test: {
+					name: 'node',
+					environment: 'node',
+					include: ['src/**/*.test.ts'],
+					exclude: ['src/**/*.svelte.test.ts'],
+				},
+			},
+			{
+				// Component behaviour that genuinely lives in markup and cannot
+				// be lifted into a module: the edit form's remount-on-save rule
+				// and AlertForm's zoned/zoneless field switch. Both were bugs
+				// found by hand in a browser, and without a DOM project either
+				// one can be reverted with the whole suite still green.
+				extends: true,
+				plugins: [svelteTesting()],
+				test: {
+					name: 'component',
+					environment: 'jsdom',
+					include: ['src/**/*.svelte.test.ts'],
+					setupFiles: ['./vitest-setup-client.ts'],
+				},
+			},
+		],
 	},
 });

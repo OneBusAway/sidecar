@@ -80,6 +80,13 @@
 	zone on the region's behalf.
 </p>
 
+<p class="note">
+	The timezone column is <code>NOT NULL DEFAULT 'UTC'</code> in the database and
+	the directory sync never fills it in, so a region reading <code>UTC</code> may
+	simply be one nobody has configured — which is why the alert form warns about
+	<code>UTC</code> regions too.
+</p>
+
 <table>
 	<thead>
 		<tr>
@@ -110,6 +117,11 @@
 						aria-label="Timezone for {row.region.name}"
 						placeholder="America/New_York"
 					/>
+					{#if row.region.timezone === 'UTC'}
+						<!-- Reads off the SAVED region, not the input, so typing a
+						     real zone does not clear the warning before Save does. -->
+						<span class="unset">UTC (default — not configured)</span>
+					{/if}
 				</td>
 				<td class="rowactions">
 					<button type="button" disabled={row.busy} onclick={() => save(row)}>
@@ -198,6 +210,13 @@
 		margin-left: 0.5rem;
 		font-size: 0.85rem;
 		color: #1b4332;
+	}
+
+	.unset {
+		display: block;
+		margin-top: 0.2rem;
+		font-size: 0.8rem;
+		color: #6b4b00;
 	}
 
 	.error {

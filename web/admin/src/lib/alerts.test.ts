@@ -298,11 +298,14 @@ describe('buildPatchPayload', () => {
 
 describe('form prefill round trip', () => {
 	// Loading an alert and saving it untouched must submit the same instants it
-	// was loaded with. Every case pins the region zone explicitly, and the
-	// comparison is on the absolute instant, so the host zone cannot influence
-	// the result -- including the DST-boundary case, where the naive wall time
-	// and the instant disagree about which offset applies.
-	it('preserves the instants across zones and a DST boundary', () => {
+	// was loaded with, TO THE MINUTE (see the seconds case below -- every
+	// fixture here is deliberately on a whole minute, so this says nothing
+	// about seconds and must not be read as if it did). Every case pins the
+	// region zone explicitly, and the comparison is on the absolute instant, so
+	// the host zone cannot influence the result -- including the DST-boundary
+	// case, where the naive wall time and the instant disagree about which
+	// offset applies.
+	it('preserves the instants to the minute across zones and a DST boundary', () => {
 		const cases: [string, string][] = [
 			['2026-08-15T21:00:00Z', KATHMANDU],
 			['2026-01-15T22:00:00Z', LA],
@@ -325,6 +328,32 @@ describe('form prefill round trip', () => {
 				`end in ${zone}`,
 			).toBe(end.replace('Z', '.000Z'));
 		}
+	});
+
+	// The zoned round trip is minute-granular, so a CLI-authored alert with
+	// seconds on it loses them when the SPA saves. This is a decision, not an
+	// accident (see fromInstant's comment): `datetime-local` without `step` is
+	// a minute control, the truncation is at most 59 seconds, and the operator
+	// can see the rounded value in the field before saving. Pinned here so it
+	// cannot become an accident later -- if someone adds `step="1"` and carries
+	// seconds through, this test fails and they have to say so.
+	it('truncates seconds on the zoned round trip, by design', () => {
+		const zoned = formValuesFromAlert(
+			alert({ start_time: '2026-08-15T21:00:30Z' }),
+			KATHMANDU,
+		);
+		expect(zoned.start).toBe('2026-08-16T02:45');
+		expect(buildPatchPayload(zoned, KATHMANDU).start_time).toBe(
+			'2026-08-16T02:45:00+05:45',
+		);
+
+		// The zoneless path has no such limit: it is a raw string, so seconds
+		// survive untouched.
+		const raw = formValuesFromAlert(
+			alert({ start_time: '2026-08-15T21:00:30Z' }),
+			'',
+		);
+		expect(buildPatchPayload(raw, '').start_time).toBe('2026-08-15T21:00:30Z');
 	});
 
 	// A zoneless region round-trips through the raw RFC 3339 text input, so the
