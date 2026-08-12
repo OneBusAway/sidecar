@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
@@ -252,5 +253,18 @@ func TestConformance(t *testing.T) {
 		t.Helper()
 		store := sqlitetest.Open(t)
 		return store.Alerts(), store.Regions()
+	})
+}
+
+// TestAuthRepositoryConformance runs the shared auth conformance suite against
+// the SQLite adapter. The users/sessions migration test above asserts only
+// that the tables exist; this suite is what pins the behavior that depends on
+// their column types, foreign key, and expiry semantics.
+func TestAuthRepositoryConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAuthRepository(t, func(t *testing.T) auth.Repository {
+		t.Helper()
+		return sqlitetest.Open(t).Auth()
 	})
 }

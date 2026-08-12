@@ -1,8 +1,8 @@
-// Package sqlite is the SQLite adapter for the alerts and regions
+// Package sqlite is the SQLite adapter for the alerts, regions, and auth
 // repositories. It maps generated sqlc rows to the domain types defined in
-// internal/alerts and internal/regions — nothing outside this package ever
-// sees a gen.* struct, which is what lets a Postgres adapter satisfy the same
-// interfaces later without touching any other package.
+// internal/alerts, internal/regions, and internal/auth — nothing outside this
+// package ever sees a gen.* struct, which is what lets a Postgres adapter
+// satisfy the same interfaces later without touching any other package.
 package sqlite
 
 import (
@@ -17,6 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
@@ -125,6 +126,11 @@ func (s *Store) Alerts() alerts.Repository {
 // Regions returns the regions.Repository backed by this store.
 func (s *Store) Regions() regions.Repository {
 	return &regionRepo{db: s.db, q: s.q}
+}
+
+// Auth returns the auth.Repository backed by this store.
+func (s *Store) Auth() auth.Repository {
+	return &authRepo{db: s.db, q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
