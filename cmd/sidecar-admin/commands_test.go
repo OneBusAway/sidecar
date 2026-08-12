@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // newDB opens and migrates a temp database, returning its path (for the CLI's
@@ -23,16 +23,7 @@ import (
 // itself writes through.
 func newDB(t *testing.T) (string, *sqlite.Store) {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	store, err := sqlite.Open(dbPath)
-	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	return dbPath, store
+	return sqlitetest.OpenAt(t)
 }
 
 // seedRegion inserts a directory-sourced region row directly through the

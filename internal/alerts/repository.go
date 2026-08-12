@@ -12,7 +12,10 @@ var ErrNotFound = errors.New("alert not found")
 
 // NewAlert is the input to Create. AgencyID is already resolved — the CLI
 // applies the region default before calling, so the stored value never changes
-// underneath a published alert.
+// underneath a published alert. Create rejects an empty AgencyID and an
+// invalid start/end window itself, rather than trusting every caller to have
+// checked first — see alertRepo.Create in the sqlite adapter and
+// ValidateWindow.
 type NewAlert struct {
 	RegionID        int64
 	AgencyID        string

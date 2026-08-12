@@ -128,6 +128,10 @@ func translated(english string, all []Translation, field Field) *gtfs.Translated
 		Translation: []*gtfs.TranslatedString_Translation{{Language: &lang, Text: &text}},
 	}
 
+	if len(all) == 0 {
+		return out
+	}
+
 	want := SourceHash(english)
 	fresh := make([]Translation, 0, len(all))
 	for _, t := range all {

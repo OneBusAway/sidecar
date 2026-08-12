@@ -3,28 +3,19 @@ package sqlite_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/regions"
-	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
 )
 
 func TestOpenMigrateAndRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	store, openErr := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
-	if openErr != nil {
-		t.Fatalf("Open: %v", openErr)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	store := sqlitetest.Open(t)
 
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
@@ -60,15 +51,7 @@ func TestOpenMigrateAndRoundTrip(t *testing.T) {
 func TestFeed(t *testing.T) {
 	t.Parallel()
 
-	store, openErr := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
-	if openErr != nil {
-		t.Fatalf("Open: %v", openErr)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	store := sqlitetest.Open(t)
 
 	ctx := context.Background()
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
@@ -150,14 +133,7 @@ func TestConformance(t *testing.T) {
 
 	storetest.RunAlertRepository(t, func(t *testing.T) (alerts.Repository, regions.Repository) {
 		t.Helper()
-		store, err := sqlite.Open(filepath.Join(t.TempDir(), "conformance.db"))
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		t.Cleanup(func() { _ = store.Close() })
-		if err := store.Migrate(); err != nil {
-			t.Fatalf("Migrate: %v", err)
-		}
+		store := sqlitetest.Open(t)
 		return store.Alerts(), store.Regions()
 	})
 }

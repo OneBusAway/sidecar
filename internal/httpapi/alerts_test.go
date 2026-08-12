@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -19,7 +18,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/regions"
-	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // base is the fixed instant every subtest builds its timestamps from, and
@@ -58,14 +57,7 @@ func TestParseRegionSegment(t *testing.T) {
 func newTestServer(t *testing.T) (http.Handler, alerts.Repository, regions.Repository) {
 	t.Helper()
 
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	store := sqlitetest.Open(t)
 
 	deps := httpapi.Deps{
 		Alerts:  store.Alerts(),
@@ -338,14 +330,7 @@ func recordAttrs(r slog.Record) map[string]string {
 func TestFeed_UnmappableEnumLogsWarn(t *testing.T) {
 	t.Parallel()
 
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if migrateErr := store.Migrate(); migrateErr != nil {
-		t.Fatalf("Migrate: %v", migrateErr)
-	}
+	store := sqlitetest.Open(t)
 
 	var records []slog.Record
 	logger := slog.New(recordingHandler{records: &records})

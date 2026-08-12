@@ -50,6 +50,9 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("DeleteCascadesToTranslations", func(t *testing.T) { testDeleteCascadesToTranslations(t, newStore) })
 	t.Run("UpdatePatchSemantics", func(t *testing.T) { testUpdatePatchSemantics(t, newStore) })
 	t.Run("SetPublishedAndDeleteReportUnknownID", func(t *testing.T) { testSetPublishedAndDeleteReportUnknownID(t, newStore) })
+	t.Run("CreateRejectsInvalidWindow", func(t *testing.T) { testCreateRejectsInvalidWindow(t, newStore) })
+	t.Run("CreateRejectsEmptyAgencyID", func(t *testing.T) { testCreateRejectsEmptyAgencyID(t, newStore) })
+	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
 }
 
 // putRegion inserts a minimal directory-sourced region with the given id.
@@ -408,12 +411,17 @@ func testStartTimeBeyond32Bit(t *testing.T, newStore newStoreFunc) {
 	// past it. A future Postgres schema using INTEGER (32-bit there) instead
 	// of BIGINT would silently truncate or reject this.
 	want := time.Unix((1<<31)+86400, 0).UTC()
+	// now is pinned near want, rather than the package's shared `base`
+	// (2026), so this fixture -- whose whole point is exercising storage
+	// past the 32-bit boundary -- doesn't also trip Create's unrelated
+	// ValidateWindow "more than 10 years out" check.
+	now := want.AddDate(-1, 0, 0)
 
 	created, err := repo.Create(ctx, alerts.NewAlert{
 		RegionID: 1, AgencyID: "40", HeaderText: "Far future",
 		Cause: "UNKNOWN_CAUSE", Effect: "UNKNOWN_EFFECT", Severity: "INFO",
 		StartTime: want,
-	}, base)
+	}, now)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -701,5 +709,97 @@ func testUpdatePatchSemantics(t *testing.T, newStore newStoreFunc) {
 	}
 	if restored.EndTime == nil || !restored.EndTime.Equal(newEnd) {
 		t.Errorf("EndTime = %v, want %v", restored.EndTime, newEnd)
+	}
+}
+
+// testCreateRejectsInvalidWindow asserts that Create itself enforces
+// alerts.ValidateWindow rather than relying on every caller to have checked
+// first. TimeRange.start/end are uint64 on the wire, so a pre-epoch start
+// wraps to an enormous value instead of failing; a caller that reaches the
+// repository directly (an HTTP admin API, a bulk importer) -- not through
+// the CLI, which validates independently -- must get the same protection. A
+// future Postgres adapter inherits this requirement because it runs against
+// this same suite.
+func testCreateRejectsInvalidWindow(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	preEpoch := newAlertIn(1, time.Date(1969, 12, 31, 23, 0, 0, 0, time.UTC))
+	if _, err := repo.Create(ctx, preEpoch, base); err == nil {
+		t.Error("Create with a pre-2000 start: want error, got nil")
+	}
+
+	end := base
+	invalidEnd := newAlertIn(1, base)
+	invalidEnd.EndTime = &end // end == start, not after it
+	if _, err := repo.Create(ctx, invalidEnd, base); err == nil {
+		t.Error("Create with end <= start: want error, got nil")
+	}
+}
+
+// testCreateRejectsEmptyAgencyID asserts that Create rejects an empty
+// AgencyID rather than storing it: NewAlert.AgencyID is documented as
+// pre-resolved by the caller, and that contract must be enforced by the
+// repository, not merely by convention -- a caller that skips resolution
+// would otherwise store an alert no app can match by agency.
+func testCreateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	in := newAlertIn(1, base)
+	in.AgencyID = ""
+	if _, err := repo.Create(ctx, in, base); err == nil {
+		t.Error("Create with empty AgencyID: want error, got nil")
+	}
+}
+
+// testUpsertTranslationNormalizesLanguage asserts that UpsertTranslation
+// normalizes the language tag itself. The schema's UNIQUE(alert_id,
+// language, field) is case-sensitive, so a caller that forgot to normalize
+// would otherwise insert "ES" alongside an existing "es" -- two live rows
+// for one language that the feed would both emit to riders.
+func testUpsertTranslationNormalizesLanguage(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	a, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "ES", Field: alerts.FieldHeader, Text: "Primero",
+		SourceSHA256: alerts.SourceHash("Alert"),
+	}, base); err != nil {
+		t.Fatalf("UpsertTranslation(ES): %v", err)
+	}
+	if err = repo.UpsertTranslation(ctx, a.ID, alerts.Translation{
+		Language: "es", Field: alerts.FieldHeader, Text: "Segundo",
+		SourceSHA256: alerts.SourceHash("Alert"),
+	}, base.Add(time.Minute)); err != nil {
+		t.Fatalf("UpsertTranslation(es): %v", err)
+	}
+
+	got, err := repo.Get(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var matches []alerts.Translation
+	for _, tt := range got.Translations {
+		if tt.Field == alerts.FieldHeader {
+			matches = append(matches, tt)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("translations = %d, want 1 (differently-cased language tags must collide after normalization)", len(matches))
+	}
+	if matches[0].Language != "es" {
+		t.Errorf("Language = %q, want normalized %q", matches[0].Language, "es")
+	}
+	if matches[0].Text != "Segundo" {
+		t.Errorf("Text = %q, want %q (second upsert should win)", matches[0].Text, "Segundo")
 	}
 }

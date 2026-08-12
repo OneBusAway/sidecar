@@ -264,6 +264,19 @@ func translationFromRow(t gen.AlertTranslation) alerts.Translation {
 }
 
 func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Time) (alerts.Alert, error) {
+	// AgencyID is documented as pre-resolved by the caller (NewAlert), but
+	// that contract was enforced only by comment: the column is NOT NULL but
+	// not non-empty, so a caller that skips the resolve step (an HTTP admin
+	// API, a bulk importer) would silently store an alert no app can match by
+	// agency. Enforcing it here, rather than only in the CLI, protects every
+	// caller of this Repository.
+	if in.AgencyID == "" {
+		return alerts.Alert{}, errors.New("sqlite: create alert: agency id must not be empty")
+	}
+	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
+	}
+
 	ts := now.Unix()
 	row, err := r.q.CreateAlert(ctx, gen.CreateAlertParams{
 		RegionID:        in.RegionID,
@@ -346,6 +359,10 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	}
 	if p.IsTest != nil {
 		current.IsTest = *p.IsTest
+	}
+
+	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
 	}
 
 	row, err := r.q.UpdateAlert(ctx, gen.UpdateAlertParams{
@@ -464,11 +481,16 @@ func (r *alertRepo) Feed(ctx context.Context, regionID int64, includeTest bool, 
 	return out, nil
 }
 
+// UpsertTranslation normalizes t.Language itself rather than trusting the
+// caller to have done so: the schema's UNIQUE(alert_id, language, field) is
+// case-sensitive, so a caller that forgot to normalize (or a future caller
+// that never knew to) would insert "ES" alongside an existing "es" -- two
+// live rows for one language that the feed would both emit.
 func (r *alertRepo) UpsertTranslation(ctx context.Context, alertID int64, t alerts.Translation, now time.Time) error {
 	ts := now.Unix()
 	if err := r.q.UpsertAlertTranslation(ctx, gen.UpsertAlertTranslationParams{
 		AlertID:      alertID,
-		Language:     t.Language,
+		Language:     alerts.NormalizeLanguage(t.Language),
 		Field:        string(t.Field),
 		Text:         t.Text,
 		SourceSha256: t.SourceSHA256,

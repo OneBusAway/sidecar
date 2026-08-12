@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/regions"
-	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // base is the fixed instant every subtest builds its timestamps from. Using
@@ -31,19 +30,10 @@ func testOptions() regions.ClientOptions {
 	return opts
 }
 
-// newRegionStore opens a fresh migrated SQLite store for a test, matching the
-// pattern in internal/store/sqlite/store_test.go.
+// newRegionStore opens a fresh migrated SQLite store for a test.
 func newRegionStore(t *testing.T) regions.Repository {
 	t.Helper()
-	store, err := sqlite.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("sqlite.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	return store.Regions()
+	return sqlitetest.Open(t).Regions()
 }
 
 func TestFetch_RealFixture(t *testing.T) {

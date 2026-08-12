@@ -22,13 +22,6 @@ const (
 	defaultRegionsURL = "https://regions.onebusaway.org/regions-v3.json"
 )
 
-// minStart is the earliest acceptable alert start time. TimeRange.start/end
-// are uint64 in the GTFS-realtime proto, so an instant before the epoch
-// wraps to an enormous value on the wire instead of failing outright;
-// rejecting anything before 2000 catches that along with ordinary year
-// typos.
-var minStart = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-
 // run holds main's logic so tests can supply their own streams, arguments,
 // and a temp database, entirely in-process -- no subprocess. It returns an
 // error rather than exiting so main owns the only exit path.
@@ -120,24 +113,19 @@ func parseInstant(s string, region regions.Region) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// validateWindow rejects windows that would either corrupt the wire
-// representation or silently never show riders anything.
-func validateWindow(start time.Time, end *time.Time, now time.Time) error {
-	// TimeRange.start/end are uint64 in the proto, so a negative epoch wraps
-	// to an enormous value instead of failing.
-	if start.Before(minStart) {
-		return fmt.Errorf("start %s is before %s; check the year", start, minStart.Format("2006"))
+// parseAlertIDArg extracts and parses the alert id positional argument
+// shared by every `alert` subcommand that operates on a single existing
+// alert (show, edit, publish/unpublish, delete, translate). op names the
+// subcommand for the error message, e.g. "alert show".
+func parseAlertIDArg(op string, args []string) (int64, error) {
+	if len(args) == 0 {
+		return 0, fmt.Errorf("sidecar-admin: %s requires an alert id", op)
 	}
-	if start.After(now.AddDate(10, 0, 0)) {
-		return fmt.Errorf("start %s is more than 10 years out; check the year", start)
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("sidecar-admin: %s: invalid alert id %q: %w", op, args[0], err)
 	}
-	if end != nil && !end.After(start) {
-		// Publishing this would succeed and the alert would appear in the
-		// feed, but apps hide out-of-window alerts, so riders would never
-		// see it and nothing would report an error.
-		return fmt.Errorf("end %s must be after start %s", end, start)
-	}
-	return nil
+	return id, nil
 }
 
 // formatInZone renders t in tz alongside UTC, so `alert list`/`alert show`
@@ -322,7 +310,7 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 		endTime = &endInstant
 	}
 
-	if winErr := validateWindow(startTime, endTime, now); winErr != nil {
+	if winErr := alerts.ValidateWindow(startTime, endTime, now); winErr != nil {
 		return fmt.Errorf("sidecar-admin: alert create: %w", winErr)
 	}
 
@@ -420,12 +408,9 @@ func alertList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 }
 
 func alertShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
-	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert show requires an alert id")
-	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := parseAlertIDArg("alert show", args)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert show: invalid alert id %q: %w", args[0], err)
+		return err
 	}
 
 	a, err := store.Alerts().Get(ctx, id)
@@ -468,12 +453,9 @@ func alertShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args 
 // view -- current row plus patch -- before any write, so e.g. editing only
 // --end still gets checked against the alert's existing start.
 func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []string) error {
-	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert edit requires an alert id")
-	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := parseAlertIDArg("alert edit", args)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert edit: invalid alert id %q: %w", args[0], err)
+		return err
 	}
 
 	fs := flag.NewFlagSet("alert edit", flag.ContinueOnError)
@@ -537,7 +519,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 		effectiveEnd = &endInstant
 	}
 
-	if winErr := validateWindow(effectiveStart, effectiveEnd, now); winErr != nil {
+	if winErr := alerts.ValidateWindow(effectiveStart, effectiveEnd, now); winErr != nil {
 		return fmt.Errorf("sidecar-admin: alert edit: %w", winErr)
 	}
 
@@ -597,12 +579,13 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 }
 
 func alertSetPublished(ctx context.Context, store *sqlite.Store, now time.Time, args []string, published bool) error {
-	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert requires an alert id")
+	op := "alert publish"
+	if !published {
+		op = "alert unpublish"
 	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := parseAlertIDArg(op, args)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: invalid alert id %q: %w", args[0], err)
+		return err
 	}
 	if err := store.Alerts().SetPublished(ctx, id, published, now); err != nil {
 		return fmt.Errorf("sidecar-admin: set published: %w", err)
@@ -611,12 +594,9 @@ func alertSetPublished(ctx context.Context, store *sqlite.Store, now time.Time, 
 }
 
 func alertDelete(ctx context.Context, store *sqlite.Store, args []string) error {
-	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert delete requires an alert id")
-	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := parseAlertIDArg("alert delete", args)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert delete: invalid alert id %q: %w", args[0], err)
+		return err
 	}
 	if err := store.Alerts().Delete(ctx, id); err != nil {
 		return fmt.Errorf("sidecar-admin: alert delete: %w", err)
@@ -629,12 +609,9 @@ func alertDelete(ctx context.Context, store *sqlite.Store, args []string) error 
 // which makes the translation stale and the feed withholds it -- see
 // internal/alerts/feed.go's translated().
 func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, args []string) error {
-	if len(args) == 0 {
-		return errors.New("sidecar-admin: alert translate requires an alert id")
-	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
+	id, err := parseAlertIDArg("alert translate", args)
 	if err != nil {
-		return fmt.Errorf("sidecar-admin: alert translate: invalid alert id %q: %w", args[0], err)
+		return err
 	}
 
 	fs := flag.NewFlagSet("alert translate", flag.ContinueOnError)
