@@ -39,6 +39,12 @@ type Deps struct {
 	// substitute a recorder so they can assert the delay was applied without
 	// spending it and without reading the clock.
 	Sleep func(time.Duration)
+	// VerifyPassword checks a password against a PHC hash. NewRouter defaults
+	// it to auth.VerifyPassword. It is injected for one reason: the login
+	// handler must verify against auth.DummyPHC even when the username does
+	// not exist (design spec §4.3), and that call has no observable effect on
+	// the response -- only a recorder can prove it still happens.
+	VerifyPassword func(phc, password string) (bool, error)
 
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
@@ -77,6 +83,9 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Sleep == nil {
 		deps.Sleep = time.Sleep
 	}
+	if deps.VerifyPassword == nil {
+		deps.VerifyPassword = auth.VerifyPassword
+	}
 
 	h := &alertsHandler{deps: deps}
 
@@ -86,6 +95,14 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 
+	// Now cannot be defaulted here -- time.Now is banned outside cmd/ -- so an
+	// admin router built without it would nil-deref inside the first login,
+	// which net/http recovers per connection: the operator would see a reset
+	// request after deployment rather than an error at startup. Fail loudly
+	// while there is still a stack trace worth reading.
+	if deps.Auth != nil && deps.Now == nil {
+		panic("httpapi: Deps.Now is required when Deps.Auth is set")
+	}
 	if deps.Auth != nil {
 		registerAdminRoutes(mux, deps)
 	}
@@ -95,7 +112,8 @@ func NewRouter(deps Deps) http.Handler {
 // registerAdminRoutes mounts the admin JSON API. Every route passes through
 // crossSiteGuard -- including POST /session, which is the whole reason the
 // guard is separate from requireSession (design spec §4.4) -- and everything
-// except login also requires a live session.
+// except login and logout also requires a live session; see the note on
+// DELETE below for why logout is not behind requireSession.
 func registerAdminRoutes(mux *http.ServeMux, deps Deps) {
 	session := &sessionHandler{deps: deps}
 	mw := &authMiddleware{deps: deps}

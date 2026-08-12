@@ -453,6 +453,13 @@ func TestRequireSession(t *testing.T) {
 			mutate:     func(s *stubAuth) { s.getSessionErr = errors.New("database is locked") },
 			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"internal error"}`,
 		},
+		{
+			// The second lookup has the same rule as the first: a broken
+			// store is a 500, not a 401 that would read as an expired login.
+			name: "user lookup failure is not a silent logout", cookie: cookie(liveToken),
+			mutate:     func(s *stubAuth) { s.getUserByIDErr = errors.New("database is locked") },
+			wantStatus: http.StatusInternalServerError, wantBody: `{"error":"internal error"}`,
+		},
 		{name: "live token", cookie: cookie(liveToken), wantStatus: http.StatusOK, wantUser: "admin"},
 	}
 

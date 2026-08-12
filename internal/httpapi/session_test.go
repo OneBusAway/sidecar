@@ -55,13 +55,42 @@ func (s *sleepRecorder) durations() []time.Duration {
 	return append([]time.Duration(nil), s.calls...)
 }
 
+// verifyCall is one password verification the login handler performed.
+type verifyCall struct {
+	phc      string
+	password string
+}
+
+// verifyRecorder wraps auth.VerifyPassword so tests can see which hash the
+// login handler verified against. This is the only way to observe the
+// unknown-user dummy verification at all: it deliberately changes nothing
+// about the response, which is the whole point of it (design spec §4.3).
+type verifyRecorder struct {
+	mu    sync.Mutex
+	calls []verifyCall
+}
+
+func (v *verifyRecorder) verify(phc, password string) (bool, error) {
+	v.mu.Lock()
+	v.calls = append(v.calls, verifyCall{phc: phc, password: password})
+	v.mu.Unlock()
+	return auth.VerifyPassword(phc, password)
+}
+
+func (v *verifyRecorder) recorded() []verifyCall {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]verifyCall(nil), v.calls...)
+}
+
 // loginFixture is a router wired to a stub store holding one admin account,
-// plus the sleep recorder the failure-delay assertions read.
+// plus the recorders the failure-delay and argon2-cost assertions read.
 type loginFixture struct {
-	handler http.Handler
-	repo    *stubAuth
-	sleeps  *sleepRecorder
-	user    auth.User
+	handler  http.Handler
+	repo     *stubAuth
+	sleeps   *sleepRecorder
+	verifies *verifyRecorder
+	user     auth.User
 }
 
 func newLoginFixture(t *testing.T) *loginFixture {
@@ -69,11 +98,13 @@ func newLoginFixture(t *testing.T) *loginFixture {
 	repo := newStubAuth()
 	user := repo.addUser("admin", testHash())
 	sleeps := &sleepRecorder{}
+	verifies := &verifyRecorder{}
 	h := newTestRouter(repo, func(d *Deps) {
 		d.FailDelay = testFailDelay
 		d.Sleep = sleeps.sleep
+		d.VerifyPassword = verifies.verify
 	})
-	return &loginFixture{handler: h, repo: repo, sleeps: sleeps, user: user}
+	return &loginFixture{handler: h, repo: repo, sleeps: sleeps, verifies: verifies, user: user}
 }
 
 // postLogin sends a login request with no browser headers, which the
@@ -291,13 +322,88 @@ func equalDurations(a, b []time.Duration) bool {
 	return true
 }
 
-// TestLogin_UnknownUserStillHashes checks the timing-equalisation half of
-// spec §4.3: an unknown username must still burn an argon2 verification
-// against the dummy hash. The observable proxy is that auth.DummyPHC is a
-// valid hash that verifies false rather than erroring -- if the handler
-// skipped the work, this response would be a 500 or arrive without the delay.
-func TestLogin_UnknownUserStillHashes(t *testing.T) {
+// TestLogin_UnknownUserPaysArgon2Cost is the timing-equalisation half of spec
+// §4.3, and the only test that can catch its removal: an unknown username
+// must still burn one argon2 verification, against auth.DummyPHC, with the
+// submitted password. Dropping that call leaves the status, the body, the
+// logs, and the failure delay all unchanged -- the sole difference is that
+// the endpoint becomes a username oracle for anyone with a stopwatch. So the
+// assertion has to be on the call itself.
+//
+// Each row also asserts the count is exactly one: two verifications for a
+// real user and one for an unknown one would leak the same fact backwards.
+func TestLogin_UnknownUserPaysArgon2Cost(t *testing.T) {
 	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		wantCall verifyCall
+	}{
+		{
+			name:     "unknown user verifies the dummy hash",
+			body:     credentials("nosuchuser", testPassword),
+			wantCall: verifyCall{phc: auth.DummyPHC, password: testPassword},
+		},
+		{
+			name:     "blank username verifies the dummy hash",
+			body:     credentials("", ""),
+			wantCall: verifyCall{phc: auth.DummyPHC, password: ""},
+		},
+		{
+			name:     "wrong password verifies the stored hash",
+			body:     credentials("admin", "wrong-password-entirely"),
+			wantCall: verifyCall{phc: testHash(), password: "wrong-password-entirely"},
+		},
+		{
+			name:     "success verifies the stored hash",
+			body:     credentials("admin", testPassword),
+			wantCall: verifyCall{phc: testHash(), password: testPassword},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLoginFixture(t)
+			f.postLogin(tt.body, nil)
+
+			got := f.verifies.recorded()
+			if len(got) != 1 {
+				t.Fatalf("password verifications = %d (%+v), want exactly 1", len(got), got)
+			}
+			if got[0] != tt.wantCall {
+				t.Errorf("verification = %+v, want %+v", got[0], tt.wantCall)
+			}
+		})
+	}
+}
+
+// TestDummyPHC_CostsTheSameAsARealHash guards the other half of the same
+// defence. Verifying against auth.DummyPHC only equalises timing while its
+// argon2 parameters match the ones auth.HashPassword writes today: raising
+// the OWASP defaults in auth/password.go without updating the constant would
+// make unknown-username logins measurably cheaper than real ones, reopening
+// the oracle with every call still in place.
+func TestDummyPHC_CostsTheSameAsARealHash(t *testing.T) {
+	t.Parallel()
+
+	realHash, err := auth.HashPassword(testPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	// "" / "argon2id" / "v=19" / "m=..,t=..,p=.." / salt / hash
+	realParts := strings.Split(realHash, "$")
+	dummyParts := strings.Split(auth.DummyPHC, "$")
+	if len(dummyParts) != 6 {
+		t.Fatalf("auth.DummyPHC is not a PHC string: %q", auth.DummyPHC)
+	}
+	for _, i := range []int{1, 2, 3} { // algorithm, version, cost parameters
+		if dummyParts[i] != realParts[i] {
+			t.Errorf("DummyPHC segment %d = %q, want %q (same argon2 cost as a real hash)",
+				i, dummyParts[i], realParts[i])
+		}
+	}
 
 	ok, err := auth.VerifyPassword(auth.DummyPHC, testPassword)
 	if err != nil {
@@ -640,4 +746,61 @@ func TestAdminRoutesUnregisteredWithoutAuth(t *testing.T) {
 			t.Errorf("%s /api/admin/v1/session: status = %d, want 404", method, rec.Code)
 		}
 	}
+}
+
+// TestWhoami_WithoutAuthenticatedUser exercises the tripwire directly, since
+// the router never lets a request reach whoami without requireSession. If
+// someone "simplifies" this branch into a 200 with an empty username, a route
+// that lost its middleware would answer cheerfully instead of failing.
+func TestWhoami_WithoutAuthenticatedUser(t *testing.T) {
+	t.Parallel()
+
+	h := &sessionHandler{deps: Deps{Logger: discardLogger()}}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/session", nil)
+	rec := httptest.NewRecorder()
+	h.whoami(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestNewRouter_RequiresNowWithAuth: Now cannot be defaulted here (time.Now is
+// banned outside cmd/), so an admin router built without it would nil-deref
+// inside the first login -- which net/http recovers per connection, turning a
+// wiring mistake into a reset request in production some time after
+// deployment. Constructing the router must fail instead, loudly and early.
+func TestNewRouter_RequiresNowWithAuth(t *testing.T) {
+	t.Parallel()
+
+	t.Run("auth without now panics", func(t *testing.T) {
+		t.Parallel()
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewRouter returned normally with Auth set and Now nil")
+			}
+			msg, ok := r.(string)
+			if !ok || !strings.Contains(msg, "Deps.Now") {
+				t.Errorf("panic value = %v, want a message naming Deps.Now", r)
+			}
+		}()
+		NewRouter(Deps{Auth: newStubAuth(), Logger: discardLogger()})
+	})
+
+	t.Run("feed-only router without now is fine", func(t *testing.T) {
+		t.Parallel()
+		// The feed handlers call Now per request, not at construction, and
+		// every feed caller already supplies it; requiring it here would
+		// break callers this task has no business touching.
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("NewRouter panicked without Auth: %v", r)
+			}
+		}()
+		NewRouter(Deps{Logger: discardLogger()})
+	})
 }

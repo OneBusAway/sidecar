@@ -53,8 +53,11 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Burn the same argon2 cost as a real verification so response timing
-		// does not reveal which usernames exist (design spec §4.3).
-		if _, dummyErr := auth.VerifyPassword(auth.DummyPHC, req.Password); dummyErr != nil {
+		// does not reveal which usernames exist (design spec §4.3). This runs
+		// through the injected Deps.VerifyPassword purely so a test can prove
+		// it happened: skipping it changes no status, no body, and no log, so
+		// the timing oracle would otherwise reopen invisibly.
+		if _, dummyErr := h.deps.VerifyPassword(auth.DummyPHC, req.Password); dummyErr != nil {
 			// auth.DummyPHC is a compile-time constant in this repo's own
 			// auth package; a parse failure means it was edited into
 			// something invalid, which silently removes the timing defence.
@@ -64,7 +67,7 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, err := auth.VerifyPassword(user.PasswordHash, req.Password)
+	ok, err := h.deps.VerifyPassword(user.PasswordHash, req.Password)
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "verify password", err)
 		return
