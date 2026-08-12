@@ -1,7 +1,7 @@
 # Admin API + SPA — Design
 
 **Date:** 2026-08-11
-**Status:** Draft
+**Status:** Approved
 **Builds on:** [2026-08-11-service-alerts-feed-design.md](2026-08-11-service-alerts-feed-design.md),
 whose invariants (epoch-integer timestamps, repository interfaces, the `time.Now` /
 `time.Local` ban below `cmd/`, region id 0 is real) remain binding here.
