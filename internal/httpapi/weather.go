@@ -62,7 +62,19 @@ func (h *weatherHandler) forecast(w http.ResponseWriter, r *http.Request) {
 
 	snap, err := h.deps.Weather.Snapshot(ctx, *region.Centroid)
 	if err != nil {
-		h.deps.Logger.Error("httpapi: weather fetch", "region_id", id, "err", err)
+		// ErrNoProvider gets its own message and stays at Warn: it fires on
+		// every request to an unconfigured deployment, and the boot-time
+		// warning (cmd/sidecar) already told the operator once. Everything
+		// else routes through slogLevelForUpstreamErr like vehicles.go, so a
+		// client disconnecting mid-request (context.Canceled from cache.Get)
+		// is routine traffic, not a page-worthy Error.
+		switch {
+		case errors.Is(err, weather.ErrNoProvider):
+			h.deps.Logger.Warn("httpapi: weather not configured", "region_id", id)
+		default:
+			level := slogLevelForUpstreamErr(err)
+			h.deps.Logger.Log(ctx, level, "httpapi: weather fetch", "region_id", id, "err", err)
+		}
 		h.writeUnavailable(w)
 		return
 	}

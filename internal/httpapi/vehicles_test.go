@@ -245,7 +245,7 @@ func TestVehiclesRegionLookupFailureIs500(t *testing.T) {
 	}
 }
 
-// TestVehiclesLogsCancellationAtWarnOnly exercises slogLevelForSearchErr
+// TestVehiclesLogsCancellationAtWarnOnly exercises slogLevelForUpstreamErr
 // through the actual handler and a capturing slog.Handler, rather than
 // calling it directly: the earlier version of this test suite had zero
 // coverage of it at all, so replacing its body with an unconditional

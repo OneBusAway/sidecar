@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
@@ -254,5 +255,32 @@ func TestCacheBudgetsNestCorrectly(t *testing.T) {
 	if fleetBudget >= queryBudget {
 		t.Errorf("fleetBudget (%v) must be < queryBudget (%v): a cold query fetch nests a fleet fetch inside it",
 			fleetBudget, queryBudget)
+	}
+}
+
+// TestCacheBudgetsUnderWriteTimeout pins the other half of the claim the
+// comment above the budget constants makes ("the budgets sit under the
+// server's 15s WriteTimeout") but that, before this test, nothing checked:
+// a fetch that runs past WriteTimeout can't finish writing its response
+// even if it eventually succeeds, so every cache budget in this package must
+// stay strictly under whatever httpapi.NewServer actually configures. Reading
+// WriteTimeout off a real *http.Server, rather than repeating the literal
+// 15*time.Second here, means a change to NewServer's timeout is what this
+// test tracks -- not a copy of it that could drift out of sync.
+func TestCacheBudgetsUnderWriteTimeout(t *testing.T) {
+	t.Parallel()
+
+	writeTimeout := httpapi.NewServer(httpapi.ServerConfig{}).WriteTimeout
+	for _, b := range []struct {
+		name   string
+		budget time.Duration
+	}{
+		{"fleetBudget", fleetBudget},
+		{"queryBudget", queryBudget},
+		{"weatherBudget", weatherBudget},
+	} {
+		if b.budget >= writeTimeout {
+			t.Errorf("%s (%v) must be < the server's WriteTimeout (%v)", b.name, b.budget, writeTimeout)
+		}
 	}
 }

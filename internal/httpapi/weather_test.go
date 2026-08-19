@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +74,15 @@ func TestWeatherUnknownRegionIs404(t *testing.T) {
 		srv.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("segment %q: status = %d, want 404", seg, rec.Code)
+		}
+		// Pins this handler's use of the shared writeRegionNotFound helper:
+		// checking only rec.Code lets a bare w.WriteHeader(404) (no body, no
+		// Content-Type) survive undetected.
+		if got := rec.Body.String(); got != notFoundBody {
+			t.Errorf("segment %q: body = %q, want %q", seg, got, notFoundBody)
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("segment %q: Content-Type = %q, want application/json", seg, got)
 		}
 	}
 }
@@ -174,6 +185,12 @@ func TestWeatherSuccessShape(t *testing.T) {
 	if raw["latitude"] != 47.75 {
 		t.Errorf("latitude = %v, want 47.75", raw["latitude"])
 	}
+	// weatherRegion's centroid is {47.75, -122.49} -- distinct digits on
+	// both axes, so a one-sided mutation (e.g. Longitude: region.Centroid.Lat)
+	// is caught here rather than only by a full-swap mutation.
+	if raw["longitude"] != -122.49 {
+		t.Errorf("longitude = %v, want -122.49", raw["longitude"])
+	}
 
 	// The OpenAPI schema says string/date-time. An epoch integer would pass
 	// every other assertion here and violate the contract.
@@ -250,5 +267,102 @@ func TestWeatherSharedCentroidSharesOneUpstreamCall(t *testing.T) {
 
 	if p.calls != 1 {
 		t.Errorf("made %d provider calls, want 1 (regions share a centroid)", p.calls)
+	}
+}
+
+// erroringRegions (defined in vehicles_test.go, same package) covers the one
+// branch none of the ErrNotFound-only fixtures above ever reach: a real
+// store failure. That must become a 500 with an empty body, not 403 --
+// otherwise a database outage presents to operators as "riders see no
+// weather" (a product state) instead of an infrastructure failure. Verified
+// by mutation: substituting h.writeUnavailable(w) for the 500 branch in
+// weatherHandler.forecast passes every other test in this package.
+func TestWeatherRegionLookupFailureIs500(t *testing.T) {
+	srv := newWeatherTestServer(t, &fakeProvider{}, erroringRegions{err: errors.New("db exploded")})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/weather", nil)
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	// Store errors are for the operator's log, never the rider's screen.
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+}
+
+// TestWeatherLogsCancellationAtWarnOnly exercises slogLevelForUpstreamErr
+// through the actual handler and a capturing slog.Handler, and separately
+// pins the ErrNoProvider branch's own message and level. Without this test,
+// every log call in weatherHandler.forecast's error paths could be silenced
+// or have its level flattened to a single value and nothing else in this
+// package would notice.
+func TestWeatherLogsCancellationAtWarnOnly(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantContain string
+		wantAbsent  string
+	}{
+		{
+			name:        "a client disconnecting mid-request (context.Canceled) logs at Warn",
+			err:         context.Canceled,
+			wantContain: "level=WARN",
+			wantAbsent:  "level=ERROR",
+		},
+		{
+			// The detached fetch's own budget elapsing: the upstream is slow
+			// or down, which is exactly what should page, not get demoted.
+			name:        "a fetch-budget timeout (context.DeadlineExceeded) logs at Error",
+			err:         context.DeadlineExceeded,
+			wantContain: "level=ERROR",
+			wantAbsent:  "level=WARN",
+		},
+		{
+			name:        "a plain provider error logs at Error",
+			err:         errors.New("upstream exploded"),
+			wantContain: "level=ERROR",
+			wantAbsent:  "level=WARN",
+		},
+		{
+			// A boot-time warning already told the operator once; a
+			// per-request Error here would just be noise on every request to
+			// an unconfigured deployment.
+			name:        "no provider configured logs its own message at Warn",
+			err:         weather.ErrNoProvider,
+			wantContain: "level=WARN msg=\"httpapi: weather not configured\"",
+			wantAbsent:  "level=ERROR",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			regs := newTestRegions(t, weatherRegion())
+			now := func() time.Time { return time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC) }
+			var buf bytes.Buffer
+			capturingLogger := slog.New(slog.NewTextHandler(&buf, nil))
+
+			var provider weather.Provider
+			if !errors.Is(tt.err, weather.ErrNoProvider) {
+				provider = &fakeProvider{err: tt.err}
+			}
+			svc := weather.NewService(provider, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now), slog.New(slog.DiscardHandler))
+			srv := NewRouter(Deps{Regions: regs, Weather: svc, Now: now, Logger: capturingLogger})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/weather", nil)
+			srv.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", rec.Code)
+			}
+			if got := buf.String(); !strings.Contains(got, tt.wantContain) {
+				t.Errorf("log output = %q, want it to contain %q", got, tt.wantContain)
+			}
+			if got := buf.String(); strings.Contains(got, tt.wantAbsent) {
+				t.Errorf("log output = %q, want it NOT to contain %q", got, tt.wantAbsent)
+			}
+		})
 	}
 }

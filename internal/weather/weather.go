@@ -54,16 +54,20 @@ type Provider interface {
 type Service struct {
 	provider Provider
 	cache    *cache.Cache[Snapshot]
-	logger   *slog.Logger
 }
 
 // NewService wires a Service. A nil provider means no key was configured, and
 // Snapshot then reports ErrNoProvider without any network call.
+//
+// logger is accepted, not stored: unlike internal/vehicles' Service (which
+// logs a truncation warning of its own), every condition Snapshot can return
+// here is fully described by its returned error, so every caller so far logs
+// it themselves rather than needing Service to. The parameter stays so the
+// constructor's shape matches vehicles.NewService and can start logging
+// without a signature change if that stops being true.
 func NewService(provider Provider, c *cache.Cache[Snapshot], logger *slog.Logger) *Service {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Service{provider: provider, cache: c, logger: logger}
+	_ = logger
+	return &Service{provider: provider, cache: c}
 }
 
 // ErrNoProvider means the process has no weather provider key configured.

@@ -185,6 +185,12 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey st
 	} else {
 		provider = weather.NewPirateWeather(pirateKey, http.DefaultClient, time.Now)
 	}
+	// Built unconditionally, even when provider is nil: cache.New only
+	// allocates (no goroutine, no I/O), and weather.Service.Snapshot checks
+	// s.provider == nil before ever touching the cache, so an unconfigured
+	// deployment pays a small allocation, not a resource leak. Skipping the
+	// construction would need its own nil-Cache branch inside Service for no
+	// behavioural gain.
 	weatherSvc := weather.NewService(provider,
 		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now), logger)
 

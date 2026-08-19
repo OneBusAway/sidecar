@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
@@ -253,5 +254,73 @@ func TestPirateWeatherResponseBodyIsBounded(t *testing.T) {
 	p := newPirateWeatherWithBase(srv.URL, sentinelKey, srv.Client(), fixedNow)
 	if _, err := p.Fetch(context.Background(), regions.LatLon{Lat: 1, Lon: 2}); err == nil {
 		t.Fatal("Fetch succeeded reading an oversized body, want a decode error from a truncated read")
+	}
+}
+
+// countingProvider counts Fetch calls; every call succeeds with a zero
+// Snapshot, since these tests only care how many times the cache missed.
+type countingProvider struct{ calls int }
+
+func (c *countingProvider) Fetch(context.Context, regions.LatLon) (Snapshot, error) {
+	c.calls++
+	return Snapshot{}, nil
+}
+
+// TestServiceCacheKeySharesNearbyCoordinates and
+// TestServiceCacheKeyDistinguishesFartherCoordinates together pin the
+// rounding precision Service.Snapshot's cache key uses (4 decimal places,
+// ~11 metres). TestWeatherSharedCentroidSharesOneUpstreamCall in
+// internal/httpapi only ever calls Snapshot with two *identical* LatLon
+// values, so it cannot tell '4 decimals' apart from '1 decimal' (~11km
+// buckets -- would serve a neighbouring city's weather) or '8 decimals'
+// (would stop two near-duplicate directory centroids from sharing a cache
+// entry at all). These two tests call Snapshot with genuinely distinct
+// coordinates that must round to the same or different buckets respectively.
+func TestServiceCacheKeySharesNearbyCoordinates(t *testing.T) {
+	p := &countingProvider{}
+	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+	ctx := context.Background()
+
+	// Differ at the 5th decimal (~1m apart) -- both round to 47.7500 /
+	// -122.4900 at 4-decimal precision, so they must share one cache entry.
+	if _, err := svc.Snapshot(ctx, regions.LatLon{Lat: 47.75001, Lon: -122.49001}); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if _, err := svc.Snapshot(ctx, regions.LatLon{Lat: 47.75004, Lon: -122.49004}); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if p.calls != 1 {
+		t.Errorf("made %d provider calls, want 1 (coordinates round to the same 4-decimal bucket)", p.calls)
+	}
+}
+
+func TestServiceCacheKeyDistinguishesFartherCoordinates(t *testing.T) {
+	p := &countingProvider{}
+	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+	ctx := context.Background()
+
+	// Differ at the 3rd decimal (~100m apart) -- 47.7500 vs 47.7510 at
+	// 4-decimal precision, so they must NOT share a cache entry.
+	if _, err := svc.Snapshot(ctx, regions.LatLon{Lat: 47.750, Lon: -122.490}); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if _, err := svc.Snapshot(ctx, regions.LatLon{Lat: 47.751, Lon: -122.491}); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if p.calls != 2 {
+		t.Errorf("made %d provider calls, want 2 (coordinates fall in different 4-decimal buckets)", p.calls)
+	}
+}
+
+// TestServiceNoProviderReturnsErrNoProviderWithoutCaching pins the nil-
+// provider short-circuit directly against Service (the httpapi package pins
+// the same behaviour end-to-end through the handler, but this is the one
+// place that can assert the cache is never touched at all).
+func TestServiceNoProviderReturnsErrNoProviderWithoutCaching(t *testing.T) {
+	svc := NewService(nil, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+
+	_, err := svc.Snapshot(context.Background(), regions.LatLon{Lat: 1, Lon: 2})
+	if !errors.Is(err, ErrNoProvider) {
+		t.Errorf("err = %v, want ErrNoProvider", err)
 	}
 }
