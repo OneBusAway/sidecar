@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1045,11 +1046,23 @@ func testCentroidRoundTrip(t *testing.T, newStore newStoreFunc) {
 }
 
 // testCentroidRejectsHalfSet proves the invariant lives in the schema, not
-// only in the Go type. A Postgres adapter expresses this as a CHECK; both
-// must refuse the same row.
+// only in the Go type: it exercises both the INSERT and UPDATE triggers, and
+// -- beyond just checking that some error came back -- confirms each abort
+// actually rolled back the offending write, rather than merely proving that
+// some unrelated statement failed. A Postgres adapter expresses this as a
+// CHECK; both must refuse the same row the same way.
 func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 	_, repo := newStore(t)
 	ctx := context.Background()
+
+	// The type assertion happens here, not behind a helper that swallows a
+	// missing implementation into an ordinary error: that shape would let
+	// this subtest pass vacuously -- without exercising anything -- for any
+	// future adapter that never implements the hook.
+	w, ok := repo.(HalfSetCentroidWriter)
+	if !ok {
+		t.Skip("adapter does not implement HalfSetCentroidWriter")
+	}
 
 	if err := repo.UpsertFromDirectory(ctx, []regions.Region{
 		{ID: 1, Name: "Whole", OBABaseURL: "https://a.example/", Active: true,
@@ -1058,8 +1071,41 @@ func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 		t.Fatalf("UpsertFromDirectory: %v", err)
 	}
 
-	if err := writeHalfSetCentroid(ctx, repo, 1); err == nil {
-		t.Fatal("writing latitude without longitude succeeded, want a constraint failure")
+	// UPDATE trigger: break the centroid of the row just written.
+	const wantMsg = "latitude and longitude must be set together"
+	updateErr := w.WriteHalfSetCentroidForTest(ctx, 1)
+	if updateErr == nil {
+		t.Fatal("UPDATE with latitude but no longitude succeeded, want a constraint failure")
+	}
+	if !strings.Contains(updateErr.Error(), wantMsg) {
+		t.Errorf("UPDATE error = %q, want it to mention %q", updateErr.Error(), wantMsg)
+	}
+	// Any non-nil error -- a renamed column, a broken raw statement, a closed
+	// connection -- would satisfy the checks above without proving the
+	// trigger fired. Re-reading the row is what proves the ABORT rolled the
+	// write back rather than merely failing for some unrelated reason.
+	got, err := repo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get(1) after rejected UPDATE: %v", err)
+	}
+	if got.Centroid == nil || got.Centroid.Lat != 47.75 || got.Centroid.Lon != -122.49 {
+		t.Errorf("Centroid after rejected UPDATE = %+v, want unchanged {47.75 -122.49}", got.Centroid)
+	}
+
+	// INSERT trigger: UpsertFromDirectory only ever writes both coordinates
+	// or neither, so nothing above -- or anywhere in the normal write path --
+	// ever exercises this trigger.
+	insertErr := w.InsertHalfSetCentroidForTest(ctx, 2)
+	if insertErr == nil {
+		t.Fatal("INSERT with latitude but no longitude succeeded, want a constraint failure")
+	}
+	if !strings.Contains(insertErr.Error(), wantMsg) {
+		t.Errorf("INSERT error = %q, want it to mention %q", insertErr.Error(), wantMsg)
+	}
+	// Same rollback proof as above, applied to the INSERT case: the row must
+	// not exist at all, not merely have failed to receive a centroid.
+	if _, err := repo.Get(ctx, 2); !errors.Is(err, regions.ErrNotFound) {
+		t.Errorf("Get(2) after rejected INSERT: err = %v, want regions.ErrNotFound (the row must not exist)", err)
 	}
 }
 
@@ -1100,17 +1146,15 @@ func testSetLocalFieldsWritesAllThree(t *testing.T, newStore newStoreFunc) {
 }
 
 // HalfSetCentroidWriter is implemented by adapters that can attempt an
-// invalid half-set centroid write, so the conformance suite can prove the
-// storage engine rejects it. An adapter that does not implement it skips
-// that subtest rather than silently passing.
+// invalid half-set centroid write against both the UPDATE and INSERT paths,
+// so the conformance suite can prove the storage engine rejects each one. An
+// adapter that does not implement it skips that subtest via t.Skip rather
+// than silently passing: see the type assertion in testCentroidRejectsHalfSet.
 type HalfSetCentroidWriter interface {
+	// WriteHalfSetCentroidForTest attempts to break an existing row's paired
+	// centroid columns, exercising the UPDATE trigger.
 	WriteHalfSetCentroidForTest(ctx context.Context, id int64) error
-}
-
-func writeHalfSetCentroid(ctx context.Context, repo regions.Repository, id int64) error {
-	w, ok := repo.(HalfSetCentroidWriter)
-	if !ok {
-		return errors.New("adapter does not implement HalfSetCentroidWriter")
-	}
-	return w.WriteHalfSetCentroidForTest(ctx, id)
+	// InsertHalfSetCentroidForTest attempts to insert a brand new row with a
+	// half-set centroid, exercising the INSERT trigger.
+	InsertHalfSetCentroidForTest(ctx context.Context, id int64) error
 }

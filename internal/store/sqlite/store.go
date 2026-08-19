@@ -273,12 +273,25 @@ func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, in regions.Lo
 }
 
 // WriteHalfSetCentroidForTest deliberately writes an invalid half-set
-// centroid so the conformance suite can prove the engine rejects it. It
-// bypasses the generated queries because no legitimate query can express
-// this row -- which is exactly the property under test.
+// centroid to an existing row, exercising the regions_centroid_paired_update
+// trigger. It bypasses the generated queries because no legitimate query can
+// express this row -- which is exactly the property under test.
 func (r *regionRepo) WriteHalfSetCentroidForTest(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE regions SET latitude = ?, longitude = NULL WHERE id = ?`, 47.5, id)
+	return err
+}
+
+// InsertHalfSetCentroidForTest deliberately inserts a brand new row with a
+// half-set centroid, exercising the regions_centroid_paired_insert trigger.
+// UpsertFromDirectory always writes both coordinates or neither, so nothing
+// in the normal write path ever fires that trigger; without this hook it
+// would carry zero test coverage.
+func (r *regionRepo) InsertHalfSetCentroidForTest(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO regions (id, region_name, oba_base_url, latitude, longitude, synced_at, created_at, updated_at)
+		VALUES (?, 'Half-set insert', 'https://half-set.example/', ?, NULL, 0, 0, 0)`,
+		id, 47.5)
 	return err
 }
 

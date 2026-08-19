@@ -36,14 +36,14 @@ type Region struct {
 	// whose centroid is nil.
 	Centroid *LatLon
 
-	// Locally managed. The directory carries neither, and the refresh must
-	// never overwrite them.
+	// DefaultAgencyID, Timezone, and OBAAPIKey are all locally managed: the
+	// directory carries none of the three, and a refresh must never
+	// overwrite any of them. OBAAPIKey is this region's key for its OBA REST
+	// API server; empty means "inherit the process default", and it is never
+	// echoed back by any surface.
 	DefaultAgencyID string
 	Timezone        string
-
-	// OBAAPIKey is this region's key for its OBA REST API server. Empty means
-	// "inherit the process default"; it is never echoed back by any surface.
-	OBAAPIKey string
+	OBAAPIKey       string
 }
 
 // LocalFields carries the region columns the directory does not supply. It is
