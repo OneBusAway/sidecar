@@ -195,15 +195,16 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey st
 		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now), logger)
 
 	return httpapi.Deps{
-		Alerts:    store.Alerts(),
-		Regions:   store.Regions(),
-		Auth:      store.Auth(),
-		Now:       time.Now,
-		Logger:    logger,
-		AdminUI:   adminui.FS(),
-		FailDelay: adminFailDelay,
-		Vehicles:  vehicleSvc,
-		Weather:   weatherSvc,
+		Alerts:           store.Alerts(),
+		Regions:          store.Regions(),
+		Auth:             store.Auth(),
+		Now:              time.Now,
+		Logger:           logger,
+		AdminUI:          adminui.FS(),
+		FailDelay:        adminFailDelay,
+		Vehicles:         vehicleSvc,
+		Weather:          weatherSvc,
+		OBADefaultKeySet: obaAPIKey != "",
 	}
 }
 

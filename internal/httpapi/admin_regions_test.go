@@ -1,19 +1,22 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // regionJSONFields are the field names the SPA's region screen (task 11) is
 // written against.
 var regionJSONFields = []string{
 	"id", "name", "oba_base_url", "sidecar_base_url", "language", "active",
-	"default_agency_id", "timezone",
+	"default_agency_id", "timezone", "latitude", "longitude", "oba_api_key",
 }
 
 // regionByID finds one region in a decoded list response.
@@ -263,4 +266,183 @@ func TestAdminRegions_TimezoneNamedInTimestampErrors(t *testing.T) {
 
 	rec := f.do(http.MethodPost, "/api/admin/v1/alerts", `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00"}`)
 	assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "Asia/Kathmandu")
+}
+
+// The key must never leave the server. Asserting against the raw response
+// bytes rather than a decoded struct means a field added later without a tag
+// change still fails this test.
+func TestAdminRegions_NeverEchoesTheKey(t *testing.T) {
+	t.Parallel()
+
+	const secret = "SENTINEL-OBA-KEY-do-not-echo"
+	f := newAdminFixture(t)
+	if err := f.store.Regions().SetLocalFields(context.Background(), regionPuget, regions.LocalFields{
+		DefaultAgencyID: "1", Timezone: "America/Los_Angeles", OBAAPIKey: secret,
+	}, testNow); err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+
+	rec := f.do(http.MethodGet, "/api/admin/v1/regions", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("region listing leaks the API key: %s", rec.Body.String())
+	}
+}
+
+// A plain boolean would report false for a region whose vehicle search works
+// perfectly via the process default -- the reading an operator would act on
+// wrongly. Three states, three distinguishable words.
+func TestAdminRegions_KeyStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		regionKey     string
+		defaultKeySet bool
+		want          string
+	}{
+		{"region carries its own", "abc", false, "region"},
+		{"region carries its own even with a default", "abc", true, "region"},
+		{"inherits the process default", "", true, "default"},
+		{"nothing configured anywhere", "", false, "none"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := sqlitetest.Open(t)
+			ctx := context.Background()
+			if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{
+				{ID: regionPuget, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Active: true},
+			}, testNow); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			if err := store.Regions().SetLocalFields(ctx, regionPuget, regions.LocalFields{
+				DefaultAgencyID: "1", Timezone: "America/Los_Angeles", OBAAPIKey: tt.regionKey,
+			}, testNow); err != nil {
+				t.Fatalf("set key: %v", err)
+			}
+			if _, err := store.Auth().CreateUser(ctx, "admin", testHash(), testNow); err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+
+			handler := NewRouter(Deps{
+				Alerts: store.Alerts(), Regions: store.Regions(), Auth: store.Auth(),
+				Now: func() time.Time { return testNow }, Logger: discardLogger(),
+				Sleep: func(time.Duration) {}, OBADefaultKeySet: tt.defaultKeySet,
+			})
+			f := &adminFixture{handler: handler, store: store, cookie: adminLogin(t, handler)}
+
+			got := array(t, f.do(http.MethodGet, "/api/admin/v1/regions", ""), http.StatusOK)
+			region := regionByID(t, got, regionPuget)
+			if v := str(t, region, "oba_api_key"); v != tt.want {
+				t.Errorf("oba_api_key = %q, want %q", v, tt.want)
+			}
+		})
+	}
+}
+
+// 0,0 is a real coordinate in the Gulf of Guinea, so an unsynced region must
+// serialize as null rather than as a point off the coast of Africa.
+func TestAdminRegions_CentroidIsNullWhenUnsynced(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	if err := f.store.Regions().UpsertFromDirectory(context.Background(), []regions.Region{
+		{ID: regionPuget, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 47.75, Lon: -122.49}},
+	}, testNow); err != nil {
+		t.Fatalf("seed centroid: %v", err)
+	}
+
+	got := array(t, f.do(http.MethodGet, "/api/admin/v1/regions", ""), http.StatusOK)
+
+	bare := regionByID(t, got, regionBare)
+	if bare["latitude"] != nil {
+		t.Errorf("unsynced latitude = %v, want null", bare["latitude"])
+	}
+	if bare["longitude"] != nil {
+		t.Errorf("unsynced longitude = %v, want null", bare["longitude"])
+	}
+
+	puget := regionByID(t, got, regionPuget)
+	if puget["latitude"] != 47.75 {
+		t.Errorf("latitude = %v, want 47.75", puget["latitude"])
+	}
+	if puget["longitude"] != -122.49 {
+		t.Errorf("longitude = %v, want -122.49", puget["longitude"])
+	}
+}
+
+// Omission means unchanged. Anything else silently wipes the key on every
+// unrelated edit an operator makes.
+func TestAdminRegions_PatchOmittedKeyLeavesItIntact(t *testing.T) {
+	t.Parallel()
+
+	const secret = "keep-me"
+	f := newAdminFixture(t)
+	ctx := context.Background()
+	if err := f.store.Regions().SetLocalFields(ctx, regionPuget, regions.LocalFields{
+		DefaultAgencyID: "1", Timezone: "America/Los_Angeles", OBAAPIKey: secret,
+	}, testNow); err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+
+	rec := f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{"default_agency_id":"99"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := f.store.Regions().Get(ctx, regionPuget)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != secret {
+		t.Errorf("OBAAPIKey = %q, want %q -- an unrelated PATCH wiped the key", got.OBAAPIKey, secret)
+	}
+	if got.DefaultAgencyID != "99" {
+		t.Errorf("DefaultAgencyID = %q, want 99", got.DefaultAgencyID)
+	}
+}
+
+func TestAdminRegions_PatchEmptyKeyClearsIt(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	ctx := context.Background()
+	if err := f.store.Regions().SetLocalFields(ctx, regionPuget, regions.LocalFields{
+		DefaultAgencyID: "1", Timezone: "America/Los_Angeles", OBAAPIKey: "clear-me",
+	}, testNow); err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+
+	rec := f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{"oba_api_key":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := f.store.Regions().Get(ctx, regionPuget)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != "" {
+		t.Errorf("OBAAPIKey = %q, want empty", got.OBAAPIKey)
+	}
+}
+
+// The guard's message is the kind that goes stale for a year. Pin it.
+func TestAdminRegions_PatchEmptyBodyNamesAllThreeFields(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	rec := f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "oba_api_key") {
+		t.Errorf("error message does not mention oba_api_key: %s", rec.Body.String())
+	}
 }

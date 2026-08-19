@@ -782,3 +782,119 @@ func TestParseInstantWrapsUnderlyingError(t *testing.T) {
 		}
 	}
 }
+
+// The CLI prints a status word, never the key: `region list` output routinely
+// ends up pasted into issues and chat.
+func TestRegionSet_OBAAPIKeyIsNeverPrinted(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	const secret = "SENTINEL-CLI-KEY"
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--oba-api-key", secret); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "region", "list")
+	if err != nil {
+		t.Fatalf("region list: %v", err)
+	}
+	if strings.Contains(stdout, secret) {
+		t.Fatalf("region list printed the key: %q", stdout)
+	}
+	if !strings.Contains(stdout, "oba-key=configured") {
+		t.Errorf("region list = %q, want it to report the key as configured", stdout)
+	}
+
+	got, err := store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != secret {
+		t.Errorf("stored OBAAPIKey = %q, want %q", got.OBAAPIKey, secret)
+	}
+}
+
+// An explicit empty value clears the key and restores the process-default
+// fallback. This is why the flag is read through visitedFlags rather than by
+// testing for the empty string.
+func TestRegionSet_EmptyOBAAPIKeyClears(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--oba-api-key", "clear-me"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--oba-api-key", ""); err != nil {
+		t.Fatalf("region set (clear): %v", err)
+	}
+
+	got, err := store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != "" {
+		t.Errorf("OBAAPIKey = %q, want empty after an explicit clear", got.OBAAPIKey)
+	}
+
+	stdout, _, err := cli(t, dbPath, "region", "list")
+	if err != nil {
+		t.Fatalf("region list: %v", err)
+	}
+	if !strings.Contains(stdout, "oba-key=not configured") {
+		t.Errorf("region list = %q, want it to report the key as not configured", stdout)
+	}
+}
+
+// An omitted flag leaves the key alone. Without this, setting an agency id
+// silently destroys the region's vehicle search.
+func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	const secret = "keep-me"
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--oba-api-key", secret); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40"); err != nil {
+		t.Fatalf("region set (agency): %v", err)
+	}
+
+	got, err := store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != secret {
+		t.Errorf("OBAAPIKey = %q, want %q -- an unrelated edit wiped the key", got.OBAAPIKey, secret)
+	}
+	if got.DefaultAgencyID != "40" {
+		t.Errorf("DefaultAgencyID = %q, want 40", got.DefaultAgencyID)
+	}
+}
+
+// The centroid comes from the directory, so a region seeded without bounds
+// shows an em dash rather than 0,0.
+func TestRegionList_ShowsCentroid(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	if err := store.Regions().UpsertFromDirectory(context.Background(), []regions.Region{
+		{ID: 1, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 47.7528, Lon: -122.4924}},
+		{ID: 2, Name: "Unsynced", OBABaseURL: "https://bare.example/", Active: true},
+	}, time.Now()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "region", "list")
+	if err != nil {
+		t.Fatalf("region list: %v", err)
+	}
+	if !strings.Contains(stdout, "centroid=47.7528,-122.4924") {
+		t.Errorf("region list = %q, want region 1's centroid", stdout)
+	}
+	if !strings.Contains(stdout, "centroid=—") {
+		t.Errorf("region list = %q, want an em dash for the unsynced region", stdout)
+	}
+}

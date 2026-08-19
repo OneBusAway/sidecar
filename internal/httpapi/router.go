@@ -63,6 +63,13 @@ type Deps struct {
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS
+
+	// OBADefaultKeySet reports whether the process was started with an OBA
+	// REST API key (--oba-api-key/SIDECAR_OBA_API_KEY). The admin regions
+	// endpoint uses it to distinguish a region that inherits a working
+	// default from one where calls will actually fail -- a distinction a
+	// plain "is this region's column empty" boolean cannot make.
+	OBADefaultKeySet bool
 }
 
 // ServerConfig configures the HTTP server NewServer builds.
