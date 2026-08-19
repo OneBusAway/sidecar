@@ -12,6 +12,13 @@ import (
 // maps it to the 404 contract.
 var ErrNotFound = errors.New("region not found")
 
+// LatLon is a geographic point. It exists so a region's centroid is a pair or
+// is absent -- a half-set centroid is not representable.
+type LatLon struct {
+	Lat float64
+	Lon float64
+}
+
 // Region is one entry from the regions directory, plus locally-managed fields
 // the directory does not supply.
 type Region struct {
@@ -21,6 +28,13 @@ type Region struct {
 	SidecarBaseURL string
 	Language       string
 	Active         bool
+
+	// Centroid is the region's area-weighted center, computed from the
+	// directory's bounds rectangles. It is nil until a sync supplies usable
+	// bounds: 0,0 is a real coordinate in the Gulf of Guinea, so "unset" must
+	// not be spelled as a zero value. Weather is unavailable for a region
+	// whose centroid is nil.
+	Centroid *LatLon
 
 	// Locally managed. The directory carries neither, and the refresh must
 	// never overwrite them.

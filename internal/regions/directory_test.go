@@ -377,3 +377,36 @@ func TestSync_FailedFetchLeavesRowsUntouched(t *testing.T) {
 		t.Errorf("Name = %q after failed Sync, want unchanged %q", got.Name, "Stable Region")
 	}
 }
+
+// A region whose bounds are unusable must still be kept. Dropping the entry
+// would take its alerts feed down too, which is far worse than a missing
+// weather card.
+func TestFetchKeepsRegionWithUnusableBounds(t *testing.T) {
+	body := `{"data":{"list":[
+		{"id":1,"regionName":"No Bounds","obaBaseUrl":"https://example.org/","active":true},
+		{"id":2,"regionName":"Good","obaBaseUrl":"https://example.org/","active":true,
+		 "bounds":[{"lat":47.6,"lon":-122.3,"latSpan":0.2,"lonSpan":0.2}]}
+	]}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	got, err := regions.NewClient(srv.URL, testOptions()).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d regions, want 2 (a bad centroid must not drop the region)", len(got))
+	}
+	if got[0].Centroid != nil {
+		t.Errorf("region 1 Centroid = %+v, want nil", got[0].Centroid)
+	}
+	if got[1].Centroid == nil {
+		t.Fatal("region 2 Centroid = nil, want a point")
+	}
+	if got[1].Centroid.Lat != 47.6 {
+		t.Errorf("region 2 Lat = %v, want 47.6", got[1].Centroid.Lat)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -94,12 +95,23 @@ type directoryResponse struct {
 // document carries no timezone and no default agency id -- those are locally
 // managed, which is why they are absent here too.
 type directoryEntry struct {
-	ID             int64  `json:"id"`
-	RegionName     string `json:"regionName"`
-	OBABaseURL     string `json:"obaBaseUrl"`
-	SidecarBaseURL string `json:"sidecarBaseUrl"`
-	Language       string `json:"language"`
-	Active         bool   `json:"active"`
+	ID             int64            `json:"id"`
+	RegionName     string           `json:"regionName"`
+	OBABaseURL     string           `json:"obaBaseUrl"`
+	SidecarBaseURL string           `json:"sidecarBaseUrl"`
+	Language       string           `json:"language"`
+	Active         bool             `json:"active"`
+	Bounds         []directoryBound `json:"bounds"`
+}
+
+// directoryBound is one rectangle of a region's coverage. lat/lon is the
+// rectangle's center, not a corner. Spans are pointers-free because a missing
+// span legitimately means zero area, unlike a missing center.
+type directoryBound struct {
+	Lat     float64 `json:"lat"`
+	Lon     float64 `json:"lon"`
+	LatSpan float64 `json:"latSpan"`
+	LonSpan float64 `json:"lonSpan"`
 }
 
 // Fetch downloads and parses the directory document, returning the entries
@@ -191,6 +203,7 @@ func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) 
 		SidecarBaseURL: e.SidecarBaseURL,
 		Language:       e.Language,
 		Active:         e.Active,
+		Centroid:       computeCentroid(e.Bounds),
 	}, true
 }
 
@@ -214,4 +227,52 @@ func stripControlChars(s string) string {
 
 func isASCIIControl(r rune) bool {
 	return r < 0x20 || r == 0x7f
+}
+
+// computeCentroid reduces a region's bounds rectangles to a single point: the
+// area-weighted mean of the rectangle centers.
+//
+// Area weighting is what makes the result invariant to how the bounds were
+// split -- cutting one rectangle into four quadrants leaves the centroid
+// exactly where it was. The two obvious alternatives both fail on real data:
+// the union bounding box's center is dragged into the mountains by one small
+// outlying rectangle, and the unweighted mean moves whenever an agency
+// re-describes the same coverage with more rectangles.
+//
+// It returns nil rather than a zero value when there is nothing usable, since
+// 0,0 is a real coordinate.
+func computeCentroid(bounds []directoryBound) *LatLon {
+	if len(bounds) == 0 {
+		return nil
+	}
+
+	var sumLat, sumLon, sumWeight float64
+	for _, b := range bounds {
+		// A negative span is nonsense from upstream; clamp to zero weight
+		// rather than letting it subtract area from its neighbours.
+		w := math.Max(b.LatSpan, 0) * math.Max(b.LonSpan, 0)
+		sumLat += b.Lat * w
+		sumLon += b.Lon * w
+		sumWeight += w
+	}
+
+	var lat, lon float64
+	if sumWeight > 0 {
+		lat, lon = sumLat/sumWeight, sumLon/sumWeight
+	} else {
+		// Every rectangle has zero area -- a region described as points.
+		// The unweighted mean is the only meaningful answer available.
+		for _, b := range bounds {
+			lat += b.Lat
+			lon += b.Lon
+		}
+		lat /= float64(len(bounds))
+		lon /= float64(len(bounds))
+	}
+
+	if math.IsNaN(lat) || math.IsNaN(lon) ||
+		lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return nil
+	}
+	return &LatLon{Lat: lat, Lon: lon}
 }
