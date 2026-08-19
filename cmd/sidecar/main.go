@@ -21,10 +21,13 @@ import (
 	// valid one on such a host.
 	_ "time/tzdata"
 
+	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
+	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/vehicles"
 )
 
 const (
@@ -44,6 +47,17 @@ const (
 	// test, so it is named and tested (see TestBuildDeps_WiresFailDelay)
 	// rather than inlined into the Deps literal below.
 	adminFailDelay = 500 * time.Millisecond
+
+	// Cache sizing for the upstream proxies. The TTLs come from the spec
+	// (fleet 30 minutes, per-query results 5 minutes); the budgets sit under
+	// the server's 15s WriteTimeout, and the query budget exceeds the fleet
+	// budget because a cold query fetch nests a fleet fetch inside it.
+	fleetTTL     = 30 * time.Minute
+	fleetEntries = 256
+	fleetBudget  = 12 * time.Second
+	queryTTL     = 5 * time.Minute
+	queryEntries = 4096
+	queryBudget  = 13 * time.Second
 )
 
 func main() {
@@ -71,6 +85,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 	addr := fs.String("addr", defaultAddr, "address for the HTTP server to listen on")
 	regionsURL := fs.String("regions-url", envOrDefault("SIDECAR_REGIONS_URL", defaultRegionsURL), "URL of the regions directory document")
 	refresh := fs.Duration("refresh", defaultRefresh, "interval between regions directory refreshes")
+	obaAPIKey := fs.String("oba-api-key", envOrDefault("SIDECAR_OBA_API_KEY", ""),
+		"default OneBusAway REST API key, used for regions with no key of their own")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -122,7 +138,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
-		Deps: buildDeps(store, logger),
+		Deps: buildDeps(store, logger, *obaAPIKey),
 	})
 
 	logger.Info("sidecar: listening", "addr", *addr)
@@ -136,7 +152,19 @@ func run(stdout, stderr io.Writer, args []string) error {
 // not in httpapi, because cmd/ is the one place in this repo allowed to
 // touch the wall clock directly (design spec §2.3); everywhere else gets it
 // injected.
-func buildDeps(store *sqlite.Store, logger *slog.Logger) httpapi.Deps {
+func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey string) httpapi.Deps {
+	if obaAPIKey == "" {
+		logger.Warn("no --oba-api-key/SIDECAR_OBA_API_KEY set; " +
+			"vehicle search returns 502 for regions with no key of their own")
+	}
+	obaClient := obaapi.New(obaAPIKey, http.DefaultClient, logger)
+	vehicleSvc := vehicles.NewService(
+		obaClient,
+		cache.New[[]obaapi.Vehicle](fleetTTL, fleetEntries, fleetBudget, time.Now),
+		cache.New[[]vehicles.Match](queryTTL, queryEntries, queryBudget, time.Now),
+		logger,
+	)
+
 	return httpapi.Deps{
 		Alerts:    store.Alerts(),
 		Regions:   store.Regions(),
@@ -145,6 +173,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger) httpapi.Deps {
 		Logger:    logger,
 		AdminUI:   adminui.FS(),
 		FailDelay: adminFailDelay,
+		Vehicles:  vehicleSvc,
 	}
 }
 

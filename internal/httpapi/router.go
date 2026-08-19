@@ -18,6 +18,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/vehicles"
 )
 
 // Deps carries everything the router needs from the outside world. Now and
@@ -33,6 +34,11 @@ type Deps struct {
 	Auth   auth.Repository
 	Now    func() time.Time
 	Logger *slog.Logger
+
+	// Vehicles backs the vehicle search endpoint. Nil means the route is not
+	// registered, which is how a feed-only deployment (or a feed-only test)
+	// avoids having to supply one.
+	Vehicles *vehicles.Service
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -97,6 +103,11 @@ func NewRouter(deps Deps) http.Handler {
 	// deliberately bypass every admin middleware.
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
+
+	if deps.Vehicles != nil {
+		vh := &vehiclesHandler{deps: deps}
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
+	}
 
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served

@@ -118,7 +118,7 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler))
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "")
 
 	if deps.FailDelay != 500*time.Millisecond {
 		t.Errorf("Deps.FailDelay = %v, want 500ms", deps.FailDelay)
@@ -141,7 +141,7 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler))
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "")
 
 	if deps.Auth == nil {
 		t.Error("Deps.Auth = nil, want store.Auth()")
@@ -158,4 +158,43 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	if got.Before(before) || got.After(after) {
 		t.Errorf("Deps.Now() = %v, want a value between %v and %v (i.e. the real wall clock)", got, before, after)
 	}
+}
+
+// TestBuildDeps_WiresVehicles covers the fields Task 5 adds. Deps.Vehicles
+// must always be set, even with an empty key -- a feed-only region with its
+// own OBAAPIKey still needs to search -- and an empty key must be flagged at
+// startup, on the theory that a silently-broken vehicle search (every region
+// with no key of its own gets 502 forever) is far harder to diagnose in
+// production than a boot-time log line.
+func TestBuildDeps_WiresVehicles(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Vehicles is always wired", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key")
+		if deps.Vehicles == nil {
+			t.Fatal("Deps.Vehicles = nil, want a *vehicles.Service")
+		}
+	})
+
+	t.Run("empty key logs a warning", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		var buf bytes.Buffer
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "")
+		if !strings.Contains(buf.String(), "oba-api-key") {
+			t.Errorf("log output = %q, want a warning mentioning oba-api-key", buf.String())
+		}
+	})
+
+	t.Run("non-empty key logs no warning", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		var buf bytes.Buffer
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key")
+		if buf.Len() != 0 {
+			t.Errorf("log output = %q, want nothing logged when a key is configured", buf.String())
+		}
+	})
 }
