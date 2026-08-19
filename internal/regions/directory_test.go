@@ -406,7 +406,17 @@ func TestFetchKeepsRegionWithUnusableBounds(t *testing.T) {
 	if got[1].Centroid == nil {
 		t.Fatal("region 2 Centroid = nil, want a point")
 	}
-	if got[1].Centroid.Lat != 47.6 {
+	// A single bound's centroid is its own center in exact arithmetic, but
+	// computeCentroid gets there via multiply-then-divide (lat*w/w), which
+	// float64 does not guarantee round-trips bit-exactly -- e.g. -122.3
+	// comes back as -122.30000000000001. An exact equality check here would
+	// be asserting a coincidence of this particular input, not the property
+	// under test, so this compares within a tolerance instead.
+	const epsilon = 1e-9
+	if diff := got[1].Centroid.Lat - 47.6; diff > epsilon || diff < -epsilon {
 		t.Errorf("region 2 Lat = %v, want 47.6", got[1].Centroid.Lat)
+	}
+	if diff := got[1].Centroid.Lon - (-122.3); diff > epsilon || diff < -epsilon {
+		t.Errorf("region 2 Lon = %v, want -122.3", got[1].Centroid.Lon)
 	}
 }
