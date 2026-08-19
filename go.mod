@@ -10,7 +10,17 @@ require (
 	modernc.org/sqlite v1.56.0
 )
 
-require golang.org/x/term v0.45.0
+require (
+	github.com/OneBusAway/go-sdk v1.15.0
+	golang.org/x/term v0.45.0
+)
+
+require (
+	github.com/tidwall/gjson v1.14.4 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
