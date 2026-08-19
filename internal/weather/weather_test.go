@@ -61,7 +61,15 @@ func TestPirateWeatherMapping(t *testing.T) {
 	if !strings.Contains(gotQuery, "units=us") {
 		t.Errorf("query %q missing units=us", gotQuery)
 	}
+	if !strings.Contains(gotQuery, "exclude=minutely,alerts") {
+		t.Errorf("query %q missing exclude=minutely,alerts", gotQuery)
+	}
 
+	// The fixture's flags.units is "si", deliberately mismatched from what
+	// we request: Units must come from our own requestedUnits constant, not
+	// be echoed from the provider's response. If those two ever agreed by
+	// coincidence, a mapping bug that reads the provider's echo instead of
+	// our constant would be invisible here.
 	if got.Units != "us" {
 		t.Errorf("Units = %q, want us", got.Units)
 	}
@@ -75,21 +83,32 @@ func TestPirateWeatherMapping(t *testing.T) {
 		t.Errorf("RetrievedAt = %v, want %v", got.RetrievedAt, fixedNow())
 	}
 
-	want := Conditions{
+	// currently and hourly.data[0] carry different temperature/
+	// apparentTemperature values in the fixture specifically so that Current
+	// and Hourly[0] pin to their own source objects: if they were identical,
+	// nothing would catch a bug that mapped Current from hourly.data[0]
+	// instead of currently.
+	wantCurrent := Conditions{
 		Icon: "rain", Summary: "Light Rain",
-		Temperature: 48.31, TemperatureFeelsLike: 44.02,
+		Temperature: 49.60, TemperatureFeelsLike: 45.11,
 		PrecipPerHour: 0.0213, PrecipProbability: 0.72,
 		WindSpeed: 9.14, Time: 1767980400,
 	}
-	if got.Current != want {
-		t.Errorf("Current = %+v, want %+v", got.Current, want)
+	if got.Current != wantCurrent {
+		t.Errorf("Current = %+v, want %+v", got.Current, wantCurrent)
 	}
 
 	if len(got.Hourly) != 2 {
 		t.Fatalf("got %d hourly entries, want 2", len(got.Hourly))
 	}
-	if got.Hourly[0] != want {
-		t.Errorf("Hourly[0] = %+v, want %+v", got.Hourly[0], want)
+	wantHourly0 := Conditions{
+		Icon: "rain", Summary: "Light Rain",
+		Temperature: 48.31, TemperatureFeelsLike: 44.02,
+		PrecipPerHour: 0.0213, PrecipProbability: 0.72,
+		WindSpeed: 9.14, Time: 1767980400,
+	}
+	if got.Hourly[0] != wantHourly0 {
+		t.Errorf("Hourly[0] = %+v, want %+v", got.Hourly[0], wantHourly0)
 	}
 	// An icon we have never seen must pass through untouched: the vocabulary
 	// belongs to the provider, and mapping it to a fallback would hide a new
@@ -149,5 +168,90 @@ func TestRedactFallbackDoesNotLeakArbitraryErrorText(t *testing.T) {
 	got := redact(err)
 	if errChainContains(got, sentinelKey) {
 		t.Errorf("redact leaked the key from a non-*url.Error: %v", got)
+	}
+}
+
+// The key is a path segment, so the default *http.Client's redirect
+// handling -- which sets Referer to the previous request's full URL --
+// would hand the key to whatever server a redirect points at. That server
+// is not one we chose to trust, so this is worse than a log leak: it's
+// disclosure to an arbitrary third party. newPirateWeatherWithBase must
+// refuse to follow redirects so the target is never contacted at all.
+func TestPirateWeatherDoesNotFollowRedirectsWithReferer(t *testing.T) {
+	var targetHit bool
+	var gotReferer string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		gotReferer = r.Header.Get("Referer")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	p := newPirateWeatherWithBase(origin.URL, sentinelKey, origin.Client(), fixedNow)
+	_, err := p.Fetch(context.Background(), regions.LatLon{Lat: 1, Lon: 2})
+	if err == nil {
+		t.Fatal("Fetch succeeded on a redirect, want an error (a 302 is not a 200)")
+	}
+	if targetHit {
+		t.Errorf("redirect target was contacted; Referer = %q", gotReferer)
+	}
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error leaks the key: %v", err)
+	}
+}
+
+// daily.data and hourly.data can legitimately be empty (e.g. a provider
+// outage that still returns 200 with a bare skeleton). Fetch must not panic
+// indexing daily.data[0], must leave TodaySummary empty rather than
+// fabricating one, and must return a non-nil, empty Hourly slice -- a nil
+// slice serializes to "hourly": null, a response-shape regression the next
+// task (the HTTP handler) would otherwise inherit silently.
+func TestPirateWeatherHandlesEmptyDailyAndHourlyData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"currently":{},"hourly":{"data":[]},"daily":{"data":[]}}`))
+	}))
+	defer srv.Close()
+
+	p := newPirateWeatherWithBase(srv.URL, sentinelKey, srv.Client(), fixedNow)
+	got, err := p.Fetch(context.Background(), regions.LatLon{Lat: 1, Lon: 2})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got.TodaySummary != "" {
+		t.Errorf("TodaySummary = %q, want empty", got.TodaySummary)
+	}
+	if got.Hourly == nil {
+		t.Error("Hourly = nil, want a non-nil empty slice")
+	}
+	if len(got.Hourly) != 0 {
+		t.Errorf("Hourly = %+v, want empty", got.Hourly)
+	}
+}
+
+// The provider is untrusted and the body read happens before anything is
+// validated, so the read must be capped. This body is only valid JSON once
+// its closing quote and brace -- the very last two bytes, past maxBody --
+// are read; if the cap is applied, decoding sees a truncated document and
+// fails, proving the read stopped at the cap rather than consuming the
+// whole (oversized) response.
+func TestPirateWeatherResponseBodyIsBounded(t *testing.T) {
+	prefix := `{"currently":{},"hourly":{"data":[]},"daily":{"data":[]},"padding":"`
+	body := prefix + strings.Repeat("x", maxBody) + `"}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	p := newPirateWeatherWithBase(srv.URL, sentinelKey, srv.Client(), fixedNow)
+	if _, err := p.Fetch(context.Background(), regions.LatLon{Lat: 1, Lon: 2}); err == nil {
+		t.Fatal("Fetch succeeded reading an oversized body, want a decode error from a truncated read")
 	}
 }

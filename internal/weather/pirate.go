@@ -39,7 +39,21 @@ func newPirateWeatherWithBase(base, key string, httpClient *http.Client, now fun
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &pirateWeather{base: base, key: key, http: httpClient, now: now}
+	// Shallow-copy rather than mutate the caller's client: setting
+	// CheckRedirect on the passed-in *http.Client would silently change
+	// redirect behavior for anything else that shares it.
+	//
+	// The key is a path segment, so an https-to-https redirect hop would
+	// otherwise hand it to the redirect target via the default client's
+	// Referer header -- disclosing the credential to a server we never
+	// chose to contact, which is worse than a log leak. Refusing to follow
+	// redirects turns that into an ordinary non-2xx response, handled by
+	// the status check below.
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &pirateWeather{base: base, key: key, http: &client, now: now}
 }
 
 // pirateResponse is the subset of the provider's payload this sidecar uses.
@@ -53,9 +67,6 @@ type pirateResponse struct {
 			Summary string `json:"summary"`
 		} `json:"data"`
 	} `json:"daily"`
-	Flags struct {
-		Units string `json:"units"`
-	} `json:"flags"`
 }
 
 type piratePoint struct {
@@ -83,7 +94,11 @@ func (p piratePoint) conditions() Conditions {
 }
 
 // requestedUnits is echoed into the response so the units field always
-// describes the numbers it accompanies.
+// describes the numbers it accompanies. This is deliberately our own
+// constant, not the provider's echoed flags.units -- we always request "us",
+// so the two agree in practice, but reading Units from the response would
+// make Snapshot.Units describe what the provider claims to have sent rather
+// than what we asked for and mapped.
 const requestedUnits = "us"
 
 // Fetch calls the Pirate Weather forecast endpoint and maps its response into

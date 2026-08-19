@@ -8,12 +8,12 @@
     "icon": "rain",
     "precipIntensity": 0.0213,
     "precipProbability": 0.72,
-    "temperature": 48.31,
-    "apparentTemperature": 44.02,
+    "temperature": 49.60,
+    "apparentTemperature": 45.11,
     "windSpeed": 9.14
   },
   "hourly": {
-    "summary": "Rain until evening.",
+    "summary": "Showers overnight, clearing by morning.",
     "icon": "rain",
     "data": [
       {
@@ -46,5 +46,5 @@
       { "time": 1768032000, "summary": "Clear throughout the day.", "icon": "clear-day" }
     ]
   },
-  "flags": { "units": "us" }
+  "flags": { "units": "si" }
 }
