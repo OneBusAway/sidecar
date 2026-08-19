@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-
-	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
 // vehiclesHandler serves the fuzzy vehicle-id search.
@@ -16,23 +14,11 @@ type vehiclesHandler struct {
 
 // search serves GET /api/v1/regions/{regionId}/vehicles.
 func (h *vehiclesHandler) search(w http.ResponseWriter, r *http.Request) {
-	id, parsed := ParseRegionSegment(r.PathValue("regionId"))
-	if !parsed {
-		writeRegionNotFound(w, h.deps.Logger)
+	region, ok := resolveRegion(w, r, h.deps)
+	if !ok {
 		return
 	}
-
 	ctx := r.Context()
-	region, err := h.deps.Regions.Get(ctx, id)
-	if err != nil {
-		if errors.Is(err, regions.ErrNotFound) {
-			writeRegionNotFound(w, h.deps.Logger)
-			return
-		}
-		h.deps.Logger.Error("httpapi: get region", "region_id", id, "err", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
 
 	matches, err := h.deps.Vehicles.Search(ctx, region, r.URL.Query().Get("query"))
 	if err != nil {
@@ -40,7 +26,7 @@ func (h *vehiclesHandler) search(w http.ResponseWriter, r *http.Request) {
 		// such vehicle", so a rider searching for a bus that exists would be
 		// told, confidently, that it does not.
 		level := slogLevelForUpstreamErr(err)
-		h.deps.Logger.Log(ctx, level, "httpapi: vehicle search", "region_id", id, "err", err)
+		h.deps.Logger.Log(ctx, level, "httpapi: vehicle search", "region_id", region.ID, "err", err)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}

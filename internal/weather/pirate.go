@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/httpx"
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
@@ -36,24 +37,9 @@ func NewPirateWeather(key string, httpClient *http.Client, now func() time.Time)
 }
 
 func newPirateWeatherWithBase(base, key string, httpClient *http.Client, now func() time.Time) *pirateWeather {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	// Shallow-copy rather than mutate the caller's client: setting
-	// CheckRedirect on the passed-in *http.Client would silently change
-	// redirect behavior for anything else that shares it.
-	//
-	// The key is a path segment, so an https-to-https redirect hop would
-	// otherwise hand it to the redirect target via the default client's
-	// Referer header -- disclosing the credential to a server we never
-	// chose to contact, which is worse than a log leak. Refusing to follow
-	// redirects turns that into an ordinary non-2xx response, handled by
-	// the status check below.
-	client := *httpClient
-	client.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return &pirateWeather{base: base, key: key, http: &client, now: now}
+	// The key is a URL path segment, so a followed redirect would leak it to
+	// the redirect target via Referer; see httpx.NoRedirectClient.
+	return &pirateWeather{base: base, key: key, http: httpx.NoRedirectClient(httpClient), now: now}
 }
 
 // pirateResponse is the subset of the provider's payload this sidecar uses.

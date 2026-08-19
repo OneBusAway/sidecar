@@ -48,7 +48,7 @@ func sampleSnapshot(at time.Time) weather.Snapshot {
 func newWeatherTestServer(t *testing.T, p weather.Provider, regs regions.Repository) http.Handler {
 	t.Helper()
 	now := func() time.Time { return time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC) }
-	svc := weather.NewService(p, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now), slog.New(slog.DiscardHandler))
+	svc := weather.NewService(p, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now))
 	return NewRouter(Deps{
 		Regions: regs,
 		Weather: svc,
@@ -122,7 +122,7 @@ func TestWeatherNilCentroidIs403(t *testing.T) {
 func TestWeatherNoProviderConfiguredIs403(t *testing.T) {
 	regs := newTestRegions(t, weatherRegion())
 	now := func() time.Time { return time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC) }
-	svc := weather.NewService(nil, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now), slog.New(slog.DiscardHandler))
+	svc := weather.NewService(nil, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now))
 	srv := NewRouter(Deps{
 		Regions: regs,
 		Weather: svc,
@@ -401,7 +401,7 @@ func TestWeatherLogsCancellationAtWarnOnly(t *testing.T) {
 			if !errors.Is(tt.err, weather.ErrNoProvider) {
 				provider = &fakeProvider{err: tt.err}
 			}
-			svc := weather.NewService(provider, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now), slog.New(slog.DiscardHandler))
+			svc := weather.NewService(provider, cache.New[weather.Snapshot](30*time.Minute, 8, 5*time.Second, now))
 			srv := NewRouter(Deps{Regions: regs, Weather: svc, Now: now, Logger: capturingLogger})
 
 			rec := httptest.NewRecorder()

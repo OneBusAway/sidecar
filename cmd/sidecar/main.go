@@ -192,7 +192,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey st
 	// construction would need its own nil-Cache branch inside Service for no
 	// behavioural gain.
 	weatherSvc := weather.NewService(provider,
-		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now), logger)
+		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now))
 
 	return httpapi.Deps{
 		Alerts:           store.Alerts(),

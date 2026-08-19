@@ -7,7 +7,6 @@ package weather
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -65,8 +64,7 @@ type Service struct {
 // it themselves rather than needing Service to. The parameter stays so the
 // constructor's shape matches vehicles.NewService and can start logging
 // without a signature change if that stops being true.
-func NewService(provider Provider, c *cache.Cache[Snapshot], logger *slog.Logger) *Service {
-	_ = logger
+func NewService(provider Provider, c *cache.Cache[Snapshot]) *Service {
 	return &Service{provider: provider, cache: c}
 }
 

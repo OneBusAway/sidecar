@@ -20,6 +20,7 @@ import (
 	"github.com/OneBusAway/go-sdk/option"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/OneBusAway/sidecar/internal/httpx"
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
@@ -75,31 +76,12 @@ type client struct {
 // New builds a Client. defaultKey is the process-wide fallback used for any
 // region that carries no key of its own; it may be empty.
 func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	// Shallow-copy rather than mutate the caller's client: setting
-	// CheckRedirect on the passed-in *http.Client would silently change
-	// redirect behavior for anything else that shares it (in production,
-	// httpClient is http.DefaultClient itself).
-	//
-	// option.WithAPIKey puts the key in the query string, and region.OBABaseURL
-	// comes from the remote regions directory with no guarantee of https, so an
-	// https-to-http downgrade redirect is not the only way this leaks -- Go's
-	// default client sets Referer to the previous request's full URL, query
-	// included, on any redirect it follows, handing the key to whatever server
-	// the redirect points at. That server is not one we chose to trust, so
-	// this is worse than a log leak: it's disclosure to an arbitrary third
-	// party. Refusing to follow redirects turns that into an ordinary non-2xx
-	// response instead.
-	hc := *httpClient
-	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return &client{defaultKey: defaultKey, http: &hc, logger: logger}
+	// The key travels in the query string, so a followed redirect would leak
+	// it to the redirect target via Referer; see httpx.NoRedirectClient.
+	return &client{defaultKey: defaultKey, http: httpx.NoRedirectClient(httpClient), logger: logger}
 }
 
 func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {

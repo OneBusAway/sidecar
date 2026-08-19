@@ -278,7 +278,7 @@ func (c *countingProvider) Fetch(context.Context, regions.LatLon) (Snapshot, err
 // coordinates that must round to the same or different buckets respectively.
 func TestServiceCacheKeySharesNearbyCoordinates(t *testing.T) {
 	p := &countingProvider{}
-	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow))
 	ctx := context.Background()
 
 	// Differ at the 5th decimal (~1m apart) -- both round to 47.7500 /
@@ -296,7 +296,7 @@ func TestServiceCacheKeySharesNearbyCoordinates(t *testing.T) {
 
 func TestServiceCacheKeyDistinguishesFartherCoordinates(t *testing.T) {
 	p := &countingProvider{}
-	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+	svc := NewService(p, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow))
 	ctx := context.Background()
 
 	// Differ at the 3rd decimal (~100m apart) -- 47.7500 vs 47.7510 at
@@ -317,7 +317,7 @@ func TestServiceCacheKeyDistinguishesFartherCoordinates(t *testing.T) {
 // the same behaviour end-to-end through the handler, but this is the one
 // place that can assert the cache is never touched at all).
 func TestServiceNoProviderReturnsErrNoProviderWithoutCaching(t *testing.T) {
-	svc := NewService(nil, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow), nil)
+	svc := NewService(nil, cache.New[Snapshot](30*time.Minute, 8, 5*time.Second, fixedNow))
 
 	_, err := svc.Snapshot(context.Background(), regions.LatLon{Lat: 1, Lon: 2})
 	if !errors.Is(err, ErrNoProvider) {

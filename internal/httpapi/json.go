@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+
+	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
 // writeJSON writes v as a JSON body with the given status. Encoding happens
@@ -67,4 +69,40 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
+}
+
+// writeServerError logs op against the region id and writes a bare, empty
+// 500. Every {regionId} feed handler shares this one function for the same
+// reason they share writeRegionNotFound: three independent copies is how one
+// of them quietly grows a body, or logs under a different key, and nothing
+// notices. Note this is deliberately NOT serverErrorJSON, which writes an
+// {"error": ...} body -- a different wire contract used by the admin API.
+func writeServerError(w http.ResponseWriter, logger *slog.Logger, regionID int64, op string, err error) {
+	logger.Error("httpapi: "+op, "region_id", regionID, "err", err)
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
+// resolveRegion parses the {regionId} path segment and loads that region,
+// writing the response itself on failure and reporting ok=false. It is the
+// shared preamble of every rider-facing endpoint scoped to a region: an
+// unparseable segment and an unknown id are both the 404 contract (design
+// spec §1.2), while a store failure is a 500 the rider never sees the detail
+// of. Callers differ only in what they do after a region is in hand.
+func resolveRegion(w http.ResponseWriter, r *http.Request, deps Deps) (regions.Region, bool) {
+	id, parsed := ParseRegionSegment(r.PathValue("regionId"))
+	if !parsed {
+		writeRegionNotFound(w, deps.Logger)
+		return regions.Region{}, false
+	}
+
+	region, err := deps.Regions.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, regions.ErrNotFound) {
+			writeRegionNotFound(w, deps.Logger)
+			return regions.Region{}, false
+		}
+		writeServerError(w, deps.Logger, id, "get region", err)
+		return regions.Region{}, false
+	}
+	return region, true
 }

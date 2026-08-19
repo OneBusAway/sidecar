@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,7 +10,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
-	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
 // notFoundBody is the exact 404 body the design spec (§1.2, §2.5) requires
@@ -33,7 +31,7 @@ func (h *alertsHandler) feedBinary(w http.ResponseWriter, r *http.Request) {
 
 	body, err := proto.Marshal(msg)
 	if err != nil {
-		h.serverError(w, id, "marshal protobuf", err)
+		writeServerError(w, h.deps.Logger, id, "marshal protobuf", err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -51,7 +49,7 @@ func (h *alertsHandler) feedText(w http.ResponseWriter, r *http.Request) {
 
 	body, err := protojson.Marshal(msg)
 	if err != nil {
-		h.serverError(w, id, "marshal pbtext", err)
+		writeServerError(w, h.deps.Logger, id, "marshal pbtext", err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
@@ -63,25 +61,15 @@ func (h *alertsHandler) feedText(w http.ResponseWriter, r *http.Request) {
 // feed rows, and renders them. It writes the response itself on failure (404
 // or 500) and returns ok=false, so callers only need to marshal on success.
 func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *gtfs.FeedMessage, regionID int64, ok bool) {
-	id, parsed := ParseRegionSegment(r.PathValue("regionId"))
-	if !parsed {
-		writeRegionNotFound(w, h.deps.Logger)
+	region, ok := resolveRegion(w, r, h.deps)
+	if !ok {
 		return nil, 0, false
 	}
-
-	ctx := r.Context()
-	if _, err := h.deps.Regions.Get(ctx, id); err != nil {
-		if errors.Is(err, regions.ErrNotFound) {
-			writeRegionNotFound(w, h.deps.Logger)
-			return nil, 0, false
-		}
-		h.serverError(w, id, "get region", err)
-		return nil, 0, false
-	}
+	id, ctx := region.ID, r.Context()
 
 	rows, err := h.deps.Alerts.Feed(ctx, id, includeTest(r), alerts.FeedLimit)
 	if err != nil {
-		h.serverError(w, id, "feed alerts", err)
+		writeServerError(w, h.deps.Logger, id, "feed alerts", err)
 		return nil, 0, false
 	}
 
@@ -94,13 +82,6 @@ func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *
 		},
 	})
 	return built, id, true
-}
-
-// serverError writes an empty 500 body and logs the failure with the region
-// id, per the design spec: a store error is never surfaced to the rider.
-func (h *alertsHandler) serverError(w http.ResponseWriter, regionID int64, op string, err error) {
-	h.deps.Logger.Error("httpapi: "+op, "region_id", regionID, "err", err)
-	w.WriteHeader(http.StatusInternalServerError)
 }
 
 // writeBody writes a successful response body after the status line and

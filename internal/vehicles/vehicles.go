@@ -114,9 +114,11 @@ func (s *Service) Search(ctx context.Context, region regions.Region, rawQuery st
 		return []Match{}, nil
 	}
 
-	key := strconv.FormatInt(region.ID, 10) + "|" + q
-	return s.result.Get(ctx, key, func(ctx context.Context) ([]Match, error) {
-		fleet, err := s.fleet.Get(ctx, strconv.FormatInt(region.ID, 10),
+	// Formatted once and shared by both cache keys: this runs on every
+	// search, and the endpoint is called per keystroke.
+	regionKey := strconv.FormatInt(region.ID, 10)
+	return s.result.Get(ctx, regionKey+"|"+q, func(ctx context.Context) ([]Match, error) {
+		fleet, err := s.fleet.Get(ctx, regionKey,
 			func(ctx context.Context) ([]obaapi.Vehicle, error) {
 				return s.oba.Fleet(ctx, region)
 			})

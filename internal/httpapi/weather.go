@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
@@ -36,26 +35,14 @@ type weatherHandler struct {
 // have been tested against. A 404 would tell the app the region does not
 // exist, which is a different and false claim.
 func (h *weatherHandler) forecast(w http.ResponseWriter, r *http.Request) {
-	id, parsed := ParseRegionSegment(r.PathValue("regionId"))
-	if !parsed {
-		writeRegionNotFound(w, h.deps.Logger)
+	region, ok := resolveRegion(w, r, h.deps)
+	if !ok {
 		return
 	}
-
 	ctx := r.Context()
-	region, err := h.deps.Regions.Get(ctx, id)
-	if err != nil {
-		if errors.Is(err, regions.ErrNotFound) {
-			writeRegionNotFound(w, h.deps.Logger)
-			return
-		}
-		h.deps.Logger.Error("httpapi: get region", "region_id", id, "err", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
 
 	if region.Centroid == nil {
-		h.deps.Logger.Error("httpapi: weather unavailable, region has no centroid", "region_id", id)
+		h.deps.Logger.Error("httpapi: weather unavailable, region has no centroid", "region_id", region.ID)
 		h.writeUnavailable(w)
 		return
 	}
@@ -70,10 +57,10 @@ func (h *weatherHandler) forecast(w http.ResponseWriter, r *http.Request) {
 		// is routine traffic, not a page-worthy Error.
 		switch {
 		case errors.Is(err, weather.ErrNoProvider):
-			h.deps.Logger.Warn("httpapi: weather not configured", "region_id", id)
+			h.deps.Logger.Warn("httpapi: weather not configured", "region_id", region.ID)
 		default:
 			level := slogLevelForUpstreamErr(err)
-			h.deps.Logger.Log(ctx, level, "httpapi: weather fetch", "region_id", id, "err", err)
+			h.deps.Logger.Log(ctx, level, "httpapi: weather fetch", "region_id", region.ID, "err", err)
 		}
 		h.writeUnavailable(w)
 		return
