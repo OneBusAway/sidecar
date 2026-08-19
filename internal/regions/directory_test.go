@@ -234,7 +234,9 @@ func TestSync_PreservesLocalFields(t *testing.T) {
 	}}, base); err != nil {
 		t.Fatalf("seed UpsertFromDirectory: %v", err)
 	}
-	if err := repo.SetLocalFields(ctx, 1, "40", "America/Los_Angeles", base); err != nil {
+	if err := repo.SetLocalFields(ctx, 1, regions.LocalFields{
+		DefaultAgencyID: "40", Timezone: "America/Los_Angeles",
+	}, base); err != nil {
 		t.Fatalf("SetLocalFields: %v", err)
 	}
 

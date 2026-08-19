@@ -256,7 +256,11 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 		newTimezone = *timezone
 	}
 
-	if err := repo.SetLocalFields(ctx, *id, newAgencyID, newTimezone, now); err != nil {
+	if err := repo.SetLocalFields(ctx, *id, regions.LocalFields{
+		DefaultAgencyID: newAgencyID,
+		Timezone:        newTimezone,
+		OBAAPIKey:       current.OBAAPIKey,
+	}, now); err != nil {
 		return fmt.Errorf("region set: %w", err)
 	}
 	return nil

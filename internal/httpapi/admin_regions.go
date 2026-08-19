@@ -98,7 +98,14 @@ func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		timezone = *req.Timezone
 	}
 
-	if setErr := h.deps.Regions.SetLocalFields(ctx, id, agencyID, timezone, h.deps.Now()); setErr != nil {
+	// No new flag or JSON field carries OBAAPIKey yet -- a later task adds
+	// those. Carrying the current value through here is what keeps this PATCH
+	// from silently wiping a key an operator already configured.
+	if setErr := h.deps.Regions.SetLocalFields(ctx, id, regions.LocalFields{
+		DefaultAgencyID: agencyID,
+		Timezone:        timezone,
+		OBAAPIKey:       current.OBAAPIKey,
+	}, h.deps.Now()); setErr != nil {
 		writeStoreError(w, h.deps.Logger, "set region local fields", setErr)
 		return
 	}

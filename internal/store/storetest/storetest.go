@@ -44,6 +44,9 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("RegionScoping", func(t *testing.T) { testRegionScoping(t, newStore) })
 	t.Run("StartTimeBeyond32Bit", func(t *testing.T) { testStartTimeBeyond32Bit(t, newStore) })
 	t.Run("PartialUpsertPreservesLocalFields", func(t *testing.T) { testPartialUpsertPreservesLocalFields(t, newStore) })
+	t.Run("CentroidRoundTrip", func(t *testing.T) { testCentroidRoundTrip(t, newStore) })
+	t.Run("CentroidRejectsHalfSet", func(t *testing.T) { testCentroidRejectsHalfSet(t, newStore) })
+	t.Run("SetLocalFieldsWritesAllThree", func(t *testing.T) { testSetLocalFieldsWritesAllThree(t, newStore) })
 	t.Run("UpsertNeverDeletes", func(t *testing.T) { testUpsertNeverDeletes(t, newStore) })
 	t.Run("TranslationUpsertReplaces", func(t *testing.T) { testTranslationUpsertReplaces(t, newStore) })
 	t.Run("FeedAttachesTranslations", func(t *testing.T) { testFeedAttachesTranslations(t, newStore) })
@@ -445,7 +448,9 @@ func testPartialUpsertPreservesLocalFields(t *testing.T, newStore newStoreFunc) 
 	ctx := context.Background()
 	putRegion(t, regionRepo, 1)
 
-	if err := regionRepo.SetLocalFields(ctx, 1, "40", "America/Los_Angeles", base); err != nil {
+	if err := regionRepo.SetLocalFields(ctx, 1, regions.LocalFields{
+		DefaultAgencyID: "40", Timezone: "America/Los_Angeles", OBAAPIKey: "secret-key",
+	}, base); err != nil {
 		t.Fatalf("SetLocalFields: %v", err)
 	}
 
@@ -479,6 +484,13 @@ func testPartialUpsertPreservesLocalFields(t *testing.T, newStore newStoreFunc) 
 	}
 	if got.Timezone != "America/Los_Angeles" {
 		t.Errorf("Timezone = %q, want %q (must survive directory refresh)", got.Timezone, "America/Los_Angeles")
+	}
+	// This is the assertion that catches a full-row upsert wiping the key
+	// specifically: DefaultAgencyID and Timezone were already covered above,
+	// but OBAAPIKey is the newest of the three locally-managed columns and the
+	// one most likely to be left out of a partial-upsert's column list.
+	if got.OBAAPIKey != "secret-key" {
+		t.Errorf("OBAAPIKey = %q, want %q (must survive directory refresh)", got.OBAAPIKey, "secret-key")
 	}
 }
 
@@ -980,4 +992,125 @@ func testDeleteTranslationRemovesBothFields(t *testing.T, newStore newStoreFunc)
 	if err = repo.DeleteTranslation(ctx, a.ID, "ES"); !errors.Is(err, alerts.ErrNotFound) {
 		t.Errorf("second DeleteTranslation(ES) = %v, want alerts.ErrNotFound", err)
 	}
+}
+
+// testCentroidRoundTrip pins the three states a centroid can be in. The 0,0
+// case is the point of the nullable column: it is a real coordinate in the
+// Gulf of Guinea, and must survive as a value rather than reading back as
+// "unset".
+func testCentroidRoundTrip(t *testing.T, newStore newStoreFunc) {
+	_, repo := newStore(t)
+	ctx := context.Background()
+
+	in := []regions.Region{
+		{ID: 1, Name: "Has Centroid", OBABaseURL: "https://a.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 47.75, Lon: -122.49}},
+		{ID: 2, Name: "No Centroid", OBABaseURL: "https://b.example/", Active: true},
+		{ID: 3, Name: "Null Island", OBABaseURL: "https://c.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 0, Lon: 0}},
+	}
+	if err := repo.UpsertFromDirectory(ctx, in, base); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+
+	got1, err := repo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get(1): %v", err)
+	}
+	if got1.Centroid == nil {
+		t.Fatal("region 1 Centroid = nil, want a point")
+	}
+	if got1.Centroid.Lat != 47.75 || got1.Centroid.Lon != -122.49 {
+		t.Errorf("region 1 Centroid = %+v, want {47.75 -122.49}", *got1.Centroid)
+	}
+
+	got2, err := repo.Get(ctx, 2)
+	if err != nil {
+		t.Fatalf("Get(2): %v", err)
+	}
+	if got2.Centroid != nil {
+		t.Errorf("region 2 Centroid = %+v, want nil", *got2.Centroid)
+	}
+
+	got3, err := repo.Get(ctx, 3)
+	if err != nil {
+		t.Fatalf("Get(3): %v", err)
+	}
+	if got3.Centroid == nil {
+		t.Fatal("region 3 Centroid = nil, want 0,0 -- Null Island is a real coordinate")
+	}
+	if got3.Centroid.Lat != 0 || got3.Centroid.Lon != 0 {
+		t.Errorf("region 3 Centroid = %+v, want {0 0}", *got3.Centroid)
+	}
+}
+
+// testCentroidRejectsHalfSet proves the invariant lives in the schema, not
+// only in the Go type. A Postgres adapter expresses this as a CHECK; both
+// must refuse the same row.
+func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
+	_, repo := newStore(t)
+	ctx := context.Background()
+
+	if err := repo.UpsertFromDirectory(ctx, []regions.Region{
+		{ID: 1, Name: "Whole", OBABaseURL: "https://a.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 47.75, Lon: -122.49}},
+	}, base); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+
+	if err := writeHalfSetCentroid(ctx, repo, 1); err == nil {
+		t.Fatal("writing latitude without longitude succeeded, want a constraint failure")
+	}
+}
+
+// testSetLocalFieldsWritesAllThree pins that the three locally-managed fields
+// travel together and that a directory refresh leaves every one of them alone.
+func testSetLocalFieldsWritesAllThree(t *testing.T, newStore newStoreFunc) {
+	_, repo := newStore(t)
+	ctx := context.Background()
+
+	dir := []regions.Region{{ID: 1, Name: "R", OBABaseURL: "https://a.example/", Active: true}}
+	if err := repo.UpsertFromDirectory(ctx, dir, base); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+
+	want := regions.LocalFields{DefaultAgencyID: "40", Timezone: "America/Los_Angeles", OBAAPIKey: "secret-key"}
+	if err := repo.SetLocalFields(ctx, 1, want, base); err != nil {
+		t.Fatalf("SetLocalFields: %v", err)
+	}
+
+	// A refresh must not disturb any of them.
+	if err := repo.UpsertFromDirectory(ctx, dir, base.Add(time.Hour)); err != nil {
+		t.Fatalf("second UpsertFromDirectory: %v", err)
+	}
+
+	got, err := repo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DefaultAgencyID != want.DefaultAgencyID {
+		t.Errorf("DefaultAgencyID = %q, want %q", got.DefaultAgencyID, want.DefaultAgencyID)
+	}
+	if got.Timezone != want.Timezone {
+		t.Errorf("Timezone = %q, want %q", got.Timezone, want.Timezone)
+	}
+	if got.OBAAPIKey != want.OBAAPIKey {
+		t.Errorf("OBAAPIKey = %q, want %q", got.OBAAPIKey, want.OBAAPIKey)
+	}
+}
+
+// HalfSetCentroidWriter is implemented by adapters that can attempt an
+// invalid half-set centroid write, so the conformance suite can prove the
+// storage engine rejects it. An adapter that does not implement it skips
+// that subtest rather than silently passing.
+type HalfSetCentroidWriter interface {
+	WriteHalfSetCentroidForTest(ctx context.Context, id int64) error
+}
+
+func writeHalfSetCentroid(ctx context.Context, repo regions.Repository, id int64) error {
+	w, ok := repo.(HalfSetCentroidWriter)
+	if !ok {
+		return errors.New("adapter does not implement HalfSetCentroidWriter")
+	}
+	return w.WriteHalfSetCentroidForTest(ctx, id)
 }

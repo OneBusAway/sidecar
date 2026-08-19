@@ -40,6 +40,19 @@ type Region struct {
 	// never overwrite them.
 	DefaultAgencyID string
 	Timezone        string
+
+	// OBAAPIKey is this region's key for its OBA REST API server. Empty means
+	// "inherit the process default"; it is never echoed back by any surface.
+	OBAAPIKey string
+}
+
+// LocalFields carries the region columns the directory does not supply. It is
+// a struct rather than three positional strings because three adjacent string
+// parameters is the shape that silently swaps two of them.
+type LocalFields struct {
+	DefaultAgencyID string
+	Timezone        string
+	OBAAPIKey       string
 }
 
 // Repository stores regions. Implementations must be safe for concurrent use.
@@ -48,10 +61,10 @@ type Repository interface {
 	List(ctx context.Context) ([]Region, error)
 
 	// UpsertFromDirectory writes directory-sourced columns only, leaving
-	// DefaultAgencyID and Timezone untouched. It never deletes rows: alerts
-	// cascade from regions, so removing a region that vanished upstream would
-	// destroy every alert authored for it.
+	// DefaultAgencyID, Timezone, and OBAAPIKey untouched. It never deletes
+	// rows: alerts cascade from regions, so removing a region that vanished
+	// upstream would destroy every alert authored for it.
 	UpsertFromDirectory(ctx context.Context, in []Region, now time.Time) error
 
-	SetLocalFields(ctx context.Context, id int64, agencyID, timezone string, now time.Time) error
+	SetLocalFields(ctx context.Context, id int64, in LocalFields, now time.Time) error
 }

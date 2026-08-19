@@ -54,10 +54,14 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	}, testNow); err != nil {
 		t.Fatalf("seed regions: %v", err)
 	}
-	if err := store.Regions().SetLocalFields(ctx, regionTampa, "HART", "America/New_York", testNow); err != nil {
+	if err := store.Regions().SetLocalFields(ctx, regionTampa, regions.LocalFields{
+		DefaultAgencyID: "HART", Timezone: "America/New_York",
+	}, testNow); err != nil {
 		t.Fatalf("configure region %d: %v", regionTampa, err)
 	}
-	if err := store.Regions().SetLocalFields(ctx, regionPuget, "1", "America/Los_Angeles", testNow); err != nil {
+	if err := store.Regions().SetLocalFields(ctx, regionPuget, regions.LocalFields{
+		DefaultAgencyID: "1", Timezone: "America/Los_Angeles",
+	}, testNow); err != nil {
 		t.Fatalf("configure region %d: %v", regionPuget, err)
 	}
 
@@ -1334,7 +1338,7 @@ func (failingRegions) List(context.Context) ([]regions.Region, error) { return n
 func (failingRegions) UpsertFromDirectory(context.Context, []regions.Region, time.Time) error {
 	return errStoreBroken
 }
-func (failingRegions) SetLocalFields(context.Context, int64, string, string, time.Time) error {
+func (failingRegions) SetLocalFields(context.Context, int64, regions.LocalFields, time.Time) error {
 	return errStoreBroken
 }
 
