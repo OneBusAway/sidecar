@@ -85,7 +85,9 @@ func TestComputeCentroid(t *testing.T) {
 				{Lat: 0, Lon: 0, LatSpan: 10, LonSpan: 10},
 				{Lat: 50, Lon: 50, LatSpan: 0.01, LonSpan: 0.01},
 			},
-			want: &LatLon{Lat: 0.0499999, Lon: 0.0499999},
+			// 100 sq deg against 0.0001 sq deg: the tiny rectangle moves the
+			// centroid by 5e-5 degrees, not the 25 an unweighted mean gives.
+			want: &LatLon{Lat: 0.00005, Lon: 0.00005},
 		},
 		{
 			// Every span zero: fall back to the unweighted mean rather than
