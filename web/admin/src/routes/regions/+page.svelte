@@ -149,7 +149,9 @@
 						value={row.obaAPIKey ?? ''}
 						oninput={(e) => (row.obaAPIKey = e.currentTarget.value)}
 						aria-label="OBA API key for {row.region.name}"
-						placeholder="unchanged"
+						placeholder={row.obaAPIKey === ''
+							? 'will be cleared on save'
+							: 'unchanged'}
 					/>
 					<button type="button" onclick={() => (row.obaAPIKey = '')}>
 						Clear key

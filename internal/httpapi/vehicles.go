@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+
+	"github.com/OneBusAway/sidecar/internal/obaapi"
 )
 
 // vehiclesHandler serves the fuzzy vehicle-id search.
@@ -25,8 +27,19 @@ func (h *vehiclesHandler) search(w http.ResponseWriter, r *http.Request) {
 		// 502, not an empty 200: an empty list is indistinguishable from "no
 		// such vehicle", so a rider searching for a bus that exists would be
 		// told, confidently, that it does not.
-		level := slogLevelForUpstreamErr(err)
-		h.deps.Logger.Log(ctx, level, "httpapi: vehicle search", "region_id", region.ID, "err", err)
+		//
+		// ErrNotConfigured gets its own message and stays at Warn, exactly as
+		// weather.ErrNoProvider does in weather.go: it fires on every request
+		// to a deployment with no key for this region, and the boot-time
+		// warning (cmd/sidecar) already told the operator once. Logging it at
+		// Error would emit one page-worthy line per keystroke.
+		switch {
+		case errors.Is(err, obaapi.ErrNotConfigured):
+			h.deps.Logger.Warn("httpapi: vehicle search not configured", "region_id", region.ID)
+		default:
+			level := slogLevelForUpstreamErr(err)
+			h.deps.Logger.Log(ctx, level, "httpapi: vehicle search", "region_id", region.ID, "err", err)
+		}
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}

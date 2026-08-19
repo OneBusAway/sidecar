@@ -41,8 +41,13 @@ func (h *weatherHandler) forecast(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
+	// Warn, not Error, for the same reason ErrNoProvider below is: a region
+	// the directory supplies no usable bounds for has no centroid on every
+	// single request, so logging this at Error would emit one page-worthy
+	// line per rider request, forever, for a condition no operator action on
+	// this server can clear.
 	if region.Centroid == nil {
-		h.deps.Logger.Error("httpapi: weather unavailable, region has no centroid", "region_id", region.ID)
+		h.deps.Logger.Warn("httpapi: weather unavailable, region has no centroid", "region_id", region.ID)
 		h.writeUnavailable(w)
 		return
 	}

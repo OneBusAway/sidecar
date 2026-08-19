@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,14 +18,17 @@ import (
 	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
+// calls is atomic because the fetch it counts runs on cache.Get's detached
+// goroutine, not on the goroutine serving the request -- the same reason
+// vehicles_test.go's fakeOBA counts atomically.
 type fakeProvider struct {
 	snap  weather.Snapshot
 	err   error
-	calls int
+	calls atomic.Int64
 }
 
 func (f *fakeProvider) Fetch(context.Context, regions.LatLon) (weather.Snapshot, error) {
-	f.calls++
+	f.calls.Add(1)
 	if f.err != nil {
 		return weather.Snapshot{}, f.err
 	}
@@ -101,8 +105,8 @@ func TestWeatherNilCentroidIs403(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
 	}
-	if p.calls != 0 {
-		t.Errorf("made %d provider calls, want 0", p.calls)
+	if got := p.calls.Load(); got != 0 {
+		t.Errorf("made %d provider calls, want 0", got)
 	}
 	// writeUnavailable's contract: a client that decodes the body before
 	// checking status must see valid JSON, not an empty response it fails to
@@ -283,8 +287,8 @@ func TestWeatherRetrievedAtIsStableAcrossCacheHits(t *testing.T) {
 	if first != second {
 		t.Errorf("retrieved_at changed across a cache hit: %q then %q", first, second)
 	}
-	if p.calls != 1 {
-		t.Errorf("made %d provider calls, want 1", p.calls)
+	if got := p.calls.Load(); got != 1 {
+		t.Errorf("made %d provider calls, want 1", got)
 	}
 }
 
@@ -311,8 +315,8 @@ func TestWeatherSharedCentroidSharesOneUpstreamCall(t *testing.T) {
 		}
 	}
 
-	if p.calls != 1 {
-		t.Errorf("made %d provider calls, want 1 (regions share a centroid)", p.calls)
+	if got := p.calls.Load(); got != 1 {
+		t.Errorf("made %d provider calls, want 1 (regions share a centroid)", got)
 	}
 }
 

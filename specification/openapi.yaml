@@ -283,6 +283,11 @@ paths:
                   $ref: '#/components/schemas/VehicleMatch'
         '404':
           $ref: '#/components/responses/RegionNotFound'
+        '502':
+          description: |
+            The region's OBA REST API server could not be reached, or no API
+            key is configured for it. Deliberately not an empty `200`: an
+            empty array is indistinguishable from "no such vehicle".
 
   /api/v1/regions/{regionId}/alarms:
     post:

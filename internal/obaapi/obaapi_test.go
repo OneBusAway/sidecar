@@ -385,3 +385,32 @@ func TestNewAppliesDefaultsWithoutPanicking(t *testing.T) {
 		t.Errorf("Fleet = %+v, want just 1_1", got)
 	}
 }
+
+// TestFleetWarnsWhenEveryAgencyDeclines pins the observability of the case
+// where every agency answers 4xx: the fleet is empty and stays cached, so an
+// operator's only signal that a region has gone dark is this log line. The
+// status code is unchanged (an empty fleet is a legitimate 200), which is why
+// the log has to carry the weight.
+func TestFleetWarnsWhenEveryAgencyDeclines(t *testing.T) {
+	srv := newOBAServer(t,
+		[]struct{ ID, Name string }{{"1", "Metro"}, {"2", "Other"}},
+		map[string][]string{},
+	)
+	srv.vehicleStatus["1"] = http.StatusNotFound
+	srv.vehicleStatus["2"] = http.StatusNotFound
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	fleet, err := New("", srv.Client(), logger).
+		Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
+	if err != nil {
+		t.Fatalf("Fleet: %v", err)
+	}
+	if len(fleet) != 0 {
+		t.Fatalf("fleet = %+v, want empty", fleet)
+	}
+	if !strings.Contains(logs.String(), "every agency declined") {
+		t.Errorf("no all-declined warning logged; operator would have no signal:\n%s", logs.String())
+	}
+}

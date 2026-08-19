@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	oba "github.com/OneBusAway/go-sdk"
@@ -110,6 +111,9 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	// position, not appended as they arrive: parallel completion order is not
 	// deterministic and the response must be.
 	perAgency := make([][]Vehicle, len(agencies))
+	// Counted so an all-agencies-tolerated fetch is observable; see the
+	// warning after g.Wait below.
+	var tolerated atomic.Int64
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(agencyConcurrency)
@@ -125,6 +129,7 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 				// caching a fleet with an agency silently missing tells every
 				// rider on its routes that their bus does not exist.
 				if isClientError(err) {
+					tolerated.Add(1)
 					c.logger.Warn("obaapi: agency has no vehicle feed",
 						"region_id", region.ID, "agency_id", agency.ID, "status", statusOf(err))
 					return nil
@@ -146,6 +151,19 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	// Every agency answered 4xx, so the fleet is empty and vehicle search will
+	// return "no such vehicle" for the next 30 minutes (the fleet cache's TTL).
+	// That is the honest answer for a region with no realtime API at all --
+	// MTA New York advertises supportsObaRealtimeApis: false in the live
+	// regions directory -- but it is indistinguishable here from a key that is
+	// valid for the discovery API and not the realtime one, where it hides
+	// every bus in the region. The 4xx alone cannot tell those apart, so this
+	// logs loudly rather than guessing; see the follow-up on the pull request.
+	if len(agencies) > 0 && int(tolerated.Load()) == len(agencies) {
+		c.logger.Warn("obaapi: every agency declined a vehicle feed; fleet is empty",
+			"region_id", region.ID, "agencies", len(agencies))
 	}
 
 	total := 0

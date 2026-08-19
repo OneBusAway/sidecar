@@ -58,12 +58,10 @@ type Service struct {
 // NewService wires a Service. A nil provider means no key was configured, and
 // Snapshot then reports ErrNoProvider without any network call.
 //
-// logger is accepted, not stored: unlike internal/vehicles' Service (which
-// logs a truncation warning of its own), every condition Snapshot can return
-// here is fully described by its returned error, so every caller so far logs
-// it themselves rather than needing Service to. The parameter stays so the
-// constructor's shape matches vehicles.NewService and can start logging
-// without a signature change if that stops being true.
+// No logger is taken, unlike vehicles.NewService: that Service logs a
+// truncation warning of its own, whereas every condition Snapshot can return
+// here is fully described by its returned error, so every caller logs it
+// themselves.
 func NewService(provider Provider, c *cache.Cache[Snapshot]) *Service {
 	return &Service{provider: provider, cache: c}
 }
