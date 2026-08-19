@@ -28,6 +28,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
+	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
 const (
@@ -58,6 +59,14 @@ const (
 	queryTTL     = 5 * time.Minute
 	queryEntries = 4096
 	queryBudget  = 13 * time.Second
+
+	// Weather cache sizing: the TTL comes from the spec (30 minutes), the
+	// budget sits under the server's 15s WriteTimeout, and entries is sized
+	// per coordinate rather than per region since the cache key is the
+	// rounded centroid.
+	weatherTTL     = 30 * time.Minute
+	weatherEntries = 256
+	weatherBudget  = 5 * time.Second
 )
 
 func main() {
@@ -87,6 +96,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 	refresh := fs.Duration("refresh", defaultRefresh, "interval between regions directory refreshes")
 	obaAPIKey := fs.String("oba-api-key", envOrDefault("SIDECAR_OBA_API_KEY", ""),
 		"default OneBusAway REST API key, used for regions with no key of their own")
+	pirateKey := fs.String("pirate-weather-key", envOrDefault("SIDECAR_PIRATE_WEATHER_KEY", ""),
+		"Pirate Weather API key; without it the weather endpoint returns 403")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -138,7 +149,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
-		Deps: buildDeps(store, logger, *obaAPIKey),
+		Deps: buildDeps(store, logger, *obaAPIKey, *pirateKey),
 	})
 
 	logger.Info("sidecar: listening", "addr", *addr)
@@ -152,7 +163,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 // not in httpapi, because cmd/ is the one place in this repo allowed to
 // touch the wall clock directly (design spec §2.3); everywhere else gets it
 // injected.
-func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey string) httpapi.Deps {
+func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey string) httpapi.Deps {
 	if obaAPIKey == "" {
 		logger.Warn("no --oba-api-key/SIDECAR_OBA_API_KEY set; " +
 			"vehicle search returns 502 for regions with no key of their own")
@@ -165,6 +176,18 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey string) httpa
 		logger,
 	)
 
+	// A nil provider is the "not configured" signal: weather.Service turns
+	// it into ErrNoProvider, and the handler turns that into a 403, without
+	// ever attempting a network call.
+	var provider weather.Provider
+	if pirateKey == "" {
+		logger.Warn("no --pirate-weather-key/SIDECAR_PIRATE_WEATHER_KEY set; the weather endpoint returns 403")
+	} else {
+		provider = weather.NewPirateWeather(pirateKey, http.DefaultClient, time.Now)
+	}
+	weatherSvc := weather.NewService(provider,
+		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now), logger)
+
 	return httpapi.Deps{
 		Alerts:    store.Alerts(),
 		Regions:   store.Regions(),
@@ -174,6 +197,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey string) httpa
 		AdminUI:   adminui.FS(),
 		FailDelay: adminFailDelay,
 		Vehicles:  vehicleSvc,
+		Weather:   weatherSvc,
 	}
 }
 

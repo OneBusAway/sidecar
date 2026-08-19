@@ -118,7 +118,7 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
 
 	if deps.FailDelay != 500*time.Millisecond {
 		t.Errorf("Deps.FailDelay = %v, want 500ms", deps.FailDelay)
@@ -141,7 +141,7 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
 
 	if deps.Auth == nil {
 		t.Error("Deps.Auth = nil, want store.Auth()")
@@ -172,7 +172,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 	t.Run("Vehicles is always wired", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "")
 		if deps.Vehicles == nil {
 			t.Fatal("Deps.Vehicles = nil, want a *vehicles.Service")
 		}
@@ -182,7 +182,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "", "")
 		if !strings.Contains(buf.String(), "oba-api-key") {
 			t.Errorf("log output = %q, want a warning mentioning oba-api-key", buf.String())
 		}
@@ -192,9 +192,51 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key")
+		// A real pirate key too, so the weather warning this task adds can't
+		// contaminate an assertion scoped to the OBA-key warning.
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key", "a-real-pirate-key")
 		if buf.Len() != 0 {
 			t.Errorf("log output = %q, want nothing logged when a key is configured", buf.String())
+		}
+	})
+}
+
+// TestBuildDeps_WiresWeather covers the fields Task 7 adds. Deps.Weather must
+// always be set, even with an empty Pirate Weather key -- weather.Service
+// turns a nil provider into ErrNoProvider itself, so the handler still needs
+// wiring to answer 403 rather than never being registered at all -- and an
+// empty key must be flagged at startup the same way a missing OBA key is,
+// since a silently-403 weather endpoint is far harder to diagnose in
+// production than a boot-time log line.
+func TestBuildDeps_WiresWeather(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Weather is always wired", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "some-pirate-key")
+		if deps.Weather == nil {
+			t.Fatal("Deps.Weather = nil, want a *weather.Service")
+		}
+	})
+
+	t.Run("empty key logs a warning", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		var buf bytes.Buffer
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "")
+		if !strings.Contains(buf.String(), "pirate-weather-key") {
+			t.Errorf("log output = %q, want a warning mentioning pirate-weather-key", buf.String())
+		}
+	})
+
+	t.Run("non-empty key logs no warning", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		var buf bytes.Buffer
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "a-real-pirate-key")
+		if strings.Contains(buf.String(), "pirate-weather-key") {
+			t.Errorf("log output = %q, want no pirate-weather-key warning when a key is configured", buf.String())
 		}
 	})
 }

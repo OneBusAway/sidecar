@@ -19,6 +19,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
+	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
 // Deps carries everything the router needs from the outside world. Now and
@@ -39,6 +40,10 @@ type Deps struct {
 	// registered, which is how a feed-only deployment (or a feed-only test)
 	// avoids having to supply one.
 	Vehicles *vehicles.Service
+
+	// Weather backs the forecast endpoint. Nil means the route is not
+	// registered.
+	Weather *weather.Service
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -107,6 +112,11 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Vehicles != nil {
 		vh := &vehiclesHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
+	}
+
+	if deps.Weather != nil {
+		wh := &weatherHandler{deps: deps}
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
 	}
 
 	// The admin SPA is registered independently of the admin API below, and

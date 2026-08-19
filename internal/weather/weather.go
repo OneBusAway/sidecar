@@ -6,8 +6,12 @@ package weather
 
 import (
 	"context"
+	"errors"
+	"log/slog"
+	"strconv"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
@@ -42,4 +46,39 @@ type Snapshot struct {
 // Provider fetches current conditions for a coordinate.
 type Provider interface {
 	Fetch(ctx context.Context, at regions.LatLon) (Snapshot, error)
+}
+
+// Service caches provider snapshots by coordinate. Two regions sharing a
+// centroid therefore share one upstream call, and a renamed region needs no
+// cache invalidation because the cached value holds no region identity.
+type Service struct {
+	provider Provider
+	cache    *cache.Cache[Snapshot]
+	logger   *slog.Logger
+}
+
+// NewService wires a Service. A nil provider means no key was configured, and
+// Snapshot then reports ErrNoProvider without any network call.
+func NewService(provider Provider, c *cache.Cache[Snapshot], logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{provider: provider, cache: c, logger: logger}
+}
+
+// ErrNoProvider means the process has no weather provider key configured.
+var ErrNoProvider = errors.New("weather: no provider configured")
+
+// Snapshot returns cached conditions for a coordinate, fetching on a miss.
+func (s *Service) Snapshot(ctx context.Context, at regions.LatLon) (Snapshot, error) {
+	if s.provider == nil {
+		return Snapshot{}, ErrNoProvider
+	}
+	// Four decimals is roughly 11 metres -- far finer than any weather
+	// gradient, and enough that two regions with the same centroid share a
+	// cache entry.
+	key := strconv.FormatFloat(at.Lat, 'f', 4, 64) + "," + strconv.FormatFloat(at.Lon, 'f', 4, 64)
+	return s.cache.Get(ctx, key, func(ctx context.Context) (Snapshot, error) {
+		return s.provider.Fetch(ctx, at)
+	})
 }
