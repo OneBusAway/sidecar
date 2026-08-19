@@ -273,7 +273,7 @@ func TestFetchKeepsRegionWithUnusableBounds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := NewClient(srv.URL, nil, Options{}).Fetch(context.Background())
+	got, err := regions.NewClient(srv.URL, testOptions()).Fetch(context.Background())
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestFetchKeepsRegionWithUnusableBounds(t *testing.T) {
 }
 ```
 
-Match the existing file's `NewClient`/`Options` call style — read the top of `directory_test.go` first and copy the exact constructor invocation the other tests use.
+Two things about this file, both verified: it is `package regions_test` (external), so the test may only use exported identifiers — `regions.Region`, `regions.LatLon`, `regions.NewClient` — and never `directoryBound` or `computeCentroid`. And the constructor is `regions.NewClient(url string, opts regions.ClientOptions)`, two arguments; `testOptions()` is the helper the other tests in the file already use. `centroid_test.go` from Step 1 is the opposite: `package regions` (internal), because `computeCentroid` and `directoryBound` are unexported. Both packages coexisting in one directory is normal Go and is already the case here.
 
 - [ ] **Step 7: Run it to verify it fails**
 
@@ -3719,7 +3719,7 @@ describe('describeKeyStatus', () => {
 });
 ```
 
-Add `formatCentroid`, `describeKeyStatus`, and `KeyStatus` to the file's existing import from `./regions`.
+Add `formatCentroid` and `describeKeyStatus` to the file's existing import from `./regions`, and import the `KeyStatus` type from `./types` — that is where Step 3 defines it. Do not re-export it from `regions.ts`; one definition, imported where needed.
 
 - [ ] **Step 2: Run to verify they fail**
 
