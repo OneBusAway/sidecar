@@ -109,12 +109,12 @@ func TestSingleflightCollapsesConcurrentGets(t *testing.T) {
 
 	const n = 20
 	var wg sync.WaitGroup
-	// launched confirms every goroutine has actually been scheduled before
-	// the shared fetch is allowed to complete. Without this, waiting on
-	// "entered" alone only proves ONE goroutine reached Get: a straggler
-	// among the other 19 can then call Get after the in-flight singleflight
-	// call has already finished, triggering a second upstream fetch and
-	// making this test flaky rather than deterministic.
+	// launched makes the 20 goroutines race into Get concurrently rather
+	// than however the scheduler happens to interleave a tight spawn loop.
+	// Correctness here no longer depends on precise timing -- Get re-checks
+	// the cache after losing the singleflight registration race, so even a
+	// goroutine that reaches Get after the shared fetch has already
+	// completed and stored its value costs a cache hit, not a second fetch.
 	var launched sync.WaitGroup
 	launched.Add(n)
 	results := make([]int, n)
@@ -134,11 +134,6 @@ func TestSingleflightCollapsesConcurrentGets(t *testing.T) {
 
 	launched.Wait()
 	<-entered
-	// Even after launched.Wait(), a goroutine may have signaled "about to
-	// call Get" but not yet reached the singleflight registration inside it.
-	// x/sync's own singleflight tests use the same wg-then-sleep pattern for
-	// exactly this reason: there is no external hook for "call registered".
-	time.Sleep(10 * time.Millisecond)
 	close(release)
 	wg.Wait()
 
@@ -261,5 +256,108 @@ func TestEvictionPrefersExpiredThenOldest(t *testing.T) {
 	}
 	if refetched.Load() != 1 {
 		t.Error(`"a" was not evicted; eviction must drop the oldest entry`)
+	}
+}
+
+// evictLocked's "prefers expired" first loop is unreachable from Get/store
+// alone: under a single shared ttl and a monotonic clock, whichever entry
+// was inserted first also always expires first (or ties), so "oldest by
+// position" and "earliest to expire" are always the same entry, and the
+// plain oldest-first fallback loop alone reaches an identical result. (An
+// earlier version of this test used a black-box Get-only scenario -- insert
+// an entry, expire it, insert others, assert the expired one is dropped --
+// and it kept passing with the "prefers expired" loop deleted entirely,
+// because oldest-first alone evicted the same victim.) So this reaches into
+// the unexported list/map to build a state Get() can never produce: an
+// expired entry sitting behind ("newer" by position than) a still-live one.
+// Only that isolates the policy evictLocked is actually supposed to apply.
+func TestEvictionPrefersExpiredOverPosition(t *testing.T) {
+	clk := newClock()
+	c := New[int](time.Minute, 2, time.Second, clk.Now)
+
+	c.mu.Lock()
+	liveEl := c.order.PushBack(&entry[int]{key: "old-live", value: 1, expires: clk.Now().Add(time.Hour)})
+	c.items["old-live"] = liveEl
+	expiredEl := c.order.PushBack(&entry[int]{key: "new-expired", value: 2, expires: clk.Now().Add(-time.Second)})
+	c.items["new-expired"] = expiredEl
+	c.mu.Unlock()
+
+	// Inserting a third entry at capacity (2) must evict "new-expired" --
+	// which is expired despite sitting later in list order -- and keep
+	// "old-live", even though "old-live" occupies the position a naive
+	// oldest-first eviction would pick.
+	if _, err := c.Get(context.Background(), "c", func(context.Context) (int, error) {
+		return 3, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := c.lookup("old-live"); !ok {
+		t.Error(`"old-live" was evicted; eviction must prefer an expired entry over list position`)
+	}
+	if _, ok := c.items["new-expired"]; ok {
+		t.Error(`"new-expired" was not evicted despite being past its expiry`)
+	}
+}
+
+// store's duplicate-key removal (delete the existing element before
+// re-inserting) is unreachable through Get: a fetch is only ever run for a
+// key that just missed lookup, so store never legitimately sees a key that
+// is already live. Exercise store directly -- it's unexported, but this
+// test is in-package by design for exactly this reason. Without the guard,
+// the first "a" element becomes an orphan in order: it stays out of items
+// (overwritten by the second insert) but is still walked by eviction, and
+// when eviction finally removes it, removeLocked deletes items["a"] -- the
+// *live* second element -- by key, corrupting the cache.
+func TestStoreSameKeyTwiceDoesNotOrphanEntry(t *testing.T) {
+	clk := newClock()
+	c := New[int](time.Minute, 8, time.Second, clk.Now)
+
+	c.store("a", 1)
+	c.store("a", 2)
+
+	if c.Len() != 1 {
+		t.Fatalf("Len = %d, want 1 (storing the same key twice must not grow the entry list)", c.Len())
+	}
+	got, ok := c.lookup("a")
+	if !ok || got != 2 {
+		t.Fatalf("lookup(a) = (%d, %v), want (2, true)", got, ok)
+	}
+}
+
+// New's maxEntries<1 clamp has no external effect through Get/Len: for this
+// evictLocked, any maxEntries <= 1 makes both eviction loops evict down to
+// zero entries before every insert, so unclamped 0 (or negative) and
+// clamped 1 are behaviorally identical to a black-box test -- caps a
+// single-entry cache to size 1 either way. This checks the unexported field
+// directly, which is the only way to observe the clamp at all.
+func TestNewClampsMaxEntriesToAtLeastOne(t *testing.T) {
+	clk := newClock()
+	c := New[int](time.Minute, 0, time.Second, clk.Now)
+	if c.maxEntries != 1 {
+		t.Errorf("maxEntries = %d, want 1 (New must clamp values below 1)", c.maxEntries)
+	}
+}
+
+// !now.Before(expires) treats the exact expiry instant as expired. The
+// alternative, now.After(expires), would treat it as still valid for one
+// more instant. TestMissAfterTTL never lands on this boundary (it advances
+// ttl+1ns), so this is untested without a case that advances by exactly
+// ttl.
+func TestExpiryBoundaryIsInclusive(t *testing.T) {
+	clk := newClock()
+	c := New[int](time.Minute, 8, time.Second, clk.Now)
+	var calls atomic.Int64
+	fetch := func(context.Context) (int, error) { calls.Add(1); return 1, nil }
+
+	if _, err := c.Get(context.Background(), "k", fetch); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	clk.Advance(time.Minute) // lands exactly on expires, not past it
+	if _, err := c.Get(context.Background(), "k", fetch); err != nil {
+		t.Fatalf("Get at exact expiry: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("fetch called %d times, want 2 (an entry is expired at its exact expiry instant)", calls.Load())
 	}
 }

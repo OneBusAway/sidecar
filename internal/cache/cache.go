@@ -11,11 +11,18 @@ package cache
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
 )
+
+// errUnexpectedType is returned if a value pulled out of singleflight or the
+// entry list didn't have the type Get was instantiated with. A *Cache[V]
+// only ever stores V, so this should be unreachable -- but handing back a
+// silent zero value on a broken invariant would be worse than an error.
+var errUnexpectedType = errors.New("cache: value has unexpected type")
 
 // Cache memoizes one value per key for a fixed TTL. It is safe for concurrent
 // use.
@@ -72,13 +79,28 @@ func New[V any](ttl time.Duration, maxEntries int, budget time.Duration, now fun
 // (context.WithoutCancel) carrying a fresh budget measured from fetch start,
 // while Get itself selects on the caller's ctx.Done(). That also forces
 // DoChan rather than Do -- Do blocks uninterruptibly, so a cancelled caller
-// could not stop waiting at all.
+// could not stop waiting at all. WithoutCancel also carries forward whatever
+// request-scoped values live on the context of whichever caller happened to
+// win the race to start the shared fetch; that's deliberate -- there is no
+// single "right" caller to attribute a shared fetch to, and the alternative
+// (no values at all) is no more correct.
 func (c *Cache[V]) Get(ctx context.Context, key string, fetch func(context.Context) (V, error)) (V, error) {
 	if v, ok := c.lookup(key); ok {
 		return v, nil
 	}
 
 	ch := c.group.DoChan(key, func() (any, error) {
+		// A caller can lose the race between missing in the lookup above and
+		// registering here: by the time it reaches DoChan, a different
+		// in-flight call for this key may already have finished and been
+		// stored. Re-checking here -- rather than papering over the gap with
+		// a sleep in the caller -- turns "usually one upstream call" into
+		// "always one," because a late arrival now costs a mutex lock
+		// instead of a second fetch.
+		if v, ok := c.lookup(key); ok {
+			return v, nil
+		}
+
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.budget)
 		defer cancel()
 
@@ -100,7 +122,7 @@ func (c *Cache[V]) Get(ctx context.Context, key string, fetch func(context.Conte
 		}
 		v, ok := res.Val.(V)
 		if !ok {
-			return zero, nil
+			return zero, errUnexpectedType
 		}
 		return v, nil
 	}
@@ -125,6 +147,9 @@ func (c *Cache[V]) lookup(key string) (V, bool) {
 	}
 	e, ok := el.Value.(*entry[V])
 	if !ok {
+		// A broken invariant, not a miss: without removing it, every future
+		// lookup would re-hit this same non-*entry[V] element forever.
+		c.removeLocked(el)
 		return zero, false
 	}
 	if !c.now().Before(e.expires) {
