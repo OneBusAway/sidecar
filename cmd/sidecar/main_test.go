@@ -198,3 +198,19 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		}
 	})
 }
+
+// TestCacheBudgetsNestCorrectly pins the ordering the comment above the
+// budget constants asserts but nothing previously checked: a cold query
+// fetch nests a fleet fetch inside it (vehicles.Service.Search calls
+// s.fleet.Get from within s.result.Get's fetch callback), so the fleet
+// fetch must be able to finish inside the query fetch's own budget. If
+// fleetBudget ever meets or exceeds queryBudget, the outer fetch can give up
+// while the inner one -- still within its own budget -- is still running.
+func TestCacheBudgetsNestCorrectly(t *testing.T) {
+	t.Parallel()
+
+	if fleetBudget >= queryBudget {
+		t.Errorf("fleetBudget (%v) must be < queryBudget (%v): a cold query fetch nests a fleet fetch inside it",
+			fleetBudget, queryBudget)
+	}
+}

@@ -65,14 +65,14 @@ func (h *alertsHandler) feedText(w http.ResponseWriter, r *http.Request) {
 func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *gtfs.FeedMessage, regionID int64, ok bool) {
 	id, parsed := ParseRegionSegment(r.PathValue("regionId"))
 	if !parsed {
-		h.writeNotFound(w)
+		writeRegionNotFound(w, h.deps.Logger)
 		return nil, 0, false
 	}
 
 	ctx := r.Context()
 	if _, err := h.deps.Regions.Get(ctx, id); err != nil {
 		if errors.Is(err, regions.ErrNotFound) {
-			h.writeNotFound(w)
+			writeRegionNotFound(w, h.deps.Logger)
 			return nil, 0, false
 		}
 		h.serverError(w, id, "get region", err)
@@ -101,15 +101,6 @@ func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *
 func (h *alertsHandler) serverError(w http.ResponseWriter, regionID int64, op string, err error) {
 	h.deps.Logger.Error("httpapi: "+op, "region_id", regionID, "err", err)
 	w.WriteHeader(http.StatusInternalServerError)
-}
-
-// writeNotFound writes the exact 404 contract for an unrecognised region.
-func (h *alertsHandler) writeNotFound(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotFound)
-	if _, err := w.Write([]byte(notFoundBody)); err != nil {
-		h.deps.Logger.Warn("httpapi: write 404 body", "err", err)
-	}
 }
 
 // writeBody writes a successful response body after the status line and

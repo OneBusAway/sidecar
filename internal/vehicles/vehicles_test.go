@@ -1,6 +1,7 @@
 package vehicles
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -87,13 +88,56 @@ func TestFilter(t *testing.T) {
 	})
 
 	t.Run("truncates at the cap preserving fleet order", func(t *testing.T) {
+		// Ids are distinct (not all "1_999") so that returning the wrong
+		// slice window -- e.g. the last MaxResults matches instead of the
+		// first -- is distinguishable from a correct result; a fleet of
+		// identical ids would pass either way.
 		big := make([]obaapi.Vehicle, 0, MaxResults+50)
 		for i := 0; i < MaxResults+50; i++ {
-			big = append(big, obaapi.Vehicle{AgencyID: "1", AgencyName: "Metro", VehicleID: "1_999"})
+			big = append(big, obaapi.Vehicle{
+				AgencyID: "1", AgencyName: "Metro",
+				VehicleID: fmt.Sprintf("1_999_%03d", i),
+			})
 		}
 		got := Filter(big, "999")
 		if len(got) != MaxResults {
 			t.Fatalf("got %d matches, want the cap of %d", len(got), MaxResults)
+		}
+		if want := fmt.Sprintf("1_999_%03d", 0); got[0].VehicleID != want {
+			t.Errorf("got[0].VehicleID = %q, want %q (fleet order not preserved)", got[0].VehicleID, want)
+		}
+		if want := fmt.Sprintf("1_999_%03d", MaxResults-1); got[MaxResults-1].VehicleID != want {
+			t.Errorf("got[%d].VehicleID = %q, want %q (took the wrong window of matches)",
+				MaxResults-1, got[MaxResults-1].VehicleID, want)
+		}
+	})
+}
+
+// TestFilterTruncationFlag pins filter's second return value: it must be
+// true only when a match existed beyond MaxResults, not merely when the
+// result happens to be exactly MaxResults long. Search uses this to decide
+// whether to log a truncation warning; logging one for an exactly-at-cap
+// result that was never truncated would be a permanent false alarm.
+func TestFilterTruncationFlag(t *testing.T) {
+	build := func(n int) []obaapi.Vehicle {
+		fleet := make([]obaapi.Vehicle, n)
+		for i := range fleet {
+			fleet[i] = obaapi.Vehicle{AgencyID: "1", AgencyName: "Metro", VehicleID: fmt.Sprintf("1_999_%03d", i)}
+		}
+		return fleet
+	}
+
+	t.Run("exactly MaxResults matches is not truncated", func(t *testing.T) {
+		_, truncated := filter(build(MaxResults), "999")
+		if truncated {
+			t.Error("truncated = true for an exactly-at-cap result, want false")
+		}
+	})
+
+	t.Run("one more than MaxResults is truncated", func(t *testing.T) {
+		_, truncated := filter(build(MaxResults+1), "999")
+		if !truncated {
+			t.Error("truncated = false for a result exceeding the cap, want true")
 		}
 	})
 }

@@ -25,6 +25,19 @@ func writeJSONError(w http.ResponseWriter, logger *slog.Logger, status int, msg 
 	writeJSON(w, logger, status, map[string]string{"error": msg})
 }
 
+// writeRegionNotFound writes the exact 404 contract for an unrecognised
+// region (design spec §1.2, §2.5). Every feed handler that takes a
+// {regionId} path segment shares this one function rather than each
+// defining its own copy: two independent copies is how one of them quietly
+// drops the Content-Type header and nothing notices.
+func writeRegionNotFound(w http.ResponseWriter, logger *slog.Logger) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	if _, err := w.Write([]byte(notFoundBody)); err != nil {
+		logger.Warn("httpapi: write 404 body", "err", err)
+	}
+}
+
 // serverErrorJSON logs op with its underlying error and writes a generic 500.
 // Store errors are for the operator's log, never the client's screen (design
 // spec §5).

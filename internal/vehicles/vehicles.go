@@ -64,17 +64,27 @@ func Normalize(raw string) (string, bool) {
 // case-insensitivity would make this server disagree with every shipped
 // client on any fleet with uppercase ids.
 func Filter(fleet []obaapi.Vehicle, q string) []Match {
+	matches, _ := filter(fleet, q)
+	return matches
+}
+
+// filter is Filter's implementation. It also reports whether the result was
+// actually truncated -- i.e. at least one further match existed beyond
+// MaxResults -- so Search can warn only when truncation really happened. A
+// fleet with exactly MaxResults matches and no more is not truncated, and
+// warning about it on every such search would be a permanent false alarm.
+func filter(fleet []obaapi.Vehicle, q string) ([]Match, bool) {
 	out := make([]Match, 0, 16)
 	for _, v := range fleet {
 		if !strings.Contains(v.VehicleID, q) {
 			continue
 		}
-		out = append(out, Match{ID: v.AgencyID, Name: v.AgencyName, VehicleID: v.VehicleID})
 		if len(out) == MaxResults {
-			break
+			return out, true
 		}
+		out = append(out, Match{ID: v.AgencyID, Name: v.AgencyName, VehicleID: v.VehicleID})
 	}
-	return out
+	return out, false
 }
 
 // Service answers searches, caching both the region's fleet and each query's
@@ -115,8 +125,8 @@ func (s *Service) Search(ctx context.Context, region regions.Region, rawQuery st
 		if err != nil {
 			return nil, fmt.Errorf("vehicles: fleet for region %d: %w", region.ID, err)
 		}
-		matches := Filter(fleet, q)
-		if len(matches) == MaxResults {
+		matches, truncated := filter(fleet, q)
+		if truncated {
 			s.logger.Warn("vehicles: results truncated",
 				"region_id", region.ID, "cap", MaxResults)
 		}

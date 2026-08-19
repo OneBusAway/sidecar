@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,14 +21,17 @@ import (
 )
 
 // fakeOBA is an obaapi.Client that returns a canned fleet or a canned error.
+// calls is atomic because the fetch it counts runs on cache.Get's detached
+// context, in its own goroutine, independent of whichever goroutine is
+// reading calls from a test assertion.
 type fakeOBA struct {
 	fleet []obaapi.Vehicle
 	err   error
-	calls int
+	calls atomic.Int64
 }
 
 func (f *fakeOBA) Fleet(context.Context, regions.Region) ([]obaapi.Vehicle, error) {
-	f.calls++
+	f.calls.Add(1)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -42,9 +49,12 @@ func newTestRegions(t *testing.T, regs ...regions.Region) regions.Repository {
 		t.Fatalf("seed regions: %v", err)
 	}
 	// UpsertFromDirectory deliberately ignores the locally-managed columns, so
-	// any region needing an API key gets it through SetLocalFields.
+	// any region needing one of them gets it through SetLocalFields. Gated on
+	// all three fields, not just OBAAPIKey: a caller seeding only Timezone or
+	// DefaultAgencyID (Task 7's weather tests, in particular) must not have
+	// it silently dropped.
 	for _, r := range regs {
-		if r.OBAAPIKey == "" {
+		if r.DefaultAgencyID == "" && r.Timezone == "" && r.OBAAPIKey == "" {
 			continue
 		}
 		if err := store.Regions().SetLocalFields(context.Background(), r.ID, regions.LocalFields{
@@ -85,6 +95,13 @@ func TestVehiclesUnknownRegionIs404(t *testing.T) {
 		if got := rec.Body.String(); got != notFoundBody {
 			t.Errorf("segment %q: body = %q, want %q", seg, got, notFoundBody)
 		}
+		// writeRegionNotFound is shared with the alerts handler; pin the
+		// header here so a future edit to the shared helper (e.g. dropping
+		// this line) fails a test instead of shipping a 404 with no
+		// Content-Type.
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("segment %q: Content-Type = %q, want application/json", seg, got)
+		}
 	}
 }
 
@@ -102,8 +119,8 @@ func TestVehiclesShortQueryReturnsEmptyArrayWithoutUpstream(t *testing.T) {
 	if got := rec.Body.String(); got != "[]\n" && got != "[]" {
 		t.Errorf("body = %q, want an empty JSON array", got)
 	}
-	if oba.calls != 0 {
-		t.Errorf("made %d upstream calls, want 0", oba.calls)
+	if got := oba.calls.Load(); got != 0 {
+		t.Errorf("made %d upstream calls, want 0", got)
 	}
 }
 
@@ -191,5 +208,97 @@ func TestVehiclesUnconfiguredKeyIs502(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", rec.Code)
+	}
+}
+
+// erroringRegions is a regions.Repository whose Get always fails with a
+// non-ErrNotFound error, covering the one branch in vehiclesHandler.search
+// (and alertsHandler.buildFeed) that the ErrNotFound-only fixtures above
+// never reach: a real store failure, which must become a 500 with an empty
+// body, not a 404 and not anything that leaks the underlying error to the
+// rider.
+type erroringRegions struct{ err error }
+
+func (e erroringRegions) Get(context.Context, int64) (regions.Region, error) {
+	return regions.Region{}, e.err
+}
+func (e erroringRegions) List(context.Context) ([]regions.Region, error) { return nil, e.err }
+func (e erroringRegions) UpsertFromDirectory(context.Context, []regions.Region, time.Time) error {
+	return e.err
+}
+func (e erroringRegions) SetLocalFields(context.Context, int64, regions.LocalFields, time.Time) error {
+	return e.err
+}
+
+func TestVehiclesRegionLookupFailureIs500(t *testing.T) {
+	srv := newVehiclesTestServer(t, &fakeOBA{}, erroringRegions{err: errors.New("db exploded")})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/vehicles?query=436", nil))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	// Store errors are for the operator's log, never the rider's screen.
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty", rec.Body.String())
+	}
+}
+
+// TestVehiclesLogsCancellationAtWarnOnly exercises slogLevelForSearchErr
+// through the actual handler and a capturing slog.Handler, rather than
+// calling it directly: the earlier version of this test suite had zero
+// coverage of it at all, so replacing its body with an unconditional
+// "return slog.LevelError" survived every other test in the package.
+func TestVehiclesLogsCancellationAtWarnOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		want    string // level slog.TextHandler prints, e.g. "level=WARN"
+		wantNot string
+	}{
+		{
+			name: "a client disconnecting mid-search (context.Canceled) logs at Warn",
+			err:  context.Canceled, want: "level=WARN", wantNot: "level=ERROR",
+		},
+		{
+			// The detached fetch's own budget elapsing, or obaapi's
+			// per-attempt timeout: the upstream is slow or down, which is
+			// exactly what should page, not get demoted.
+			name: "a fetch-budget timeout (context.DeadlineExceeded) logs at Error",
+			err:  context.DeadlineExceeded, want: "level=ERROR", wantNot: "level=WARN",
+		},
+		{
+			name: "a plain upstream error logs at Error",
+			err:  errors.New("upstream exploded"), want: "level=ERROR", wantNot: "level=WARN",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			regs := newTestRegions(t, regions.Region{ID: 1, Name: "R", OBABaseURL: "https://x/", OBAAPIKey: "k", Active: true})
+			now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+			var buf bytes.Buffer
+			capturingLogger := slog.New(slog.NewTextHandler(&buf, nil))
+
+			svc := vehicles.NewService(&fakeOBA{err: tt.err},
+				cache.New[[]obaapi.Vehicle](30*time.Minute, 8, 12*time.Second, now),
+				cache.New[[]vehicles.Match](5*time.Minute, 64, 13*time.Second, now),
+				discardLogger(),
+			)
+			srv := NewRouter(Deps{Regions: regs, Vehicles: svc, Now: now, Logger: capturingLogger})
+
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/vehicles?query=436", nil))
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", rec.Code)
+			}
+			if got := buf.String(); !strings.Contains(got, tt.want) {
+				t.Errorf("log output = %q, want it to contain %q", got, tt.want)
+			}
+			if got := buf.String(); strings.Contains(got, tt.wantNot) {
+				t.Errorf("log output = %q, want it NOT to contain %q", got, tt.wantNot)
+			}
+		})
 	}
 }
