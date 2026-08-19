@@ -161,6 +161,34 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	}
 }
 
+// TestBuildDeps_WiresOBADefaultKeySet pins the one line in buildDeps nothing
+// else exercises: httpapi's own tests inject OBADefaultKeySet directly on
+// Deps, so a binary that deleted this assignment (or hard-coded it to
+// false/true) would still pass every httpapi test and every other test in
+// this file. This is what lets a region relying on the process-default key
+// report "default" instead of "none" to an operator.
+func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set when a key is configured", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "")
+		if !deps.OBADefaultKeySet {
+			t.Error("Deps.OBADefaultKeySet = false, want true when --oba-api-key is non-empty")
+		}
+	})
+
+	t.Run("unset when no key is configured", func(t *testing.T) {
+		t.Parallel()
+		store := sqlitetest.Open(t)
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
+		if deps.OBADefaultKeySet {
+			t.Error("Deps.OBADefaultKeySet = true, want false when --oba-api-key is empty")
+		}
+	})
+}
+
 // TestBuildDeps_WiresVehicles covers the fields Task 5 adds. Deps.Vehicles
 // must always be set, even with an empty key -- a feed-only region with its
 // own OBAAPIKey still needs to search -- and an empty key must be flagged at

@@ -204,10 +204,12 @@ func regionList(ctx context.Context, stdout io.Writer, repo regions.Repository) 
 			centroid = fmt.Sprintf("%.4f,%.4f", r.Centroid.Lat, r.Centroid.Lon)
 		}
 		// A status word, never the key: `region list` output routinely ends
-		// up pasted into issues and chat.
-		key := "not configured"
+		// up pasted into issues and chat. The CLI only sees this region's own
+		// column, not whether the server process has a default key, so an
+		// empty column must not read as "broken" -- it may still work.
+		key := "none (may inherit server default)"
 		if r.OBAAPIKey != "" {
-			key = "configured"
+			key = "own key"
 		}
 		fmt.Fprintf(stdout, "%d\t%s\tactive=%t\tagency=%s\ttz=%s\tcentroid=%s\toba-key=%s\n",
 			r.ID, r.Name, r.Active, r.DefaultAgencyID, r.Timezone, centroid, key)

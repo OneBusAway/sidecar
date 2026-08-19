@@ -205,7 +205,7 @@ func TestAdminRegions_PatchRejections(t *testing.T) {
 		wantInError []string
 	}{
 		{"no fields", "/api/admin/v1/regions/1", `{}`, http.StatusBadRequest, []string{"default_agency_id", "timezone"}},
-		{"null fields", "/api/admin/v1/regions/1", `{"default_agency_id":null,"timezone":null}`, http.StatusBadRequest, []string{"timezone"}},
+		{"null fields", "/api/admin/v1/regions/1", `{"default_agency_id":null,"timezone":null,"oba_api_key":null}`, http.StatusBadRequest, []string{"timezone"}},
 		{"unknown region", "/api/admin/v1/regions/999", `{"timezone":"UTC"}`, http.StatusNotFound, []string{"region", "999"}},
 		{"non-integer id", "/api/admin/v1/regions/abc", `{"timezone":"UTC"}`, http.StatusBadRequest, []string{"id"}},
 		{"invalid timezone", "/api/admin/v1/regions/1", `{"timezone":"Mars/Olympus_Mons"}`, http.StatusBadRequest, []string{"timezone", "Mars/Olympus_Mons"}},
@@ -377,6 +377,43 @@ func TestAdminRegions_CentroidIsNullWhenUnsynced(t *testing.T) {
 	}
 }
 
+// The PATCH response is rendered through the same toRegionJSON as the list,
+// but nothing exercised that call site directly: TestAdminRegions_KeyStatus
+// only drives GET, so a PATCH handler that forgot to pass
+// h.deps.OBADefaultKeySet through (or hard-coded it) would still pass every
+// other test in this file.
+func TestAdminRegions_PatchResponseReportsKeyStatus(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	ctx := context.Background()
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{
+		{ID: regionPuget, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Active: true},
+	}, testNow); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := store.Regions().SetLocalFields(ctx, regionPuget, regions.LocalFields{
+		DefaultAgencyID: "1", Timezone: "America/Los_Angeles",
+	}, testNow); err != nil {
+		t.Fatalf("set fields: %v", err)
+	}
+	if _, err := store.Auth().CreateUser(ctx, "admin", testHash(), testNow); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	handler := NewRouter(Deps{
+		Alerts: store.Alerts(), Regions: store.Regions(), Auth: store.Auth(),
+		Now: func() time.Time { return testNow }, Logger: discardLogger(),
+		Sleep: func(time.Duration) {}, OBADefaultKeySet: true,
+	})
+	f := &adminFixture{handler: handler, store: store, cookie: adminLogin(t, handler)}
+
+	got := object(t, f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{"default_agency_id":"99"}`), http.StatusOK)
+	if v := str(t, got, "oba_api_key"); v != "default" {
+		t.Errorf("PATCH response oba_api_key = %q, want %q", v, "default")
+	}
+}
+
 // Omission means unchanged. Anything else silently wipes the key on every
 // unrelated edit an operator makes.
 func TestAdminRegions_PatchOmittedKeyLeavesItIntact(t *testing.T) {
@@ -394,6 +431,12 @@ func TestAdminRegions_PatchOmittedKeyLeavesItIntact(t *testing.T) {
 	rec := f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{"default_agency_id":"99"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// The PATCH response is the single most likely surface to carry a fresh
+	// secret into devtools, since it is literally the response to submitting
+	// one -- check the raw bytes, not just the stored value.
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("PATCH response leaks the API key: %s", rec.Body.String())
 	}
 
 	got, err := f.store.Regions().Get(ctx, regionPuget)

@@ -802,7 +802,7 @@ func TestRegionSet_OBAAPIKeyIsNeverPrinted(t *testing.T) {
 	if strings.Contains(stdout, secret) {
 		t.Fatalf("region list printed the key: %q", stdout)
 	}
-	if !strings.Contains(stdout, "oba-key=configured") {
+	if !strings.Contains(stdout, "oba-key=own key") {
 		t.Errorf("region list = %q, want it to report the key as configured", stdout)
 	}
 
@@ -842,7 +842,7 @@ func TestRegionSet_EmptyOBAAPIKeyClears(t *testing.T) {
 	if err != nil {
 		t.Fatalf("region list: %v", err)
 	}
-	if !strings.Contains(stdout, "oba-key=not configured") {
+	if !strings.Contains(stdout, "oba-key=none (may inherit server default)") {
 		t.Errorf("region list = %q, want it to report the key as not configured", stdout)
 	}
 }
@@ -854,12 +854,19 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 
+	// Set agency and timezone together first, away from both their zero
+	// values and the schema default (seedRegion leaves agency "" and
+	// timezone at the schema default "UTC", so a --oba-api-key-only set
+	// afterwards could not tell "preserved" from "reset to zero value" or
+	// "reset to schema default" -- only a prior non-default, non-empty value
+	// on both fields can catch that regression).
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "7", "--timezone", "America/Los_Angeles"); err != nil {
+		t.Fatalf("region set (agency+timezone): %v", err)
+	}
+
 	const secret = "keep-me"
 	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--oba-api-key", secret); err != nil {
-		t.Fatalf("region set: %v", err)
-	}
-	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40"); err != nil {
-		t.Fatalf("region set (agency): %v", err)
+		t.Fatalf("region set (key): %v", err)
 	}
 
 	got, err := store.Regions().Get(context.Background(), 1)
@@ -867,10 +874,13 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	if got.OBAAPIKey != secret {
-		t.Errorf("OBAAPIKey = %q, want %q -- an unrelated edit wiped the key", got.OBAAPIKey, secret)
+		t.Errorf("OBAAPIKey = %q, want %q", got.OBAAPIKey, secret)
 	}
-	if got.DefaultAgencyID != "40" {
-		t.Errorf("DefaultAgencyID = %q, want 40", got.DefaultAgencyID)
+	if got.DefaultAgencyID != "7" {
+		t.Errorf("DefaultAgencyID = %q, want 7 -- an unrelated edit reset it", got.DefaultAgencyID)
+	}
+	if got.Timezone != "America/Los_Angeles" {
+		t.Errorf("Timezone = %q, want America/Los_Angeles -- an unrelated edit reset it", got.Timezone)
 	}
 }
 

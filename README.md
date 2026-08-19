@@ -76,7 +76,7 @@ Full command surface:
 
 ```
 sidecar-admin region  list
-                       set --id N [--agency-id ID] [--timezone TZ]
+                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key KEY]
                        sync
 sidecar-admin alert   create --region N --header TEXT --start RFC3339
                               [--description TEXT] [--url URL] [--end RFC3339]
