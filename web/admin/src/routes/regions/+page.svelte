@@ -1,17 +1,30 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { api, ApiError } from '$lib/api';
-	import { buildRegionPatch } from '$lib/regions';
+	import {
+		buildRegionPatch,
+		describeKeyStatus,
+		formatCentroid,
+	} from '$lib/regions';
 	import type { Region } from '$lib/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
 
-	/** One table row: the region plus its two editable fields and status. */
+	/**
+	 * One table row: the region plus its editable fields and status.
+	 *
+	 * obaAPIKey starts `undefined` -- the server never sends a key back, so
+	 * there is nothing to seed the input with. It stays `undefined` for an
+	 * untouched row, becomes a string on input, and becomes '' when the
+	 * operator clears it. buildRegionPatch relies on that distinction to keep
+	 * an untouched row from wiping the region's key on save.
+	 */
 	interface Row {
 		region: Region;
 		agencyID: string;
 		timezone: string;
+		obaAPIKey: string | undefined;
 		error: string;
 		saved: boolean;
 		busy: boolean;
@@ -22,6 +35,7 @@
 			region,
 			agencyID: region.default_agency_id,
 			timezone: region.timezone,
+			obaAPIKey: undefined,
 			error: '',
 			saved: false,
 			busy: false,
@@ -45,11 +59,14 @@
 			// difference shows up here instead of being papered over.
 			const updated = await api.patch<Region>(
 				`/regions/${row.region.id}`,
-				buildRegionPatch(row.agencyID, row.timezone),
+				buildRegionPatch(row.agencyID, row.timezone, row.obaAPIKey),
 			);
 			row.region = updated;
 			row.agencyID = updated.default_agency_id;
 			row.timezone = updated.timezone;
+			// The server never echoes the key back, so the input stays empty
+			// (and un-sent) again until the operator types into it anew.
+			row.obaAPIKey = undefined;
 			row.saved = true;
 		} catch (err) {
 			// The server owns the tzdata, so an unknown zone comes back as its
@@ -95,6 +112,8 @@
 			<th>Active</th>
 			<th>Default agency id</th>
 			<th>Timezone</th>
+			<th>Centroid</th>
+			<th>OBA API key</th>
 			<th></th>
 		</tr>
 	</thead>
@@ -123,6 +142,20 @@
 						<span class="unset">UTC (default — not configured)</span>
 					{/if}
 				</td>
+				<td>{formatCentroid(row.region)}</td>
+				<td>
+					<input
+						type="password"
+						value={row.obaAPIKey ?? ''}
+						oninput={(e) => (row.obaAPIKey = e.currentTarget.value)}
+						aria-label="OBA API key for {row.region.name}"
+						placeholder="unchanged"
+					/>
+					<button type="button" onclick={() => (row.obaAPIKey = '')}>
+						Clear key
+					</button>
+					<span class="unset">{describeKeyStatus(row.region.oba_api_key)}</span>
+				</td>
 				<td class="rowactions">
 					<button type="button" disabled={row.busy} onclick={() => save(row)}>
 						Save
@@ -132,7 +165,7 @@
 			</tr>
 			{#if row.error}
 				<tr class="errorrow">
-					<td colspan="6"><p class="error" role="alert">{row.error}</p></td>
+					<td colspan="8"><p class="error" role="alert">{row.error}</p></td>
 				</tr>
 			{/if}
 		{/each}

@@ -35,6 +35,9 @@ function region(over: Partial<Region> = {}): Region {
 		active: true,
 		default_agency_id: 'HART',
 		timezone: '',
+		latitude: null,
+		longitude: null,
+		oba_api_key: 'none',
 		...over,
 	};
 }
