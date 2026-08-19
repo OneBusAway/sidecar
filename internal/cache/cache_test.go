@@ -222,8 +222,13 @@ func TestFetchBudgetApplies(t *testing.T) {
 }
 
 // The query cache is keyed by attacker-controlled input, so unbounded growth
-// is a memory exhaustion vector on an unauthenticated endpoint.
-func TestEvictionPrefersExpiredThenOldest(t *testing.T) {
+// is a memory exhaustion vector on an unauthenticated endpoint. This tests
+// what evictLocked actually does: drop the oldest entry to make room. (It's
+// also expired-first in effect, since one shared ttl and a monotonic clock
+// pin insertion order to expiry order -- see evictLocked's doc comment --
+// but that's a consequence of oldest-first, not a separate policy, so this
+// test doesn't try to exercise it as one.)
+func TestEvictionDropsOldestAtCapacity(t *testing.T) {
 	clk := newClock()
 	c := New[int](time.Minute, 2, time.Second, clk.Now)
 	ctx := context.Background()
@@ -256,47 +261,6 @@ func TestEvictionPrefersExpiredThenOldest(t *testing.T) {
 	}
 	if refetched.Load() != 1 {
 		t.Error(`"a" was not evicted; eviction must drop the oldest entry`)
-	}
-}
-
-// evictLocked's "prefers expired" first loop is unreachable from Get/store
-// alone: under a single shared ttl and a monotonic clock, whichever entry
-// was inserted first also always expires first (or ties), so "oldest by
-// position" and "earliest to expire" are always the same entry, and the
-// plain oldest-first fallback loop alone reaches an identical result. (An
-// earlier version of this test used a black-box Get-only scenario -- insert
-// an entry, expire it, insert others, assert the expired one is dropped --
-// and it kept passing with the "prefers expired" loop deleted entirely,
-// because oldest-first alone evicted the same victim.) So this reaches into
-// the unexported list/map to build a state Get() can never produce: an
-// expired entry sitting behind ("newer" by position than) a still-live one.
-// Only that isolates the policy evictLocked is actually supposed to apply.
-func TestEvictionPrefersExpiredOverPosition(t *testing.T) {
-	clk := newClock()
-	c := New[int](time.Minute, 2, time.Second, clk.Now)
-
-	c.mu.Lock()
-	liveEl := c.order.PushBack(&entry[int]{key: "old-live", value: 1, expires: clk.Now().Add(time.Hour)})
-	c.items["old-live"] = liveEl
-	expiredEl := c.order.PushBack(&entry[int]{key: "new-expired", value: 2, expires: clk.Now().Add(-time.Second)})
-	c.items["new-expired"] = expiredEl
-	c.mu.Unlock()
-
-	// Inserting a third entry at capacity (2) must evict "new-expired" --
-	// which is expired despite sitting later in list order -- and keep
-	// "old-live", even though "old-live" occupies the position a naive
-	// oldest-first eviction would pick.
-	if _, err := c.Get(context.Background(), "c", func(context.Context) (int, error) {
-		return 3, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, ok := c.lookup("old-live"); !ok {
-		t.Error(`"old-live" was evicted; eviction must prefer an expired entry over list position`)
-	}
-	if _, ok := c.items["new-expired"]; ok {
-		t.Error(`"new-expired" was not evicted despite being past its expiry`)
 	}
 }
 

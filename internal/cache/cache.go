@@ -174,18 +174,22 @@ func (c *Cache[V]) store(key string, v V) {
 	})
 }
 
-// evictLocked makes room for one insert: expired entries first, then the
-// oldest. Preferring expired entries keeps a burst of distinct keys from
-// throwing away live values while dead ones sit in the map.
+// evictLocked makes room for one insert by dropping the oldest entry.
+//
+// Oldest-first is also expired-first here, but only as a consequence of one
+// invariant: every entry shares a single cache-wide ttl, and store always
+// stamps a new entry's expiry as c.now().Add(c.ttl) off a monotonic,
+// non-decreasing clock. That pins insertion order and expiry order to the
+// same sequence, so the front of the list is always both the oldest entry
+// and, if anything in the cache has expired, the first one that did. A
+// second pass that specifically hunts for expired entries would therefore
+// never find one this oldest-first loop hadn't already reached -- it would
+// just be a slower path to the identical answer, which is why there isn't
+// one. That equivalence breaks the moment ttl becomes per-entry instead of
+// per-cache: an entry stored later with a shorter ttl could expire before
+// an older entry with a longer one, and oldest-first alone would then evict
+// the wrong one.
 func (c *Cache[V]) evictLocked() {
-	now := c.now()
-	for el := c.order.Front(); el != nil && c.order.Len() >= c.maxEntries; {
-		next := el.Next()
-		if e, ok := el.Value.(*entry[V]); ok && !now.Before(e.expires) {
-			c.removeLocked(el)
-		}
-		el = next
-	}
 	for c.order.Len() >= c.maxEntries {
 		front := c.order.Front()
 		if front == nil {
