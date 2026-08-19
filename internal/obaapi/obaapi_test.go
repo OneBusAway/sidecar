@@ -80,6 +80,20 @@ func testRegion(baseURL, key string) regions.Region {
 	return regions.Region{ID: 1, Name: "Test", OBABaseURL: baseURL, OBAAPIKey: key, Active: true}
 }
 
+// errChainContains reports whether needle appears in the Error() text of err
+// or anything err wraps. A leak fixed at the top frame but reintroduced by a
+// %w further down the chain would be invisible to a check of err.Error()
+// alone only by the accident of how the outer message happens to be built;
+// walking the chain explicitly does not depend on that accident.
+func errChainContains(err error, needle string) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFleetResolvesAgencyNamesFromReferences(t *testing.T) {
 	srv := newOBAServer(t,
 		[]struct{ ID, Name string }{{"1", "Metro Transit"}, {"3", "Community Transit"}},
@@ -108,29 +122,36 @@ func TestFleetResolvesAgencyNamesFromReferences(t *testing.T) {
 }
 
 // Parallel completion order is not deterministic, so the result must be
-// reassembled by index rather than by arrival.
+// reassembled by index rather than by arrival. Each run is checked against a
+// pinned expected order, not against an earlier run: comparing only to run 1
+// would let a deterministic-but-wrong permutation pass, and would only catch
+// a completion-order bug on whichever runs happen to race unevenly.
 func TestFleetOrderIsDeterministic(t *testing.T) {
 	agencies := []struct{ ID, Name string }{}
 	vehicles := map[string][]string{}
+	var want []Vehicle
 	for _, id := range []string{"1", "2", "3", "4", "5", "6"} {
 		agencies = append(agencies, struct{ ID, Name string }{id, "Agency " + id})
 		vehicles[id] = []string{id + "_a", id + "_b"}
+		want = append(want,
+			Vehicle{AgencyID: id, AgencyName: "Agency " + id, VehicleID: id + "_a"},
+			Vehicle{AgencyID: id, AgencyName: "Agency " + id, VehicleID: id + "_b"},
+		)
 	}
 	srv := newOBAServer(t, agencies, vehicles)
 	c := New("", srv.Client(), slog.New(slog.DiscardHandler))
 
-	first, err := c.Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
-	if err != nil {
-		t.Fatalf("Fleet: %v", err)
-	}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		got, err := c.Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
 		if err != nil {
-			t.Fatalf("Fleet: %v", err)
+			t.Fatalf("run %d: Fleet: %v", i, err)
 		}
-		for j := range first {
-			if got[j] != first[j] {
-				t.Fatalf("run %d vehicle %d = %+v, want %+v", i, j, got[j], first[j])
+		if len(got) != len(want) {
+			t.Fatalf("run %d: got %d vehicles, want %d: %+v", i, len(got), len(want), got)
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				t.Fatalf("run %d vehicle %d = %+v, want %+v", i, j, got[j], want[j])
 			}
 		}
 	}
@@ -164,9 +185,57 @@ func TestFleetFailsOn5xxFromOneAgency(t *testing.T) {
 	)
 	srv.vehicleStatus["2"] = http.StatusInternalServerError
 
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
+	if err == nil {
+		t.Fatal("Fleet succeeded, want an error when an agency returns 500")
+	}
+	// This is the one path that actually puts the key on the wire in a
+	// non-2xx response: the SDK's error formats as a string containing the
+	// full request URL, key included. A redact bug here is invisible to
+	// TestErrorsDoNotLeakTheKey, which only exercises a transport failure.
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error text leaks the API key: %v", err)
+	}
+}
+
+// 408 and 429 are transient, not a durable "this agency has no feed" fact,
+// so they must fail the fetch like a 5xx rather than being tolerated like a
+// 404. Tolerating them would silently drop a rate-limited agency's vehicles
+// from the fleet.
+func TestFleetFailsOn429FromOneAgency(t *testing.T) {
+	srv := newOBAServer(t,
+		[]struct{ ID, Name string }{{"1", "Metro"}, {"2", "RateLimited"}},
+		map[string][]string{"1": {"1_1"}, "2": {"2_2"}},
+	)
+	srv.vehicleStatus["2"] = http.StatusTooManyRequests
+
 	if _, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
 		Fleet(context.Background(), testRegion(srv.URL, sentinelKey)); err == nil {
-		t.Fatal("Fleet succeeded, want an error when an agency returns 500")
+		t.Fatal("Fleet succeeded, want an error when an agency returns 429")
+	}
+}
+
+// Cancellation must survive redact so a caller can tell a shutdown apart
+// from a real upstream failure -- but the SDK returns this as a bare
+// sentinel, never wrapped in *url.Error, so it needs its own path through
+// redact rather than falling out of the *url.Error branch.
+func TestFleetPreservesContextCancellation(t *testing.T) {
+	srv := newOBAServer(t, []struct{ ID, Name string }{{"1", "Metro"}}, map[string][]string{"1": {"1_1"}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		Fleet(ctx, testRegion(srv.URL, sentinelKey))
+	if err == nil {
+		t.Fatal("Fleet succeeded with an already-cancelled context, want an error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Fleet err = %v, want context.Canceled in the chain", err)
+	}
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error text leaks the API key: %v", err)
 	}
 }
 
@@ -221,10 +290,29 @@ func TestErrorsDoNotLeakTheKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("Fleet succeeded against a closed server, want an error")
 	}
-	if strings.Contains(err.Error(), sentinelKey) {
+	if errChainContains(err, sentinelKey) {
 		t.Errorf("error text leaks the API key: %v", err)
 	}
 	if strings.Contains(logs.String(), sentinelKey) {
 		t.Errorf("log output leaks the API key: %s", logs.String())
+	}
+}
+
+// New must apply usable defaults for a nil http.Client and a nil logger --
+// the latter matters because the 4xx-tolerance path calls c.logger.Warn, and
+// a nil *slog.Logger there panics rather than merely misbehaving.
+func TestNewAppliesDefaultsWithoutPanicking(t *testing.T) {
+	srv := newOBAServer(t,
+		[]struct{ ID, Name string }{{"1", "Metro"}, {"2", "NoRealtime"}},
+		map[string][]string{"1": {"1_1"}},
+	)
+	srv.vehicleStatus["2"] = http.StatusNotFound
+
+	got, err := New("", nil, nil).Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
+	if err != nil {
+		t.Fatalf("Fleet: %v", err)
+	}
+	if len(got) != 1 || got[0].VehicleID != "1_1" {
+		t.Errorf("Fleet = %+v, want just 1_1", got)
 	}
 }

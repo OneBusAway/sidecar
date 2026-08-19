@@ -180,13 +180,29 @@ func (c *client) agencies(ctx context.Context, sdk *oba.Client) ([]Agency, error
 	return out, nil
 }
 
-// redact strips any URL-bearing text from an upstream error. The OBA key
-// travels in the URL as a query parameter, and *url.Error embeds the full
-// URL in its message. An error logged verbatim writes the secret to disk,
-// undoing the care taken to keep it out of every JSON response.
+// redact strips any URL-bearing text from an upstream error. Both a non-2xx
+// response and a transport failure carry the full request URL somewhere in
+// their message -- *url.Error embeds it directly, and the SDK's *oba.Error
+// formats its Error() string as "GET \"<url>\": <status> <text>" -- and
+// either one carries the OBA key as a query parameter. An error logged
+// verbatim writes the secret to disk, undoing the care taken to keep it out
+// of every JSON response. Every branch below must build its own message from
+// specific fields rather than ever formatting err itself with %s, %v, or %w:
+// doing so would splice the offending Error() string back in.
 func redact(err error) error {
 	if err == nil {
 		return nil
+	}
+	// Context cancellation and deadline expiry carry no URL, so the sentinel
+	// is safe to return as-is -- and must be, so errors.Is(err,
+	// context.Canceled) still works for callers that need to distinguish a
+	// shutdown from a real upstream failure. This must come before the
+	// *url.Error and status checks below: the SDK returns this as a bare
+	// sentinel (see requestconfig.Execute's ctx.Err() check after the HTTP
+	// call), never wrapped in *url.Error, so it would otherwise fall through
+	// to the generic message and lose its identity.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
@@ -207,8 +223,16 @@ func statusOf(err error) int {
 	return 0
 }
 
-// isClientError reports whether err is a 4xx from the upstream.
+// isClientError reports whether err is a 4xx from the upstream that means
+// "this agency permanently has no vehicle feed" rather than a transient
+// failure. 408 and 429 are excluded: both are the upstream asking the caller
+// to slow down or retry, not a durable fact about the agency, and tolerating
+// them would silently drop a rider's bus from the fleet on every rate-limited
+// or slow request instead of surfacing the failure.
 func isClientError(err error) bool {
 	code := statusOf(err)
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {
+		return false
+	}
 	return code >= 400 && code < 500
 }
