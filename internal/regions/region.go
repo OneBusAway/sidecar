@@ -5,6 +5,7 @@ package regions
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -44,6 +45,28 @@ type Region struct {
 	DefaultAgencyID string
 	Timezone        string
 	OBAAPIKey       string
+}
+
+// LogValue implements slog.LogValuer so a Region can be handed to a log call
+// directly without every caller having to remember to pick fields by hand.
+// OBAAPIKey is deliberately omitted: it is a live credential for this
+// region's OBA REST API server, and a handler logging a whole Region (e.g.
+// "region", region on an error path) must not be able to write it to disk.
+// Omitting it here makes that leak unrepresentable rather than merely
+// unwritten -- see internal/httpapi's log tests, which seed a real key on the
+// region and assert it never appears in the captured output.
+func (r Region) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.Int64("id", r.ID),
+		slog.String("name", r.Name),
+		slog.String("oba_base_url", r.OBABaseURL),
+		slog.String("sidecar_base_url", r.SidecarBaseURL),
+		slog.String("language", r.Language),
+		slog.Bool("active", r.Active),
+		slog.String("default_agency_id", r.DefaultAgencyID),
+		slog.String("timezone", r.Timezone),
+		slog.Bool("has_oba_api_key", r.OBAAPIKey != ""),
+	)
 }
 
 // LocalFields carries the region columns the directory does not supply. It is

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
@@ -295,6 +296,74 @@ func TestErrorsDoNotLeakTheKey(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), sentinelKey) {
 		t.Errorf("log output leaks the API key: %s", logs.String())
+	}
+}
+
+// The SDK puts the key in the query string, and the default *http.Client sets
+// Referer to the previous request's full URL -- query included -- on any
+// redirect it follows. New must refuse to follow redirects so a region whose
+// OBABaseURL (sourced from the remote regions directory, with no guarantee of
+// being well-behaved) points at a redirecting server never hands the key to
+// the redirect target.
+//
+// Mirrors weather's TestPirateWeatherDoesNotFollowRedirectsWithReferer.
+func TestFleetDoesNotFollowRedirectsWithReferer(t *testing.T) {
+	var targetHit bool
+	var gotReferer string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		gotReferer = r.Header.Get("Referer")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	_, err := New("", origin.Client(), slog.New(slog.DiscardHandler)).
+		Fleet(context.Background(), testRegion(origin.URL, sentinelKey))
+	if err == nil {
+		t.Fatal("Fleet succeeded against a redirecting server, want an error (a 302 is not a 200)")
+	}
+	if targetHit {
+		t.Errorf("redirect target was contacted; Referer = %q", gotReferer)
+	}
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error leaks the key: %v", err)
+	}
+	if strings.Contains(gotReferer, sentinelKey) {
+		t.Errorf("Referer header leaked the key: %q", gotReferer)
+	}
+}
+
+// redact checks *url.Error before the context-cancellation sentinel. net/http's
+// client Timeout produces an error that is BOTH wrapped in a key-bearing
+// *url.Error AND satisfies errors.Is(err, context.DeadlineExceeded) -- so a
+// client whose Timeout elapses mid-request is the reachable case the branch
+// order guards against. This pins both halves: the key must never appear, and
+// errors.Is(err, context.DeadlineExceeded) must still hold for callers.
+func TestFleetTimeoutDoesNotLeakKeyAndPreservesDeadlineExceeded(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	httpClient := &http.Client{Timeout: 20 * time.Millisecond}
+
+	_, err := New("", httpClient, slog.New(slog.DiscardHandler)).
+		Fleet(context.Background(), testRegion(srv.URL, sentinelKey))
+	if err == nil {
+		t.Fatal("Fleet succeeded against a server that never responds, want a timeout error")
+	}
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error leaks the key: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Fleet err = %v, want context.DeadlineExceeded in the chain", err)
 	}
 }
 

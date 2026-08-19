@@ -152,7 +152,10 @@ per-region fields:
 The key is write-only: `region set` accepts it but never prints it back, `region
 list` reports only whether a region has "own key" or "none (may inherit server
 default)", and the admin API's region endpoints report the same status word
-(`region`/`default`/`none`) instead of the key's value.
+(`region`/`default`/`none`) instead of the key's value. Passing the key as a
+command-line argument puts it in shell history and in `ps` output visible to
+other users on the same host; a future revision will offer a stdin form so the
+key never appears on the command line at all.
 
 Weather needs no separate coordinate configuration -- a region's centroid arrives
 automatically as part of `region sync`, computed from the regions directory's

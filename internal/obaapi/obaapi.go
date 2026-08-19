@@ -81,7 +81,25 @@ func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &client{defaultKey: defaultKey, http: httpClient, logger: logger}
+	// Shallow-copy rather than mutate the caller's client: setting
+	// CheckRedirect on the passed-in *http.Client would silently change
+	// redirect behavior for anything else that shares it (in production,
+	// httpClient is http.DefaultClient itself).
+	//
+	// option.WithAPIKey puts the key in the query string, and region.OBABaseURL
+	// comes from the remote regions directory with no guarantee of https, so an
+	// https-to-http downgrade redirect is not the only way this leaks -- Go's
+	// default client sets Referer to the previous request's full URL, query
+	// included, on any redirect it follows, handing the key to whatever server
+	// the redirect points at. That server is not one we chose to trust, so
+	// this is worse than a log leak: it's disclosure to an arbitrary third
+	// party. Refusing to follow redirects turns that into an ordinary non-2xx
+	// response instead.
+	hc := *httpClient
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client{defaultKey: defaultKey, http: &hc, logger: logger}
 }
 
 func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {
@@ -193,20 +211,31 @@ func redact(err error) error {
 	if err == nil {
 		return nil
 	}
-	// Context cancellation and deadline expiry carry no URL, so the sentinel
-	// is safe to return as-is -- and must be, so errors.Is(err,
-	// context.Canceled) still works for callers that need to distinguish a
-	// shutdown from a real upstream failure. This must come before the
-	// *url.Error and status checks below: the SDK returns this as a bare
-	// sentinel (see requestconfig.Execute's ctx.Err() check after the HTTP
-	// call), never wrapped in *url.Error, so it would otherwise fall through
-	// to the generic message and lose its identity.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
+	// *url.Error is checked first, ahead of the context-sentinel check below:
+	// net/http's client-Timeout error (and a transport's
+	// ResponseHeaderTimeout) is an unexported *http.httpError that satisfies
+	// errors.Is(err, context.DeadlineExceeded) while ALSO being wrapped in a
+	// key-bearing *url.Error. Checking the sentinel first would return that
+	// wrapped error verbatim -- URL, key, and all -- the moment anyone sets a
+	// Timeout on the client passed to New or a ResponseHeaderTimeout on its
+	// transport. Building the message from urlErr.Op and urlErr.Err (never
+	// urlErr itself) strips the URL either way, and %w on urlErr.Err still
+	// preserves errors.Is(err, context.DeadlineExceeded) /
+	// errors.Is(err, context.Canceled) for callers, so nothing is lost by
+	// checking this branch first.
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		return fmt.Errorf("%s request failed: %w", urlErr.Op, urlErr.Err)
+	}
+	// Context cancellation and deadline expiry carry no URL, so the sentinel
+	// is safe to return as-is -- and must be, so errors.Is(err,
+	// context.Canceled) still works for callers that need to distinguish a
+	// shutdown from a real upstream failure. The SDK returns this as a bare
+	// sentinel (see requestconfig.Execute's ctx.Err() check after the HTTP
+	// call), never wrapped in *url.Error, so it reaches this branch rather
+	// than the one above.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 	if code := statusOf(err); code != 0 {
 		return fmt.Errorf("upstream returned status %d", code)

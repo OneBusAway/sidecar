@@ -104,6 +104,15 @@ func TestWeatherNilCentroidIs403(t *testing.T) {
 	if p.calls != 0 {
 		t.Errorf("made %d provider calls, want 0", p.calls)
 	}
+	// writeUnavailable's contract: a client that decodes the body before
+	// checking status must see valid JSON, not an empty response it fails to
+	// parse.
+	if got := rec.Body.String(); got != "{}" {
+		t.Errorf("body = %q, want {}", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
 }
 
 // A nil provider is how cmd/sidecar signals "no --pirate-weather-key was
@@ -210,6 +219,43 @@ func TestWeatherSuccessShape(t *testing.T) {
 	if !gotTime.Equal(fetchedAt) {
 		t.Errorf("retrieved_at = %v, want %v (the provider's fetch time, not serialization time)", gotTime, fetchedAt)
 	}
+
+	// The top-level key set alone leaves current_forecast/hourly_forecast as
+	// opaque `any`, so renaming or dropping a field inside WeatherConditions
+	// (e.g. json:"temperature_feels_like" -> "apparent_temperature") would
+	// pass every assertion above while breaking every shipped app's stop
+	// screen. wantConditionsKeys is openapi.yaml's WeatherConditions schema.
+	wantConditionsKeys := []string{
+		"icon", "summary", "temperature", "temperature_feels_like",
+		"precip_per_hour", "precip_probability", "wind_speed", "time",
+	}
+	assertExactKeys := func(t *testing.T, label string, obj map[string]any) {
+		t.Helper()
+		for _, k := range wantConditionsKeys {
+			if _, present := obj[k]; !present {
+				t.Errorf("%s: missing JSON key %q", label, k)
+			}
+		}
+		if len(obj) != len(wantConditionsKeys) {
+			t.Errorf("%s: got %d keys, want %d: %v", label, len(obj), len(wantConditionsKeys), obj)
+		}
+	}
+
+	current, ok := raw["current_forecast"].(map[string]any)
+	if !ok {
+		t.Fatalf("current_forecast = %T, want an object", raw["current_forecast"])
+	}
+	assertExactKeys(t, "current_forecast", current)
+
+	hourly, ok := raw["hourly_forecast"].([]any)
+	if !ok || len(hourly) == 0 {
+		t.Fatalf("hourly_forecast = %v, want a non-empty array", raw["hourly_forecast"])
+	}
+	first, ok := hourly[0].(map[string]any)
+	if !ok {
+		t.Fatalf("hourly_forecast[0] = %T, want an object", hourly[0])
+	}
+	assertExactKeys(t, "hourly_forecast[0]", first)
 }
 
 // retrieved_at describes when the data was fetched, not when it was served.
@@ -338,7 +384,15 @@ func TestWeatherLogsCancellationAtWarnOnly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			regs := newTestRegions(t, weatherRegion())
+			// A real sentinel key on the region (not weatherRegion's default,
+			// which carries none): the design spec's key-in-logs test
+			// requires a real key on the path, and this is also what catches
+			// a handler edit that logs the whole regions.Region instead of
+			// picking region_id -- without regions.Region.LogValue omitting
+			// OBAAPIKey, that substitution would print the key here in full.
+			region := weatherRegion()
+			region.OBAAPIKey = sentinelKey
+			regs := newTestRegions(t, region)
 			now := func() time.Time { return time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC) }
 			var buf bytes.Buffer
 			capturingLogger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -362,6 +416,9 @@ func TestWeatherLogsCancellationAtWarnOnly(t *testing.T) {
 			}
 			if got := buf.String(); strings.Contains(got, tt.wantAbsent) {
 				t.Errorf("log output = %q, want it NOT to contain %q", got, tt.wantAbsent)
+			}
+			if got := buf.String(); strings.Contains(got, sentinelKey) {
+				t.Errorf("log output leaks the region's API key: %s", got)
 			}
 		})
 	}

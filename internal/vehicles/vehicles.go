@@ -56,23 +56,21 @@ func Normalize(raw string) (string, bool) {
 	return q, true
 }
 
-// Filter selects the fleet entries whose id contains q, preserving fleet
-// order and truncating at MaxResults.
+// filter selects the fleet entries whose id contains q, preserving fleet
+// order and truncating at MaxResults. It also reports whether the result was
+// actually truncated -- i.e. at least one further match existed beyond
+// MaxResults -- so Search can warn only when truncation really happened. A
+// fleet with exactly MaxResults matches and no more is not truncated, and
+// warning about it on every such search would be a permanent false alarm.
 //
 // Only the query has been lowered; the vehicle ids are matched raw. This is
 // required by spec §10 and is not an oversight: implementing true
 // case-insensitivity would make this server disagree with every shipped
 // client on any fleet with uppercase ids.
-func Filter(fleet []obaapi.Vehicle, q string) []Match {
-	matches, _ := filter(fleet, q)
-	return matches
-}
-
-// filter is Filter's implementation. It also reports whether the result was
-// actually truncated -- i.e. at least one further match existed beyond
-// MaxResults -- so Search can warn only when truncation really happened. A
-// fleet with exactly MaxResults matches and no more is not truncated, and
-// warning about it on every such search would be a permanent false alarm.
+//
+// Unexported: nothing outside this package's own tests calls it. Search is
+// the only real caller, and it needs the truncation flag filter alone
+// carries.
 func filter(fleet []obaapi.Vehicle, q string) ([]Match, bool) {
 	out := make([]Match, 0, 16)
 	for _, v := range fleet {

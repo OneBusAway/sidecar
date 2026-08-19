@@ -43,6 +43,13 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// filterMatches wraps the unexported filter, discarding the truncation flag,
+// for the tests below that only care about the matched slice.
+func filterMatches(fleet []obaapi.Vehicle, q string) []Match {
+	matches, _ := filter(fleet, q)
+	return matches
+}
+
 func TestFilter(t *testing.T) {
 	fleet := []obaapi.Vehicle{
 		{AgencyID: "1", AgencyName: "Metro", VehicleID: "1_4361"},
@@ -51,7 +58,7 @@ func TestFilter(t *testing.T) {
 	}
 
 	t.Run("substring match", func(t *testing.T) {
-		got := Filter(fleet, "436")
+		got := filterMatches(fleet, "436")
 		if len(got) != 2 {
 			t.Fatalf("got %d matches, want 2: %+v", len(got), got)
 		}
@@ -64,23 +71,23 @@ func TestFilter(t *testing.T) {
 	// matching against raw ids. True case-insensitivity would match here, and
 	// would diverge from every shipped client on fleets with uppercase ids.
 	t.Run("lowered query does not match an uppercase fleet id", func(t *testing.T) {
-		if got := Filter(fleet, "abc"); len(got) != 0 {
-			t.Errorf("Filter(%q) = %+v, want no matches", "abc", got)
+		if got := filterMatches(fleet, "abc"); len(got) != 0 {
+			t.Errorf("filterMatches(%q) = %+v, want no matches", "abc", got)
 		}
 	})
 
 	t.Run("uppercase fleet id matches when the raw case is given", func(t *testing.T) {
 		// Normalize would have lowered this, which is exactly why such a
 		// fleet is unsearchable -- the bug being preserved.
-		if got := Filter(fleet, "ABC"); len(got) != 1 {
-			t.Errorf("Filter(%q) = %+v, want 1 match", "ABC", got)
+		if got := filterMatches(fleet, "ABC"); len(got) != 1 {
+			t.Errorf("filterMatches(%q) = %+v, want 1 match", "ABC", got)
 		}
 	})
 
 	t.Run("no match returns empty, never nil", func(t *testing.T) {
-		got := Filter(fleet, "zzz")
+		got := filterMatches(fleet, "zzz")
 		if got == nil {
-			t.Fatal("Filter returned nil; it must return an empty slice so the JSON is [] not null")
+			t.Fatal("filterMatches returned nil; it must return an empty slice so the JSON is [] not null")
 		}
 		if len(got) != 0 {
 			t.Errorf("got %d matches, want 0", len(got))
@@ -99,7 +106,7 @@ func TestFilter(t *testing.T) {
 				VehicleID: fmt.Sprintf("1_999_%03d", i),
 			})
 		}
-		got := Filter(big, "999")
+		got := filterMatches(big, "999")
 		if len(got) != MaxResults {
 			t.Fatalf("got %d matches, want the cap of %d", len(got), MaxResults)
 		}

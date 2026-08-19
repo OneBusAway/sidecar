@@ -275,7 +275,15 @@ func TestVehiclesLogsCancellationAtWarnOnly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			regs := newTestRegions(t, regions.Region{ID: 1, Name: "R", OBABaseURL: "https://x/", OBAAPIKey: "k", Active: true})
+			// A real sentinel key on the region, not the placeholder "k" used
+			// elsewhere in this file: the design spec's key-in-logs test
+			// requires asserting a real key never reaches the log, and "k" is
+			// indistinguishable from any other short log token. This is also
+			// what catches a handler edit that logs the whole regions.Region
+			// (e.g. "region", region) instead of picking region_id -- without
+			// regions.Region.LogValue omitting OBAAPIKey, that substitution
+			// would print the key here in full.
+			regs := newTestRegions(t, regions.Region{ID: 1, Name: "R", OBABaseURL: "https://x/", OBAAPIKey: sentinelKey, Active: true})
 			now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
 			var buf bytes.Buffer
 			capturingLogger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -299,6 +307,16 @@ func TestVehiclesLogsCancellationAtWarnOnly(t *testing.T) {
 			if got := buf.String(); strings.Contains(got, tt.wantNot) {
 				t.Errorf("log output = %q, want it NOT to contain %q", got, tt.wantNot)
 			}
+			if got := buf.String(); strings.Contains(got, sentinelKey) {
+				t.Errorf("log output leaks the region's API key: %s", got)
+			}
 		})
 	}
 }
+
+// sentinelKey is a real-looking API key seeded onto the region in the log
+// tests above and in weather_test.go's TestWeatherLogsCancellationAtWarnOnly,
+// so those tests can assert it never reaches the captured log output -- the
+// direct half of the design spec's key-in-logs requirement (the durable half
+// is regions.Region.LogValue, in internal/regions/region.go).
+const sentinelKey = "SENTINEL-REGION-OBA-API-KEY-do-not-log"
