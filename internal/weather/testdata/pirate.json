@@ -1,0 +1,50 @@
+{
+  "latitude": 47.75,
+  "longitude": -122.49,
+  "timezone": "America/Los_Angeles",
+  "currently": {
+    "time": 1767980400,
+    "summary": "Light Rain",
+    "icon": "rain",
+    "precipIntensity": 0.0213,
+    "precipProbability": 0.72,
+    "temperature": 49.60,
+    "apparentTemperature": 45.11,
+    "windSpeed": 9.14
+  },
+  "hourly": {
+    "summary": "Showers overnight, clearing by morning.",
+    "icon": "rain",
+    "data": [
+      {
+        "time": 1767980400,
+        "summary": "Light Rain",
+        "icon": "rain",
+        "precipIntensity": 0.0213,
+        "precipProbability": 0.72,
+        "temperature": 48.31,
+        "apparentTemperature": 44.02,
+        "windSpeed": 9.14
+      },
+      {
+        "time": 1767984000,
+        "summary": "Cloudy",
+        "icon": "some-icon-we-have-never-seen",
+        "precipIntensity": 0,
+        "precipProbability": 0.1,
+        "temperature": 47.02,
+        "apparentTemperature": 43.5,
+        "windSpeed": 7.2
+      }
+    ]
+  },
+  "daily": {
+    "summary": "Rain throughout the week.",
+    "icon": "rain",
+    "data": [
+      { "time": 1767945600, "summary": "Rain until evening.", "icon": "rain" },
+      { "time": 1768032000, "summary": "Clear throughout the day.", "icon": "clear-day" }
+    ]
+  },
+  "flags": { "units": "si" }
+}

@@ -166,8 +166,13 @@ type regionRepo struct {
 	q  *gen.Queries
 }
 
+// regionFromRow maps a stored row to the domain type. A half-null
+// latitude/longitude pair maps to a nil Centroid rather than trusting the
+// database trigger to have prevented it: a future Postgres adapter expresses
+// the same invariant as a CHECK constraint, and both adapters must behave
+// identically here regardless of which enforcement mechanism backs them.
 func regionFromRow(r gen.Region) regions.Region {
-	return regions.Region{
+	out := regions.Region{
 		ID:              r.ID,
 		Name:            r.RegionName,
 		OBABaseURL:      r.ObaBaseUrl,
@@ -176,7 +181,12 @@ func regionFromRow(r gen.Region) regions.Region {
 		Active:          r.Active,
 		DefaultAgencyID: r.DefaultAgencyID,
 		Timezone:        r.Timezone,
+		OBAAPIKey:       r.ObaApiKey,
 	}
+	if r.Latitude.Valid && r.Longitude.Valid {
+		out.Centroid = &regions.LatLon{Lat: r.Latitude.Float64, Lon: r.Longitude.Float64}
+	}
+	return out
 }
 
 func (r *regionRepo) Get(ctx context.Context, id int64) (regions.Region, error) {
@@ -220,6 +230,12 @@ func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Regio
 
 	q := r.q.WithTx(tx)
 	for _, reg := range in {
+		lat := sql.NullFloat64{}
+		lon := sql.NullFloat64{}
+		if reg.Centroid != nil {
+			lat = sql.NullFloat64{Float64: reg.Centroid.Lat, Valid: true}
+			lon = sql.NullFloat64{Float64: reg.Centroid.Lon, Valid: true}
+		}
 		if err := q.UpsertRegionFromDirectory(ctx, gen.UpsertRegionFromDirectoryParams{
 			ID:             reg.ID,
 			RegionName:     reg.Name,
@@ -227,6 +243,8 @@ func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Regio
 			SidecarBaseUrl: reg.SidecarBaseURL,
 			Language:       reg.Language,
 			Active:         reg.Active,
+			Latitude:       lat,
+			Longitude:      lon,
 			SyncedAt:       ts,
 			CreatedAt:      ts,
 			UpdatedAt:      ts,
@@ -241,16 +259,40 @@ func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Regio
 	return nil
 }
 
-func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, agencyID, timezone string, now time.Time) error {
+func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, in regions.LocalFields, now time.Time) error {
 	if err := r.q.SetRegionLocalFields(ctx, gen.SetRegionLocalFieldsParams{
-		DefaultAgencyID: agencyID,
-		Timezone:        timezone,
+		DefaultAgencyID: in.DefaultAgencyID,
+		Timezone:        in.Timezone,
+		ObaApiKey:       in.OBAAPIKey,
 		UpdatedAt:       now.Unix(),
 		ID:              id,
 	}); err != nil {
 		return fmt.Errorf("sqlite: set local fields for region %d: %w", id, err)
 	}
 	return nil
+}
+
+// WriteHalfSetCentroidForTest deliberately writes an invalid half-set
+// centroid to an existing row, exercising the regions_centroid_paired_update
+// trigger. It bypasses the generated queries because no legitimate query can
+// express this row -- which is exactly the property under test.
+func (r *regionRepo) WriteHalfSetCentroidForTest(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE regions SET latitude = ?, longitude = NULL WHERE id = ?`, 47.5, id)
+	return err
+}
+
+// InsertHalfSetCentroidForTest deliberately inserts a brand new row with a
+// half-set centroid, exercising the regions_centroid_paired_insert trigger.
+// UpsertFromDirectory always writes both coordinates or neither, so nothing
+// in the normal write path ever fires that trigger; without this hook it
+// would carry zero test coverage.
+func (r *regionRepo) InsertHalfSetCentroidForTest(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO regions (id, region_name, oba_base_url, latitude, longitude, synced_at, created_at, updated_at)
+		VALUES (?, 'Half-set insert', 'https://half-set.example/', ?, NULL, 0, 0, 0)`,
+		id, 47.5)
+	return err
 }
 
 // ---------------------------------------------------------------------------

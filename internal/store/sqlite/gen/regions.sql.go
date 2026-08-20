@@ -7,10 +7,11 @@ package gen
 
 import (
 	"context"
+	"database/sql"
 )
 
 const getRegion = `-- name: GetRegion :one
-SELECT id, region_name, oba_base_url, sidecar_base_url, language, active, default_agency_id, timezone, synced_at, created_at, updated_at FROM regions WHERE id = ?
+SELECT id, region_name, oba_base_url, sidecar_base_url, language, active, default_agency_id, timezone, synced_at, created_at, updated_at, latitude, longitude, oba_api_key FROM regions WHERE id = ?
 `
 
 func (q *Queries) GetRegion(ctx context.Context, id int64) (Region, error) {
@@ -28,12 +29,15 @@ func (q *Queries) GetRegion(ctx context.Context, id int64) (Region, error) {
 		&i.SyncedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ObaApiKey,
 	)
 	return i, err
 }
 
 const listRegions = `-- name: ListRegions :many
-SELECT id, region_name, oba_base_url, sidecar_base_url, language, active, default_agency_id, timezone, synced_at, created_at, updated_at FROM regions ORDER BY id
+SELECT id, region_name, oba_base_url, sidecar_base_url, language, active, default_agency_id, timezone, synced_at, created_at, updated_at, latitude, longitude, oba_api_key FROM regions ORDER BY id
 `
 
 func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
@@ -57,6 +61,9 @@ func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
 			&i.SyncedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Latitude,
+			&i.Longitude,
+			&i.ObaApiKey,
 		); err != nil {
 			return nil, err
 		}
@@ -73,13 +80,14 @@ func (q *Queries) ListRegions(ctx context.Context) ([]Region, error) {
 
 const setRegionLocalFields = `-- name: SetRegionLocalFields :exec
 UPDATE regions
-SET default_agency_id = ?, timezone = ?, updated_at = ?
+SET default_agency_id = ?, timezone = ?, oba_api_key = ?, updated_at = ?
 WHERE id = ?
 `
 
 type SetRegionLocalFieldsParams struct {
 	DefaultAgencyID string
 	Timezone        string
+	ObaApiKey       string
 	UpdatedAt       int64
 	ID              int64
 }
@@ -88,6 +96,7 @@ func (q *Queries) SetRegionLocalFields(ctx context.Context, arg SetRegionLocalFi
 	_, err := q.db.ExecContext(ctx, setRegionLocalFields,
 		arg.DefaultAgencyID,
 		arg.Timezone,
+		arg.ObaApiKey,
 		arg.UpdatedAt,
 		arg.ID,
 	)
@@ -97,14 +106,16 @@ func (q *Queries) SetRegionLocalFields(ctx context.Context, arg SetRegionLocalFi
 const upsertRegionFromDirectory = `-- name: UpsertRegionFromDirectory :exec
 INSERT INTO regions (
   id, region_name, oba_base_url, sidecar_base_url, language, active,
-  synced_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  latitude, longitude, synced_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
   region_name      = excluded.region_name,
   oba_base_url     = excluded.oba_base_url,
   sidecar_base_url = excluded.sidecar_base_url,
   language         = excluded.language,
   active           = excluded.active,
+  latitude         = excluded.latitude,
+  longitude        = excluded.longitude,
   synced_at        = excluded.synced_at,
   updated_at       = excluded.updated_at
 `
@@ -116,14 +127,17 @@ type UpsertRegionFromDirectoryParams struct {
 	SidecarBaseUrl string
 	Language       string
 	Active         bool
+	Latitude       sql.NullFloat64
+	Longitude      sql.NullFloat64
 	SyncedAt       int64
 	CreatedAt      int64
 	UpdatedAt      int64
 }
 
-// Partial upsert: default_agency_id and timezone are locally managed and must
-// survive every refresh. A full-row upsert would wipe them hourly, after which
-// alerts emit an empty agency_id.
+// Partial upsert: default_agency_id, timezone, and oba_api_key are locally
+// managed and must survive every refresh. A full-row upsert would wipe them
+// hourly, after which alerts emit an empty agency_id and vehicle search loses
+// its key.
 func (q *Queries) UpsertRegionFromDirectory(ctx context.Context, arg UpsertRegionFromDirectoryParams) error {
 	_, err := q.db.ExecContext(ctx, upsertRegionFromDirectory,
 		arg.ID,
@@ -132,6 +146,8 @@ func (q *Queries) UpsertRegionFromDirectory(ctx context.Context, arg UpsertRegio
 		arg.SidecarBaseUrl,
 		arg.Language,
 		arg.Active,
+		arg.Latitude,
+		arg.Longitude,
 		arg.SyncedAt,
 		arg.CreatedAt,
 		arg.UpdatedAt,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildRegionPatch } from './regions';
+import { buildRegionPatch, describeKeyStatus, formatCentroid } from './regions';
+import type { KeyStatus } from './types';
 
 describe('buildRegionPatch', () => {
 	it('sends both fields when both are filled in', () => {
@@ -40,5 +41,64 @@ describe('buildRegionPatch', () => {
 		expect(buildRegionPatch('HART', 'America/Nowhere').timezone).toBe(
 			'America/Nowhere',
 		);
+	});
+});
+
+describe('buildRegionPatch with an API key', () => {
+	// Omission means unchanged. If an untouched key field sent '', every
+	// unrelated edit an operator makes would silently wipe the region's key.
+	it('omits oba_api_key entirely when undefined', () => {
+		const payload = buildRegionPatch('1', 'America/Los_Angeles', undefined);
+		expect('oba_api_key' in payload).toBe(false);
+	});
+
+	it('sends an empty oba_api_key when the operator clears it', () => {
+		const payload = buildRegionPatch('1', 'America/Los_Angeles', '');
+		expect(payload.oba_api_key).toBe('');
+	});
+
+	it('sends a trimmed key when one is entered', () => {
+		const payload = buildRegionPatch('1', 'America/Los_Angeles', '  abc  ');
+		expect(payload.oba_api_key).toBe('abc');
+	});
+});
+
+describe('formatCentroid', () => {
+	it('renders a point to four decimals', () => {
+		expect(
+			formatCentroid({ latitude: 47.752812, longitude: -122.492431 }),
+		).toBe('47.7528, -122.4924');
+	});
+
+	// 0,0 is a real coordinate in the Gulf of Guinea, so null must render as
+	// "unknown" and 0 must render as 0 -- never the other way round.
+	it('renders null as an em dash', () => {
+		expect(formatCentroid({ latitude: null, longitude: null })).toBe('—');
+	});
+
+	it('renders Null Island as a real point', () => {
+		expect(formatCentroid({ latitude: 0, longitude: 0 })).toBe(
+			'0.0000, 0.0000',
+		);
+	});
+
+	it('treats a half-set centroid as absent', () => {
+		expect(formatCentroid({ latitude: 47.75, longitude: null })).toBe('—');
+	});
+});
+
+describe('describeKeyStatus', () => {
+	// Three states, not a boolean: a region whose vehicle search works fine
+	// through the server default must not read as "not configured".
+	it('distinguishes all three states', () => {
+		expect(describeKeyStatus('region')).toBe('Configured for this region');
+		expect(describeKeyStatus('default')).toBe('Using the server default');
+		expect(describeKeyStatus('none')).toBe(
+			'Not configured — vehicle search unavailable',
+		);
+	});
+
+	it('falls back rather than rendering undefined for an unknown value', () => {
+		expect(describeKeyStatus('something-new' as KeyStatus)).toBe('Unknown');
 	});
 });

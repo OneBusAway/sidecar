@@ -49,6 +49,9 @@ type Region struct {
 	SyncedAt        int64
 	CreatedAt       int64
 	UpdatedAt       int64
+	Latitude        sql.NullFloat64
+	Longitude       sql.NullFloat64
+	ObaApiKey       string
 }
 
 type Session struct {

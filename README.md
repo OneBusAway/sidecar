@@ -76,7 +76,7 @@ Full command surface:
 
 ```
 sidecar-admin region  list
-                       set --id N [--agency-id ID] [--timezone TZ]
+                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key KEY]
                        sync
 sidecar-admin alert   create --region N --header TEXT --start RFC3339
                               [--description TEXT] [--url URL] [--end RFC3339]
@@ -96,6 +96,70 @@ sidecar-admin user    create --username NAME [--password-stdin]
                        delete --username NAME [--force]
 sidecar-admin migrate  up | status
 ```
+
+## Weather and vehicle search
+
+The sidecar also serves two rider-facing lookups that proxy and cache an upstream
+source per region: current conditions for the region's map, and a fuzzy search over
+its live vehicle ids.
+
+### Endpoints
+
+- `GET /api/v1/regions/{regionId}/weather` — current conditions plus an hourly
+  forecast for the region's centroid. A `403` means "unavailable" and covers every
+  failure mode alike: no Pirate Weather key configured, the region has no centroid
+  yet, or the upstream provider errored or timed out. This is deliberate, not a
+  placeholder -- shipped apps treat any non-200 response as "hide the weather UI"
+  and have been tested against `403` specifically, so it must never be "improved"
+  to a 5xx. An unknown `{regionId}` is still a plain `404`.
+- `GET /api/v1/regions/{regionId}/vehicles?query=` — substring search over the
+  region's live vehicle ids. `query` must be between 3 and 64 characters (runes, not
+  bytes); shorter or longer queries return `[]` without an upstream call. Only the
+  query is lowercased before matching -- vehicle ids are compared raw -- so a fleet
+  with uppercase ids is effectively case-sensitive; this replicates the reference
+  implementation's behavior and is a deliberate compatibility quirk, not a bug.
+  Results are capped at 250. An upstream failure is a `502`, not an empty `200`: an
+  empty list is indistinguishable from "no such vehicle", so a rider searching for a
+  bus that exists would otherwise be told, confidently, that it doesn't. An unknown
+  `{regionId}` is a `404`.
+
+### Configuration
+
+Both endpoints depend on process-wide keys, set as flags or environment variables:
+
+```sh
+# Default OneBusAway REST API key, used for any region with no key of its own.
+# Without it, vehicle search returns 502 for regions with no key of their own.
+export SIDECAR_OBA_API_KEY=...
+
+# Pirate Weather API key. Without it, the weather endpoint returns 403 for
+# every region.
+export SIDECAR_PIRATE_WEATHER_KEY=...
+```
+
+(`--oba-api-key`/`--pirate-weather-key` are the equivalent `sidecar` flags.)
+
+A region can also carry its own OneBusAway REST API key, overriding
+`SIDECAR_OBA_API_KEY` for that region alone -- set it the same way as the other
+per-region fields:
+
+```sh
+# A region's own key overrides SIDECAR_OBA_API_KEY for that region. Pass an
+# empty value to clear it and fall back to the process default.
+./bin/sidecar-admin --db ./sidecar.db region set --id 1 --oba-api-key <key>
+```
+
+The key is write-only: `region set` accepts it but never prints it back, `region
+list` reports only whether a region has "own key" or "none (may inherit server
+default)", and the admin API's region endpoints report the same status word
+(`region`/`default`/`none`) instead of the key's value. Passing the key as a
+command-line argument puts it in shell history and in `ps` output visible to
+other users on the same host; a future revision will offer a stdin form so the
+key never appears on the command line at all.
+
+Weather needs no separate coordinate configuration -- a region's centroid arrives
+automatically as part of `region sync`, computed from the regions directory's
+`bounds` rectangles for that region.
 
 ## Admin UI
 

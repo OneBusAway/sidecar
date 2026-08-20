@@ -18,6 +18,8 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/vehicles"
+	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
 // Deps carries everything the router needs from the outside world. Now and
@@ -33,6 +35,15 @@ type Deps struct {
 	Auth   auth.Repository
 	Now    func() time.Time
 	Logger *slog.Logger
+
+	// Vehicles backs the vehicle search endpoint. Nil means the route is not
+	// registered, which is how a feed-only deployment (or a feed-only test)
+	// avoids having to supply one.
+	Vehicles *vehicles.Service
+
+	// Weather backs the forecast endpoint. Nil means the route is not
+	// registered.
+	Weather *weather.Service
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -52,6 +63,13 @@ type Deps struct {
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS
+
+	// OBADefaultKeySet reports whether the process was started with an OBA
+	// REST API key (--oba-api-key/SIDECAR_OBA_API_KEY). The admin regions
+	// endpoint uses it to distinguish a region that inherits a working
+	// default from one where calls will actually fail -- a distinction a
+	// plain "is this region's column empty" boolean cannot make.
+	OBADefaultKeySet bool
 }
 
 // ServerConfig configures the HTTP server NewServer builds.
@@ -97,6 +115,16 @@ func NewRouter(deps Deps) http.Handler {
 	// deliberately bypass every admin middleware.
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
+
+	if deps.Vehicles != nil {
+		vh := &vehiclesHandler{deps: deps}
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
+	}
+
+	if deps.Weather != nil {
+		wh := &weatherHandler{deps: deps}
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
+	}
 
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served

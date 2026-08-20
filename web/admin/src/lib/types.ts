@@ -50,6 +50,8 @@ export interface Alert {
 	translations: Translation[];
 }
 
+export type KeyStatus = 'region' | 'default' | 'none';
+
 /** A configured region. */
 export interface Region {
 	/** Region 0 is a real region (Tampa Bay), never "unset". */
@@ -62,6 +64,17 @@ export interface Region {
 	default_agency_id: string;
 	/** IANA name. Every datetime the operator types is interpreted in it. */
 	timezone: string;
+	/** null until a directory sync supplies usable bounds. 0 is a real value. */
+	latitude: number | null;
+	/** null until a directory sync supplies usable bounds. 0 is a real value. */
+	longitude: number | null;
+	/**
+	 * Key status, never the key -- the server never sends one back.
+	 * 'region'  this region carries its own
+	 * 'default' empty here, but the server has a process-wide default
+	 * 'none'    nothing configured; vehicle search will fail
+	 */
+	oba_api_key: KeyStatus;
 }
 
 /** The body of `GET`/`POST /session`. */

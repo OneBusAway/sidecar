@@ -21,10 +21,15 @@ import (
 	// valid one on such a host.
 	_ "time/tzdata"
 
+	"github.com/OneBusAway/sidecar/internal/cache"
+	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
+	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
+	"github.com/OneBusAway/sidecar/internal/vehicles"
+	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
 const (
@@ -44,6 +49,25 @@ const (
 	// test, so it is named and tested (see TestBuildDeps_WiresFailDelay)
 	// rather than inlined into the Deps literal below.
 	adminFailDelay = 500 * time.Millisecond
+
+	// Cache sizing for the upstream proxies. The TTLs come from the spec
+	// (fleet 30 minutes, per-query results 5 minutes); the budgets sit under
+	// the server's 15s WriteTimeout, and the query budget exceeds the fleet
+	// budget because a cold query fetch nests a fleet fetch inside it.
+	fleetTTL     = 30 * time.Minute
+	fleetEntries = 256
+	fleetBudget  = 12 * time.Second
+	queryTTL     = 5 * time.Minute
+	queryEntries = 4096
+	queryBudget  = 13 * time.Second
+
+	// Weather cache sizing: the TTL comes from the spec (30 minutes), the
+	// budget sits under the server's 15s WriteTimeout, and entries is sized
+	// per coordinate rather than per region since the cache key is the
+	// rounded centroid.
+	weatherTTL     = 30 * time.Minute
+	weatherEntries = 256
+	weatherBudget  = 5 * time.Second
 )
 
 func main() {
@@ -64,6 +88,15 @@ func main() {
 // stdout and reported as success (nil), following the convention that
 // --help is not an error condition.
 func run(stdout, stderr io.Writer, args []string) error {
+	// Before the flag definitions, not just before Parse: the envOrDefault
+	// calls below read the environment at flag-registration time, so a .env
+	// loaded any later could never reach a flag default. Real environment
+	// variables win over the file (dotenv.Load never overwrites), keeping
+	// platform-provided production configuration unaffected.
+	if err := dotenv.Load(".env"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("sidecar", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -71,6 +104,10 @@ func run(stdout, stderr io.Writer, args []string) error {
 	addr := fs.String("addr", defaultAddr, "address for the HTTP server to listen on")
 	regionsURL := fs.String("regions-url", envOrDefault("SIDECAR_REGIONS_URL", defaultRegionsURL), "URL of the regions directory document")
 	refresh := fs.Duration("refresh", defaultRefresh, "interval between regions directory refreshes")
+	obaAPIKey := fs.String("oba-api-key", envOrDefault("SIDECAR_OBA_API_KEY", ""),
+		"default OneBusAway REST API key, used for regions with no key of their own")
+	pirateKey := fs.String("pirate-weather-key", envOrDefault("SIDECAR_PIRATE_WEATHER_KEY", ""),
+		"Pirate Weather API key; without it the weather endpoint returns 403")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -122,7 +159,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
-		Deps: buildDeps(store, logger),
+		Deps: buildDeps(store, logger, *obaAPIKey, *pirateKey),
 	})
 
 	logger.Info("sidecar: listening", "addr", *addr)
@@ -136,15 +173,48 @@ func run(stdout, stderr io.Writer, args []string) error {
 // not in httpapi, because cmd/ is the one place in this repo allowed to
 // touch the wall clock directly (design spec §2.3); everywhere else gets it
 // injected.
-func buildDeps(store *sqlite.Store, logger *slog.Logger) httpapi.Deps {
+func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey string) httpapi.Deps {
+	if obaAPIKey == "" {
+		logger.Warn("no --oba-api-key/SIDECAR_OBA_API_KEY set; " +
+			"vehicle search returns 502 for regions with no key of their own")
+	}
+	obaClient := obaapi.New(obaAPIKey, http.DefaultClient, logger)
+	vehicleSvc := vehicles.NewService(
+		obaClient,
+		cache.New[[]obaapi.Vehicle](fleetTTL, fleetEntries, fleetBudget, time.Now),
+		cache.New[[]vehicles.Match](queryTTL, queryEntries, queryBudget, time.Now),
+		logger,
+	)
+
+	// A nil provider is the "not configured" signal: weather.Service turns
+	// it into ErrNoProvider, and the handler turns that into a 403, without
+	// ever attempting a network call.
+	var provider weather.Provider
+	if pirateKey == "" {
+		logger.Warn("no --pirate-weather-key/SIDECAR_PIRATE_WEATHER_KEY set; the weather endpoint returns 403")
+	} else {
+		provider = weather.NewPirateWeather(pirateKey, http.DefaultClient, time.Now)
+	}
+	// Built unconditionally, even when provider is nil: cache.New only
+	// allocates (no goroutine, no I/O), and weather.Service.Snapshot checks
+	// s.provider == nil before ever touching the cache, so an unconfigured
+	// deployment pays a small allocation, not a resource leak. Skipping the
+	// construction would need its own nil-Cache branch inside Service for no
+	// behavioural gain.
+	weatherSvc := weather.NewService(provider,
+		cache.New[weather.Snapshot](weatherTTL, weatherEntries, weatherBudget, time.Now))
+
 	return httpapi.Deps{
-		Alerts:    store.Alerts(),
-		Regions:   store.Regions(),
-		Auth:      store.Auth(),
-		Now:       time.Now,
-		Logger:    logger,
-		AdminUI:   adminui.FS(),
-		FailDelay: adminFailDelay,
+		Alerts:           store.Alerts(),
+		Regions:          store.Regions(),
+		Auth:             store.Auth(),
+		Now:              time.Now,
+		Logger:           logger,
+		AdminUI:          adminui.FS(),
+		FailDelay:        adminFailDelay,
+		Vehicles:         vehicleSvc,
+		Weather:          weatherSvc,
+		OBADefaultKeySet: obaAPIKey != "",
 	}
 }
 

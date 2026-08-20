@@ -234,7 +234,9 @@ func TestSync_PreservesLocalFields(t *testing.T) {
 	}}, base); err != nil {
 		t.Fatalf("seed UpsertFromDirectory: %v", err)
 	}
-	if err := repo.SetLocalFields(ctx, 1, "40", "America/Los_Angeles", base); err != nil {
+	if err := repo.SetLocalFields(ctx, 1, regions.LocalFields{
+		DefaultAgencyID: "40", Timezone: "America/Los_Angeles",
+	}, base); err != nil {
 		t.Fatalf("SetLocalFields: %v", err)
 	}
 
@@ -375,5 +377,48 @@ func TestSync_FailedFetchLeavesRowsUntouched(t *testing.T) {
 	}
 	if got.Name != "Stable Region" {
 		t.Errorf("Name = %q after failed Sync, want unchanged %q", got.Name, "Stable Region")
+	}
+}
+
+// A region whose bounds are unusable must still be kept. Dropping the entry
+// would take its alerts feed down too, which is far worse than a missing
+// weather card.
+func TestFetchKeepsRegionWithUnusableBounds(t *testing.T) {
+	body := `{"data":{"list":[
+		{"id":1,"regionName":"No Bounds","obaBaseUrl":"https://example.org/","active":true},
+		{"id":2,"regionName":"Good","obaBaseUrl":"https://example.org/","active":true,
+		 "bounds":[{"lat":47.6,"lon":-122.3,"latSpan":0.2,"lonSpan":0.2}]}
+	]}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+
+	got, err := regions.NewClient(srv.URL, testOptions()).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d regions, want 2 (a bad centroid must not drop the region)", len(got))
+	}
+	if got[0].Centroid != nil {
+		t.Errorf("region 1 Centroid = %+v, want nil", got[0].Centroid)
+	}
+	if got[1].Centroid == nil {
+		t.Fatal("region 2 Centroid = nil, want a point")
+	}
+	// A single bound's centroid is its own center in exact arithmetic, but
+	// computeCentroid gets there via multiply-then-divide (lat*w/w), which
+	// float64 does not guarantee round-trips bit-exactly -- e.g. -122.3
+	// comes back as -122.30000000000001. An exact equality check here would
+	// be asserting a coincidence of this particular input, not the property
+	// under test, so this compares within a tolerance instead.
+	const epsilon = 1e-9
+	if diff := got[1].Centroid.Lat - 47.6; diff > epsilon || diff < -epsilon {
+		t.Errorf("region 2 Lat = %v, want 47.6", got[1].Centroid.Lat)
+	}
+	if diff := got[1].Centroid.Lon - (-122.3); diff > epsilon || diff < -epsilon {
+		t.Errorf("region 2 Lon = %v, want -122.3", got[1].Centroid.Lon)
 	}
 }

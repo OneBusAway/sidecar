@@ -43,6 +43,9 @@ const REGION: Region = {
 	active: true,
 	default_agency_id: 'KCM',
 	timezone: 'Asia/Kathmandu',
+	latitude: null,
+	longitude: null,
+	oba_api_key: 'none',
 };
 
 function alert(over: Partial<Alert> = {}): Alert {

@@ -199,21 +199,36 @@ func regionList(ctx context.Context, stdout io.Writer, repo regions.Repository) 
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 	for _, r := range list {
-		fmt.Fprintf(stdout, "%d\t%s\tactive=%t\tagency=%s\ttz=%s\n", r.ID, r.Name, r.Active, r.DefaultAgencyID, r.Timezone)
+		centroid := "—"
+		if r.Centroid != nil {
+			centroid = fmt.Sprintf("%.4f,%.4f", r.Centroid.Lat, r.Centroid.Lon)
+		}
+		// A status word, never the key: `region list` output routinely ends
+		// up pasted into issues and chat. The CLI only sees this region's own
+		// column, not whether the server process has a default key, so an
+		// empty column must not read as "broken" -- it may still work.
+		key := "none (may inherit server default)"
+		if r.OBAAPIKey != "" {
+			key = "own key"
+		}
+		fmt.Fprintf(stdout, "%d\t%s\tactive=%t\tagency=%s\ttz=%s\tcentroid=%s\toba-key=%s\n",
+			r.ID, r.Name, r.Active, r.DefaultAgencyID, r.Timezone, centroid, key)
 	}
 	return nil
 }
 
 // regionSet updates an existing region row only: regions come from the
 // directory, so an unknown --id is an error, not an implicit insert. An
-// omitted --agency-id/--timezone leaves that field unchanged, which is why
-// the current row is fetched and merged before the (full-row) write.
+// omitted --agency-id/--timezone/--oba-api-key leaves that field unchanged,
+// which is why the current row is fetched and merged before the (full-row)
+// write.
 func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args []string) error {
 	fs := flag.NewFlagSet("region set", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	id := fs.Int64("id", 0, "region id (required)")
 	agencyID := fs.String("agency-id", "", "default agency id for this region")
 	timezone := fs.String("timezone", "", "IANA timezone for this region, e.g. America/Los_Angeles")
+	obaKey := fs.String("oba-api-key", "", "OneBusAway REST API key for this region (empty clears it)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -256,7 +271,20 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 		newTimezone = *timezone
 	}
 
-	if err := repo.SetLocalFields(ctx, *id, newAgencyID, newTimezone, now); err != nil {
+	// Read through visitedFlags, not by testing for the empty string: an
+	// explicit --oba-api-key "" must clear the key, while an omitted flag
+	// must leave it untouched. Testing *obaKey == "" would conflate those two
+	// and silently wipe the key on every unrelated `region set`.
+	newKey := current.OBAAPIKey
+	if seen["oba-api-key"] {
+		newKey = *obaKey
+	}
+
+	if err := repo.SetLocalFields(ctx, *id, regions.LocalFields{
+		DefaultAgencyID: newAgencyID,
+		Timezone:        newTimezone,
+		OBAAPIKey:       newKey,
+	}, now); err != nil {
 		return fmt.Errorf("region set: %w", err)
 	}
 	return nil
