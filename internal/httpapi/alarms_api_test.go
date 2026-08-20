@@ -348,6 +348,29 @@ func TestCreateV2_SideEffectRefreshesExisting(t *testing.T) {
 	}
 }
 
+// TestCreateV2_SideEffectSkipsOversizedUserPushID asserts an oversized
+// user_push_id (> maxTokenLen) still creates the alarm -- the side-effect
+// registry upsert is not on the 201's critical path -- but the side-effect
+// itself is skipped rather than reaching the store, since that upsert
+// bypasses the registration endpoint's own length validation and throttle
+// (spec §2.6).
+func TestCreateV2_SideEffectSkipsOversizedUserPushID(t *testing.T) {
+	t.Parallel()
+	h, _, pushRepo, regionRepo := newAlarmsTestServer(t, &fakeAlarmsOBA{})
+	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
+
+	oversized := strings.Repeat("a", 4097)
+	body := "user_push_id=" + oversized + "&operating_system=ios"
+	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT, body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := pushRepo.Get(context.Background(), 1, oversized); !errors.Is(err, pushreg.ErrNotFound) {
+		t.Errorf("PushRegs.Get(oversized user_push_id) = %v, want pushreg.ErrNotFound (side-effect must be skipped)", err)
+	}
+}
+
 func TestCreateV1_DefaultsOSToIOS(t *testing.T) {
 	t.Parallel()
 	h, alarmRepo, _, regionRepo := newAlarmsTestServer(t, &fakeAlarmsOBA{})

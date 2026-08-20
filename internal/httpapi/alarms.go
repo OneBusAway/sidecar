@@ -130,8 +130,16 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		if version == 2 {
 			// Every V2 alarm creation also refreshes the alert-push audience
 			// (spec §5.2): OS and last_seen_at only, no locale, and -- the
-			// documented reference wart -- no apns_sandbox propagation.
-			if err := h.deps.PushRegs.Upsert(r.Context(), pushreg.Upsert{
+			// documented reference wart -- no apns_sandbox propagation. This
+			// upsert bypasses the registration endpoint's own validation, so
+			// it must re-apply the length cap that endpoint enforces
+			// (maxTokenLen, spec §2.6) itself -- otherwise an oversized
+			// user_push_id would reach the store through a path the
+			// endpoint's throttle and 422 never see.
+			if len(userPushID) > maxTokenLen {
+				h.deps.Logger.Warn("httpapi: alarm side-effect registration skipped: user_push_id too long",
+					"region_id", region.ID, "len", len(userPushID))
+			} else if err := h.deps.PushRegs.Upsert(r.Context(), pushreg.Upsert{
 				RegionID: region.ID, Token: userPushID, OperatingSystem: os,
 			}, h.deps.Now()); err != nil {
 				// The alarm exists and its 201 must stand; the registry miss
