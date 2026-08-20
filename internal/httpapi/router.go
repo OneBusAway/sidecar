@@ -15,8 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -53,6 +55,14 @@ type Deps struct {
 	// PushLimiter is the §2.6 throttle for the push_registrations path.
 	// NewRouter defaults it (30/minute per IP); tests inject tighter ones.
 	PushLimiter *ratelimit.Limiter
+
+	// Alarms backs the alarm create/delete endpoints (spec §5.1-§5.2). Nil
+	// means those routes are not registered.
+	Alarms alarms.Repository
+	// OBA resolves the arrival/departure an alarm's creation-time message is
+	// composed from. Nil (or any lookup failure) degrades every alarm to the
+	// generic message rather than failing the create.
+	OBA obaapi.Client
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -149,6 +159,20 @@ func NewRouter(deps Deps) http.Handler {
 			throttleByIP(deps.PushLimiter, deps, ph.register))
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/push_registrations",
 			throttleByIP(deps.PushLimiter, deps, ph.unregister))
+	}
+
+	if deps.Alarms != nil {
+		// The V2 side-effect upsert (spec §5.2) needs the registry, and the
+		// handlers deref Regions and Now; failing at boot beats a nil deref
+		// on the first alarm.
+		if deps.PushRegs == nil || deps.Now == nil || deps.Regions == nil {
+			panic("httpapi: Deps.PushRegs, Deps.Now, and Deps.Regions required when Deps.Alarms is set")
+		}
+		ah := &alarmsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
+		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
+		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 	}
 
 	// The admin SPA is registered independently of the admin API below, and
