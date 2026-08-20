@@ -135,9 +135,15 @@ export SIDECAR_OBA_API_KEY=...
 # Pirate Weather API key. Without it, the weather endpoint returns 403 for
 # every region.
 export SIDECAR_PIRATE_WEATHER_KEY=...
+
+# Base URL of the gorush push gateway. Without it, departure alarms are
+# still created, stored, and reaped on schedule -- they just never fire:
+# the alarm scheduler always runs (spec §5.3), but the fire step is skipped
+# when no transport is configured.
+export SIDECAR_GORUSH_URL=...
 ```
 
-(`--oba-api-key`/`--pirate-weather-key` are the equivalent `sidecar` flags.)
+(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url` are the equivalent `sidecar` flags.)
 
 A region can also carry its own OneBusAway REST API key, overriding
 `SIDECAR_OBA_API_KEY` for that region alone -- set it the same way as the other
@@ -203,6 +209,19 @@ in front of sidecar must:
   cookie is issued without `Secure`, so it will also be sent over any
   plain-HTTP connection to the same host instead of being restricted to
   HTTPS.
+
+The push registration throttle (spec §2.6, 30/minute) keys on the TCP peer
+address of the request -- it does not read `X-Forwarded-For` or similar
+headers, since those are trivially spoofable by the client they're meant to
+throttle. A reverse proxy in front of sidecar must be deployed in a mode
+that preserves the real client address as the TCP peer (for example, PROXY
+protocol, or a transparent/passthrough L4 proxy); terminating and
+re-originating the TCP connection instead means every request throttles
+against the proxy's own address, either merging every client into one
+shared bucket or (worse) rate-limiting all of them together.
+
+gorush's feedback webhook (spec §6.5, terminal APNs failures) should be
+pointed at `POST /webhooks/gorush` on this server.
 
 ### Development
 

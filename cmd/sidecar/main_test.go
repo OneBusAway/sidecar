@@ -234,6 +234,32 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	}
 }
 
+// TestBuildDeps_WiresPushAndAlarms covers the fields Task 14 adds:
+// httpapi.NewRouter's loud-panic contract (see router.go) requires
+// Deps.Now and Deps.Regions whenever Deps.PushRegs is set, and additionally
+// Deps.PushRegs whenever Deps.Alarms is set -- so a binary that wired
+// PushRegs or Alarms without OBA, or without each other, would not fail
+// quietly; it would panic at router construction. This test pins the wiring
+// that keeps that panic from firing in production, and OBA in particular:
+// nothing else in this file checks that buildDeps shares the same
+// obaapi.Client the alarm scheduler in run() reads back off deps.OBA.
+func TestBuildDeps_WiresPushAndAlarms(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
+
+	if deps.PushRegs == nil {
+		t.Error("Deps.PushRegs = nil, want store.PushRegs()")
+	}
+	if deps.Alarms == nil {
+		t.Error("Deps.Alarms = nil, want store.Alarms()")
+	}
+	if deps.OBA == nil {
+		t.Error("Deps.OBA = nil, want the obaapi.Client shared with Deps.Vehicles")
+	}
+}
+
 // TestBuildDeps_WiresOBADefaultKeySet pins the one line in buildDeps nothing
 // else exercises: httpapi's own tests inject OBADefaultKeySet directly on
 // Deps, so a binary that deleted this assignment (or hard-coded it to

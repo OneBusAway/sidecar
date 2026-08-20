@@ -21,11 +21,14 @@ import (
 	// valid one on such a host.
 	_ "time/tzdata"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
+	"github.com/OneBusAway/sidecar/internal/push"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
@@ -68,6 +71,14 @@ const (
 	weatherTTL     = 30 * time.Minute
 	weatherEntries = 256
 	weatherBudget  = 5 * time.Second
+
+	// alarmCheckInterval is the alarm scheduler's cycle cadence (spec §5.3).
+	alarmCheckInterval = time.Minute
+	// pushRegPruneEvery and pushRegMaxAge bound the push_registrations
+	// table: prune once a day (spec §12) any row unseen for 180 days (spec
+	// §4).
+	pushRegPruneEvery = 24 * time.Hour
+	pushRegMaxAge     = 180 * 24 * time.Hour
 )
 
 func main() {
@@ -108,6 +119,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 		"default OneBusAway REST API key, used for regions with no key of their own")
 	pirateKey := fs.String("pirate-weather-key", envOrDefault("SIDECAR_PIRATE_WEATHER_KEY", ""),
 		"Pirate Weather API key; without it the weather endpoint returns 403")
+	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
+		"base URL of the gorush push gateway; without it alarms are stored but never fire")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -157,9 +170,35 @@ func run(stdout, stderr io.Writer, args []string) error {
 	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
 	go regions.RunSyncLoop(ctx, client, store.Regions(), *refresh, time.Now, logger)
 
+	// Hoisted out of the ServerConfig literal so the alarm scheduler below
+	// shares the same obaapi.Client that vehicle search uses, rather than
+	// constructing a second one.
+	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey)
+
+	go pushreg.RunPruneLoop(ctx, store.PushRegs(), pushRegPruneEvery, pushRegMaxAge, time.Now, logger)
+
+	// The scheduler always runs, even with no push transport: its Expire
+	// branch and 3-strike reaping are what bound the alarms table (spec
+	// §13); only the fire step needs a sender.
+	var sender push.Sender
+	if *gorushURL == "" {
+		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms will be stored and reaped but never fire")
+	} else {
+		sender = push.NewGorush(*gorushURL, http.DefaultClient, logger)
+	}
+	sched := &alarms.Scheduler{
+		Repo:    store.Alarms(),
+		Regions: store.Regions(),
+		OBA:     deps.OBA,
+		Sender:  sender,
+		Now:     time.Now,
+		Logger:  logger,
+	}
+	go sched.RunLoop(ctx, alarmCheckInterval)
+
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
-		Deps: buildDeps(store, logger, *obaAPIKey, *pirateKey),
+		Deps: deps,
 	})
 
 	logger.Info("sidecar: listening", "addr", *addr)
@@ -215,6 +254,9 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey st
 		Vehicles:         vehicleSvc,
 		Weather:          weatherSvc,
 		OBADefaultKeySet: obaAPIKey != "",
+		PushRegs:         store.PushRegs(),
+		Alarms:           store.Alarms(),
+		OBA:              obaClient,
 	}
 }
 
