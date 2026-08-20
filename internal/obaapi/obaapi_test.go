@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -412,5 +413,217 @@ func TestFleetWarnsWhenEveryAgencyDeclines(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "every agency declined") {
 		t.Errorf("no all-declined warning logged; operator would have no signal:\n%s", logs.String())
+	}
+}
+
+// arrivalServer stands in for a region's arrival-and-departure-for-stop
+// endpoint. status, when nonzero, makes every request answer with that bare
+// HTTP status instead of a JSON body -- for the 404/5xx tests. Otherwise it
+// serves entry/routes as a normal OBA envelope and records the last
+// request's query string so tests can assert on exactly which parameters
+// were sent.
+type arrivalServer struct {
+	*httptest.Server
+	calls     atomic.Int64
+	lastQuery atomic.Value // url.Values
+	status    int
+	entry     map[string]any
+	routes    []map[string]any
+}
+
+func newArrivalServer(t *testing.T, status int, entry map[string]any, routes []map[string]any) *arrivalServer {
+	t.Helper()
+	s := &arrivalServer{status: status, entry: entry, routes: routes}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/where/arrival-and-departure-for-stop/", func(w http.ResponseWriter, r *http.Request) {
+		s.calls.Add(1)
+		s.lastQuery.Store(r.URL.Query())
+		if s.status != 0 {
+			w.WriteHeader(s.status)
+			return
+		}
+		routes := s.routes
+		if routes == nil {
+			routes = []map[string]any{}
+		}
+		writeOBA(w, map[string]any{
+			"entry":      s.entry,
+			"references": map[string]any{"agencies": []any{}, "routes": routes, "situations": []any{}, "stops": []any{}, "stopTimes": []any{}, "trips": []any{}},
+		})
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *arrivalServer) query() url.Values {
+	v, _ := s.lastQuery.Load().(url.Values)
+	return v
+}
+
+func TestArrivalAndDeparture_MapsEntry(t *testing.T) {
+	entry := map[string]any{
+		"tripId":                 "1_12345",
+		"routeId":                "1_100224",
+		"routeShortName":         "44",
+		"tripHeadsign":           "Ballard",
+		"scheduledDepartureTime": int64(1700000000000),
+		"predictedDepartureTime": int64(1700000060000),
+		"predicted":              true,
+	}
+	srv := newArrivalServer(t, 0, entry, nil)
+
+	seq := int64(5)
+	q := DepartureQuery{
+		StopID:       "1_100",
+		TripID:       "1_12345",
+		ServiceDate:  1699999999000,
+		VehicleID:    "1_9999",
+		StopSequence: &seq,
+	}
+	got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey), q)
+	if err != nil {
+		t.Fatalf("ArrivalAndDeparture: %v", err)
+	}
+	want := Departure{
+		RouteShortName:         "44",
+		TripHeadsign:           "Ballard",
+		ScheduledDepartureTime: 1700000000000,
+		PredictedDepartureTime: 1700000060000,
+		Predicted:              true,
+	}
+	if got != want {
+		t.Errorf("ArrivalAndDeparture = %+v, want %+v", got, want)
+	}
+
+	qv := srv.query()
+	if got := qv.Get("tripId"); got != "1_12345" {
+		t.Errorf("tripId = %q, want 1_12345", got)
+	}
+	if got := qv.Get("serviceDate"); got != "1699999999000" {
+		t.Errorf("serviceDate = %q, want 1699999999000", got)
+	}
+	if got := qv.Get("vehicleId"); got != "1_9999" {
+		t.Errorf("vehicleId = %q, want 1_9999", got)
+	}
+	if got := qv.Get("stopSequence"); got != "5" {
+		t.Errorf("stopSequence = %q, want 5", got)
+	}
+}
+
+func TestArrivalAndDeparture_RouteShortNameFromReferences(t *testing.T) {
+	t.Run("short name from references", func(t *testing.T) {
+		entry := map[string]any{"tripId": "1_1", "routeId": "1_100224", "routeShortName": ""}
+		routes := []map[string]any{{"id": "1_100224", "agencyId": "1", "type": 3, "shortName": "44"}}
+		srv := newArrivalServer(t, 0, entry, routes)
+
+		got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+			ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+				DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+		if err != nil {
+			t.Fatalf("ArrivalAndDeparture: %v", err)
+		}
+		if got.RouteShortName != "44" {
+			t.Errorf("RouteShortName = %q, want 44", got.RouteShortName)
+		}
+	})
+
+	// A references route with no shortName (only a longName) still needs to
+	// produce something riders can read rather than an empty label.
+	t.Run("falls back to long name", func(t *testing.T) {
+		entry := map[string]any{"tripId": "1_1", "routeId": "1_100224", "routeShortName": ""}
+		routes := []map[string]any{{"id": "1_100224", "agencyId": "1", "type": 3, "longName": "Ballard Local"}}
+		srv := newArrivalServer(t, 0, entry, routes)
+
+		got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+			ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+				DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+		if err != nil {
+			t.Fatalf("ArrivalAndDeparture: %v", err)
+		}
+		if got.RouteShortName != "Ballard Local" {
+			t.Errorf("RouteShortName = %q, want Ballard Local", got.RouteShortName)
+		}
+	})
+}
+
+// A 200 whose entry has no tripId is OBA's other way of saying "nothing
+// here" (alongside a bare 404) and must count toward the alarm reaper's
+// 3-strike streak the same way. The fake produces it simply by omitting
+// tripId from the entry map, exactly like a real "no such trip" response.
+func TestArrivalAndDeparture_EmptyEntryIsErrNotFound(t *testing.T) {
+	srv := newArrivalServer(t, 0, map[string]any{}, nil)
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+			DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestArrivalAndDeparture_404IsErrNotFound(t *testing.T) {
+	srv := newArrivalServer(t, http.StatusNotFound, nil, nil)
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+			DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+// A 5xx is a transient upstream failure, not "this trip doesn't exist" -- it
+// must not satisfy errors.Is(err, ErrNotFound), or the alarm reaper would
+// count an outage as trips aging out and delete alarms that are still live.
+func TestArrivalAndDeparture_5xxIsNotErrNotFound(t *testing.T) {
+	srv := newArrivalServer(t, http.StatusInternalServerError, nil, nil)
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+			DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+	if err == nil {
+		t.Fatal("ArrivalAndDeparture succeeded, want an error on 500")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want NOT ErrNotFound for a 5xx", err)
+	}
+	if errChainContains(err, sentinelKey) {
+		t.Errorf("error text leaks the API key: %v", err)
+	}
+}
+
+func TestArrivalAndDeparture_OmitsOptionalParams(t *testing.T) {
+	entry := map[string]any{"tripId": "1_1", "routeShortName": "44"}
+	srv := newArrivalServer(t, 0, entry, nil)
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+			DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+	if err != nil {
+		t.Fatalf("ArrivalAndDeparture: %v", err)
+	}
+
+	qv := srv.query()
+	if qv.Has("vehicleId") {
+		t.Errorf("vehicleId present in query, want omitted: %v", qv)
+	}
+	if qv.Has("stopSequence") {
+		t.Errorf("stopSequence present in query, want omitted: %v", qv)
+	}
+}
+
+func TestArrivalAndDeparture_WithoutKeyMakesNoRequest(t *testing.T) {
+	srv := newArrivalServer(t, 0, map[string]any{"tripId": "1_1"}, nil)
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, ""),
+			DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+	if srv.calls.Load() != 0 {
+		t.Errorf("made %d requests, want 0", srv.calls.Load())
 	}
 }

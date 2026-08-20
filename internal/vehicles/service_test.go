@@ -35,6 +35,12 @@ func (f *fleetByRegion) Fleet(_ context.Context, region regions.Region) ([]obaap
 	return f.fleets[region.ID], nil
 }
 
+// ArrivalAndDeparture is unused by these tests; it exists only so
+// fleetByRegion still satisfies obaapi.Client.
+func (f *fleetByRegion) ArrivalAndDeparture(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+	return obaapi.Departure{}, nil
+}
+
 func newTestService(t *testing.T, oba obaapi.Client) *Service {
 	t.Helper()
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }

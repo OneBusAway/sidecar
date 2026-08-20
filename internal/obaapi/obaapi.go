@@ -29,6 +29,12 @@ import (
 // key, so no request was attempted.
 var ErrNotConfigured = errors.New("obaapi: region has no API key")
 
+// ErrNotFound means the OBA server answered but knows nothing about this
+// trip/stop/date combination -- the alarm-reaper's "trip aged out" signal,
+// distinct from transient transport failures which must NOT count toward
+// the 3-strike streak (spec §5.3).
+var ErrNotFound = errors.New("obaapi: arrival-and-departure not found")
+
 // Agency is one transit agency with coverage in a region.
 type Agency struct {
 	ID   string
@@ -42,6 +48,24 @@ type Vehicle struct {
 	VehicleID  string
 }
 
+// DepartureQuery keys one arrival-and-departure-for-stop lookup (§5.3).
+type DepartureQuery struct {
+	StopID       string
+	TripID       string
+	ServiceDate  int64  // epoch ms
+	VehicleID    string // "" = omit
+	StopSequence *int64 // nil = omit
+}
+
+// Departure is the slice of the OBA response alarms need.
+type Departure struct {
+	RouteShortName         string
+	TripHeadsign           string
+	ScheduledDepartureTime int64 // epoch ms
+	PredictedDepartureTime int64 // epoch ms; 0 = no realtime
+	Predicted              bool
+}
+
 // Client reads the OBA REST API for one region at a time. Implementations
 // must be safe for concurrent use.
 type Client interface {
@@ -49,6 +73,12 @@ type Client interface {
 	// coverage in the region, in agencies-with-coverage order then each
 	// agency's own response order.
 	Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error)
+
+	// ArrivalAndDeparture looks up one trip's arrival/departure at a stop.
+	// It returns ErrNotFound when the upstream knows nothing about the
+	// trip/stop/date combination, and ErrNotConfigured when the region has
+	// no API key.
+	ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error)
 }
 
 const (
@@ -175,6 +205,71 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 		fleet = append(fleet, vs...)
 	}
 	return fleet, nil
+}
+
+func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
+	key := region.OBAAPIKey
+	if key == "" {
+		key = c.defaultKey
+	}
+	if key == "" {
+		return Departure{}, ErrNotConfigured
+	}
+	sdk := oba.NewClient(
+		option.WithBaseURL(region.OBABaseURL),
+		option.WithAPIKey(key),
+		option.WithHTTPClient(c.http),
+		option.WithRequestTimeout(perRequestTimeout),
+		option.WithMaxRetries(maxRetries),
+	)
+
+	params := oba.ArrivalAndDepartureGetParams{
+		TripID:      oba.F(q.TripID),
+		ServiceDate: oba.F(q.ServiceDate),
+	}
+	if q.VehicleID != "" {
+		params.VehicleID = oba.F(q.VehicleID)
+	}
+	if q.StopSequence != nil {
+		params.StopSequence = oba.F(*q.StopSequence)
+	}
+
+	resp, err := sdk.ArrivalAndDeparture.Get(ctx, q.StopID, params)
+	if err != nil {
+		// A 404 is the upstream's "no such trip at this stop/date" -- the
+		// signal §5.3's reaper counts. Everything else stays a redacted
+		// transient error the caller must not count.
+		if statusOf(err) == http.StatusNotFound {
+			return Departure{}, ErrNotFound
+		}
+		return Departure{}, fmt.Errorf("obaapi: arrival-and-departure in region %d: %w", region.ID, redact(err))
+	}
+
+	entry := resp.Data.Entry
+	if entry.TripID == "" {
+		// A 200 with an empty entry is the same "nothing here" as a 404.
+		return Departure{}, ErrNotFound
+	}
+
+	shortName := entry.RouteShortName
+	if shortName == "" {
+		for _, route := range resp.Data.References.Routes {
+			if route.ID == entry.RouteID {
+				shortName = route.ShortName
+				if shortName == "" {
+					shortName = route.LongName
+				}
+				break
+			}
+		}
+	}
+	return Departure{
+		RouteShortName:         shortName,
+		TripHeadsign:           entry.TripHeadsign,
+		ScheduledDepartureTime: entry.ScheduledDepartureTime,
+		PredictedDepartureTime: entry.PredictedDepartureTime,
+		Predicted:              entry.Predicted,
+	}, nil
 }
 
 // agencies fetches the region's agencies. Names live in the response's
