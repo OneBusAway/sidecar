@@ -184,7 +184,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	if *gorushURL == "" {
 		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms will be stored and reaped but never fire")
 	} else {
-		sender = push.NewGorush(*gorushURL, http.DefaultClient, logger)
+		sender = push.NewGorush(*gorushURL, http.DefaultClient)
 	}
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),

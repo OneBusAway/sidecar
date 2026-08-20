@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGorushSendPostsExpectedJSON(t *testing.T) {
@@ -29,7 +30,7 @@ func TestGorushSendPostsExpectedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client(), nil)
+	g := NewGorush(server.URL, server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -139,7 +140,7 @@ func TestGorushAndroidOmitsDevelopment(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client(), nil)
+	g := NewGorush(server.URL, server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -187,7 +188,7 @@ func TestGorushProductionOmitsDevelopment(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client(), nil)
+	g := NewGorush(server.URL, server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -225,7 +226,7 @@ func TestGorushNon2xxIsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client(), nil)
+	g := NewGorush(server.URL, server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -245,6 +246,42 @@ func TestGorushNon2xxIsError(t *testing.T) {
 	}
 	if strings.Contains(errMsg, "tok1") {
 		t.Errorf("error message should not contain token 'tok1', got: %s", errMsg)
+	}
+}
+
+// TestGorushSendTimesOutOnHungServer asserts Send returns an error rather
+// than blocking forever when gorush accepts the connection but never
+// responds -- the failure mode NewGorush's timeout exists to bound (a hung
+// send otherwise exhausts the scheduler's errgroup limit permanently).
+// The client's Timeout (50ms) is set explicitly, well under the handler's
+// 500ms sleep, so the test itself stays fast.
+func TestGorushSendTimesOutOnHungServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := *server.Client()
+	client.Timeout = 50 * time.Millisecond
+	g := NewGorush(server.URL, &client)
+
+	n := Notification{
+		Tokens:   []string{"tok1"},
+		Platform: PlatformAndroid,
+		Title:    "Test",
+		Message:  "Test message",
+	}
+
+	start := time.Now()
+	err := g.Send(context.Background(), n)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Send() should have returned an error on timeout")
+	}
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("Send() took %v, want well under the handler's 500ms sleep (timeout not applied?)", elapsed)
 	}
 }
 
