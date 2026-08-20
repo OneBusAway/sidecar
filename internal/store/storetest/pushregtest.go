@@ -94,6 +94,9 @@ func assertPushRegistration(t *testing.T, label string, got, want pushreg.Regist
 	if !got.LastSeenAt.Equal(want.LastSeenAt) {
 		t.Errorf("%s LastSeenAt = %v, want %v", label, got.LastSeenAt, want.LastSeenAt)
 	}
+	if !got.CreatedAt.Equal(want.CreatedAt) {
+		t.Errorf("%s CreatedAt = %v, want %v", label, got.CreatedAt, want.CreatedAt)
+	}
 }
 
 // testUpsertInsertsAndGetRoundTrips asserts that a first-time Upsert with
@@ -115,7 +118,8 @@ func testUpsertInsertsAndGetRoundTrips(t *testing.T, newStore newPushRegStoreFun
 	}
 	assertPushRegistration(t, "Get", got, pushreg.Registration{
 		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: false,
-		Locale: "es-MX", TestDevice: true, Description: "Aaron's iPhone", LastSeenAt: base,
+		Locale: "es-MX", TestDevice: true, Description: "Aaron's iPhone",
+		LastSeenAt: base, CreatedAt: base,
 	})
 	if !got.LastSeenAt.Equal(base) {
 		t.Errorf("LastSeenAt = %v, want %v", got.LastSeenAt, base)
@@ -150,6 +154,13 @@ func testReRegistrationRefreshesLastSeen(t *testing.T, newStore newPushRegStoreF
 	}
 	if !got.LastSeenAt.Equal(later) {
 		t.Fatalf("LastSeenAt = %v, want %v (must advance on every registration)", got.LastSeenAt, later)
+	}
+	// CreatedAt must survive the re-upsert unchanged: this is the assertion
+	// that catches a swapped-column mapping (e.g. CreatedAt read from
+	// last_seen_at) -- LastSeenAt alone advances to `later` on every write,
+	// so a swap would still pass a LastSeenAt-only check.
+	if !got.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt = %v, want unchanged %v (must survive re-registration; only LastSeenAt advances)", got.CreatedAt, base)
 	}
 	if got.Locale != "es-MX" {
 		t.Errorf("Locale = %q, want unchanged %q (nil pointer must not clear it)", got.Locale, "es-MX")
@@ -424,22 +435,31 @@ func testDeleteByTokenSpansRegions(t *testing.T, newStore newPushRegStoreFunc) {
 
 // testPruneRemovesOnlyStale asserts Prune removes rows whose last_seen_at is
 // strictly before cutoff and leaves rows at or after it, reporting the
-// number removed.
+// number removed. The at-cutoff row is what actually pins the boundary as
+// strict "<" rather than "<=": a fresh row 24h clear of the cutoff would
+// still survive under either comparison, so it alone cannot distinguish
+// them.
 func testPruneRemovesOnlyStale(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
 	putPushRegRegion(t, regionRepo, 1)
 
+	cutoff := base.Add(time.Hour)
+
 	stale := fullUpsert(1, "stale-tok")
 	if err := repo.Upsert(ctx, stale, base); err != nil {
 		t.Fatalf("Upsert(stale): %v", err)
+	}
+	atCutoff := fullUpsert(1, "at-cutoff-tok")
+	if err := repo.Upsert(ctx, atCutoff, cutoff); err != nil {
+		t.Fatalf("Upsert(at-cutoff): %v", err)
 	}
 	fresh := fullUpsert(1, "fresh-tok")
 	if err := repo.Upsert(ctx, fresh, base.Add(24*time.Hour)); err != nil {
 		t.Fatalf("Upsert(fresh): %v", err)
 	}
 
-	n, err := repo.Prune(ctx, base.Add(time.Hour))
+	n, err := repo.Prune(ctx, cutoff)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -449,6 +469,9 @@ func testPruneRemovesOnlyStale(t *testing.T, newStore newPushRegStoreFunc) {
 
 	if _, err := repo.Get(ctx, 1, "stale-tok"); !errors.Is(err, pushreg.ErrNotFound) {
 		t.Errorf("Get(stale) after Prune = %v, want pushreg.ErrNotFound", err)
+	}
+	if _, err := repo.Get(ctx, 1, "at-cutoff-tok"); err != nil {
+		t.Errorf("Get(at-cutoff) after Prune = %v, want no error (a row exactly at the cutoff must survive: the boundary is strict <)", err)
 	}
 	if _, err := repo.Get(ctx, 1, "fresh-tok"); err != nil {
 		t.Errorf("Get(fresh) after Prune = %v, want no error (must survive)", err)
