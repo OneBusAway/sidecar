@@ -17,6 +17,8 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
+	"github.com/OneBusAway/sidecar/internal/ratelimit"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
 	"github.com/OneBusAway/sidecar/internal/weather"
@@ -44,6 +46,13 @@ type Deps struct {
 	// Weather backs the forecast endpoint. Nil means the route is not
 	// registered.
 	Weather *weather.Service
+
+	// PushRegs backs the push registration endpoints and the V2 alarm
+	// side-effect upsert. Nil means those routes are not registered.
+	PushRegs pushreg.Repository
+	// PushLimiter is the §2.6 throttle for the push_registrations path.
+	// NewRouter defaults it (30/minute per IP); tests inject tighter ones.
+	PushLimiter *ratelimit.Limiter
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -124,6 +133,22 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Weather != nil {
 		wh := &weatherHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
+	}
+
+	if deps.PushRegs != nil {
+		// The handlers deref Regions (resolveRegion) and Now on the first
+		// request; fail at boot, matching the Auth block's precedent.
+		if deps.Now == nil || deps.Regions == nil {
+			panic("httpapi: Deps.Now and Deps.Regions required when Deps.PushRegs is set")
+		}
+		if deps.PushLimiter == nil {
+			deps.PushLimiter = ratelimit.New(30, time.Minute)
+		}
+		ph := &pushRegsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/push_registrations",
+			throttleByIP(deps.PushLimiter, deps, ph.register))
+		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/push_registrations",
+			throttleByIP(deps.PushLimiter, deps, ph.unregister))
 	}
 
 	// The admin SPA is registered independently of the admin API below, and
