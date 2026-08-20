@@ -66,6 +66,16 @@ func TestPushData(t *testing.T) {
 	if string(b) != want {
 		t.Errorf("PushData(empty) = %s\nwant            %s", b, want)
 	}
+
+	// StopSequence: ptr(0) is a real value (first stop), marshals as 0, not null.
+	zero := int64(0)
+	zeroSeq := alarms.Alarm{RegionID: 3, StopSequence: &zero}
+	b, _ = json.Marshal(zeroSeq.PushData())
+	want = `{"arrival_and_departure":{"region_id":3,"service_date":null,` +
+		`"stop_id":null,"stop_sequence":0,"trip_id":null,"vehicle_id":null}}`
+	if string(b) != want {
+		t.Errorf("PushData(zeroSeq) = %s\nwant             %s", b, want)
+	}
 }
 
 func TestDecide(t *testing.T) {
