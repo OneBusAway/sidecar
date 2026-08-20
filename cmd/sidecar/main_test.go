@@ -234,15 +234,18 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	}
 }
 
-// TestBuildDeps_WiresPushAndAlarms covers the fields Task 14 adds:
+// TestBuildDeps_WiresPushAndAlarms covers the fields Task 14 adds.
 // httpapi.NewRouter's loud-panic contract (see router.go) requires
 // Deps.Now and Deps.Regions whenever Deps.PushRegs is set, and additionally
 // Deps.PushRegs whenever Deps.Alarms is set -- so a binary that wired
-// PushRegs or Alarms without OBA, or without each other, would not fail
-// quietly; it would panic at router construction. This test pins the wiring
-// that keeps that panic from firing in production, and OBA in particular:
-// nothing else in this file checks that buildDeps shares the same
-// obaapi.Client the alarm scheduler in run() reads back off deps.OBA.
+// PushRegs or Alarms without the other, or without Now/Regions, would not
+// fail quietly; it would panic at router construction. Deps.OBA carries no
+// such guard: a nil OBA passes router construction silently and only shows
+// up per-request, in alarms.go's composeMessage degrading every alarm's
+// creation-time message to the generic copy -- no boot-time signal at all.
+// That gap is exactly why this test pins OBA as non-nil itself: nothing
+// else in this file checks that buildDeps shares the same obaapi.Client the
+// alarm scheduler in run() reads back off deps.OBA.
 func TestBuildDeps_WiresPushAndAlarms(t *testing.T) {
 	t.Parallel()
 
