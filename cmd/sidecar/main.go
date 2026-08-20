@@ -22,6 +22,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/OneBusAway/sidecar/internal/cache"
+	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -87,6 +88,15 @@ func main() {
 // stdout and reported as success (nil), following the convention that
 // --help is not an error condition.
 func run(stdout, stderr io.Writer, args []string) error {
+	// Before the flag definitions, not just before Parse: the envOrDefault
+	// calls below read the environment at flag-registration time, so a .env
+	// loaded any later could never reach a flag default. Real environment
+	// variables win over the file (dotenv.Load never overwrites), keeping
+	// platform-provided production configuration unaffected.
+	if err := dotenv.Load(".env"); err != nil {
+		return err
+	}
+
 	fs := flag.NewFlagSet("sidecar", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 

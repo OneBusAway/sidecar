@@ -18,3 +18,5 @@ internal/httpapi/adminui/dist/*
 web/admin/node_modules/
 web/admin/.svelte-kit/
 web/admin/build/
+
+.env

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,6 +105,78 @@ func TestRun_MigrationFailure(t *testing.T) {
 	err := run(&stdout, &stderr, []string{"--db", badPath})
 	if err == nil {
 		t.Fatalf("run() with unmigratable --db returned nil error, want non-nil")
+	}
+}
+
+// TestRun_DotEnvLoadsBeforeFlagParsing proves run reads ./.env before it
+// even parses flags: a malformed .env in the working directory must abort
+// the boot with an error, even when the arguments (--help) would otherwise
+// return early and successfully. This position matters -- the envOrDefault
+// calls run at flag-registration time, so a .env loaded any later could
+// never reach a flag default.
+//
+// Deliberately not parallel: t.Chdir moves the process working directory,
+// and run mutates process environment via dotenv.Load. Sequential tests
+// finish before any paused parallel test resumes, so neither leaks into the
+// parallel batch.
+func TestRun_DotEnvLoadsBeforeFlagParsing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("not a pair\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	err := run(&stdout, &stderr, []string{"--help"})
+	if err == nil {
+		t.Fatal("run() with a malformed ./.env returned nil, want an error before flag parsing")
+	}
+}
+
+// TestRun_DotEnvValueReachesFlagDefault proves the full chain: a value in
+// ./.env lands in the process environment early enough for envOrDefault to
+// pick it up as a flag default. SIDECAR_DB is the one env-backed flag whose
+// bad value fails fast (Migrate errors on the missing parent directory), so
+// it is the observable end of the chain. run is driven from a goroutine
+// with a deadline because the regression mode is a hang: if the .env value
+// never loads, run falls back to a working default database and blocks in
+// serve instead of returning.
+func TestRun_DotEnvValueReachesFlagDefault(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "does-not-exist", "sidecar.db")
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("SIDECAR_DB="+badPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	// The variable must start unset or Load will (correctly) refuse to
+	// apply the file's value; restore whatever was there afterwards, and
+	// drop the value run's dotenv.Load sets so it can't leak forward.
+	orig, wasSet := os.LookupEnv("SIDECAR_DB")
+	if err := os.Unsetenv("SIDECAR_DB"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("SIDECAR_DB", orig)
+		} else {
+			_ = os.Unsetenv("SIDECAR_DB")
+		}
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		errCh <- run(&stdout, &stderr, nil)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "migrate database") {
+			t.Fatalf("run() = %v, want a migrate error for the .env-supplied db path", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run() did not return; the .env-supplied SIDECAR_DB never reached the --db default")
 	}
 }
 
