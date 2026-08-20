@@ -119,7 +119,11 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 					return
 				}
 			}
-			writeServerError(w, h.deps.Logger, region.ID, "create alarm", sanitizeToken(err, userPushID))
+			// Both secrets can appear in a store error: user_push_id is a
+			// query key on the failed insert, and the freshly minted alarm
+			// token is a column value on the same row.
+			writeServerError(w, h.deps.Logger, region.ID, "create alarm",
+				sanitizeToken(sanitizeToken(err, userPushID), token))
 			return
 		}
 
@@ -131,9 +135,10 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 				RegionID: region.ID, Token: userPushID, OperatingSystem: os,
 			}, h.deps.Now()); err != nil {
 				// The alarm exists and its 201 must stand; the registry miss
-				// only costs alert-push reach.
+				// only costs alert-push reach. err's Token is user_push_id on
+				// this path (pushreg.Upsert.Token), never logged raw.
 				h.deps.Logger.Warn("httpapi: alarm side-effect registration failed",
-					"region_id", region.ID, "err", err)
+					"region_id", region.ID, "err", sanitizeToken(err, userPushID))
 			}
 		}
 
@@ -180,14 +185,17 @@ func (h *alarmsHandler) delete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := h.deps.Alarms.Delete(r.Context(), region.ID, r.PathValue("alarmToken"))
+	token := r.PathValue("alarmToken")
+	err := h.deps.Alarms.Delete(r.Context(), region.ID, token)
 	switch {
 	case errors.Is(err, alarms.ErrNotFound):
 		w.WriteHeader(http.StatusNotFound)
 	case err != nil:
 		// 204 is a binding "it's cancelled" (spec §2.5); a failed delete
-		// must surface as a 5xx, never a false positive.
-		writeServerError(w, h.deps.Logger, region.ID, "delete alarm", err)
+		// must surface as a 5xx, never a false positive. The store error can
+		// embed the path token (it's the delete's WHERE-clause value); never
+		// log it raw.
+		writeServerError(w, h.deps.Logger, region.ID, "delete alarm", sanitizeToken(err, token))
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}

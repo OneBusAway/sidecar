@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -559,4 +560,157 @@ func TestAlarmsRoutesRequireDeps(t *testing.T) {
 		}
 	}()
 	httpapi.NewRouter(httpapi.Deps{Alarms: store.Alarms()})
+}
+
+// erroringAlarmsRepo is an alarms.Repository stub whose Create and Delete
+// always fail with an error that echoes back the secret(s) they were
+// handed -- the worst case a store driver could produce, and the one the
+// sanitizeToken calls in alarms.go exist for. Create's error embeds both
+// user_push_id and the alarm token it was asked to store; Delete's embeds
+// the path token. lastCreateToken captures the token Create actually
+// received (it is minted inside the handler, so no test can know it in
+// advance) so a test can assert the exact secret never reaches the log.
+// The other five Repository methods are never exercised by the handler
+// paths under test and panic if called, so an accidental extra call is
+// caught immediately rather than silently returning a zero value.
+type erroringAlarmsRepo struct {
+	lastCreateToken *string
+}
+
+func (r erroringAlarmsRepo) Create(_ context.Context, in alarms.NewAlarm, _ time.Time) (alarms.Alarm, error) {
+	if r.lastCreateToken != nil {
+		*r.lastCreateToken = in.Token
+	}
+	return alarms.Alarm{}, fmt.Errorf("constraint failed: token=%s user_push_id=%s", in.Token, in.UserPushID)
+}
+func (erroringAlarmsRepo) FindV1(context.Context, alarms.V1Key) (alarms.Alarm, error) {
+	return alarms.Alarm{}, alarms.ErrNotFound
+}
+func (erroringAlarmsRepo) Delete(_ context.Context, _ int64, token string) error {
+	return fmt.Errorf("constraint failed: token=%s", token)
+}
+func (erroringAlarmsRepo) DeleteByID(context.Context, int64) error {
+	panic("erroringAlarmsRepo.DeleteByID: unused by these tests")
+}
+func (erroringAlarmsRepo) List(context.Context) ([]alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.List: unused by these tests")
+}
+func (erroringAlarmsRepo) RecordFailure(context.Context, int64) (int64, error) {
+	panic("erroringAlarmsRepo.RecordFailure: unused by these tests")
+}
+func (erroringAlarmsRepo) ResetFailures(context.Context, int64) error {
+	panic("erroringAlarmsRepo.ResetFailures: unused by these tests")
+}
+
+// TestCreate_StoreErrorSanitizesUserPushIDAndToken covers the create-error
+// log path: a failed Create's error can embed both user_push_id (the query
+// key) and the freshly minted alarm token (a column value on the same
+// failed row), and neither must reach the log raw.
+func TestCreate_StoreErrorSanitizesUserPushIDAndToken(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegionWithBaseURL(t, store.Regions(), 1, "https://sidecar.example.org")
+
+	var buf bytes.Buffer
+	var mintedToken string
+	deps := httpapi.Deps{
+		Alarms:   erroringAlarmsRepo{lastCreateToken: &mintedToken},
+		PushRegs: store.PushRegs(),
+		Regions:  store.Regions(),
+		OBA:      &fakeAlarmsOBA{},
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	const userPushID = "supersecret-push-id-abc123"
+	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT,
+		"user_push_id="+userPushID+"&operating_system=ios")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if mintedToken == "" {
+		t.Fatal("erroringAlarmsRepo.Create was never called; test cannot capture the minted token")
+	}
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, userPushID) {
+		t.Errorf("log output contains the raw user_push_id: %s", logOutput)
+	}
+	if strings.Contains(logOutput, mintedToken) {
+		t.Errorf("log output contains the raw minted alarm token %q: %s", mintedToken, logOutput)
+	}
+	if got := strings.Count(logOutput, "[token]"); got != 2 {
+		t.Errorf("log output has %d sanitized [token] markers, want 2 (one per secret): %s", got, logOutput)
+	}
+}
+
+// TestDelete_StoreErrorSanitizesToken covers the delete-error log path: a
+// failed Delete's error can embed the path token, and it must not reach the
+// log raw.
+func TestDelete_StoreErrorSanitizesToken(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegionWithBaseURL(t, store.Regions(), 1, "https://sidecar.example.org")
+
+	var buf bytes.Buffer
+	deps := httpapi.Deps{
+		Alarms:   erroringAlarmsRepo{},
+		PushRegs: store.PushRegs(),
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	const token = "supersecret-alarm-token-xyz789"
+	rec := alarmRequest(t, h, http.MethodDelete, "/api/v2/regions/1/alarms/"+token, "", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, token) {
+		t.Errorf("log output contains the raw alarm token: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "[token]") {
+		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
+	}
+}
+
+// TestCreateV2_SideEffectErrorSanitizesUserPushID covers the V2
+// side-effect warn log path: a failed push-registration upsert's error can
+// embed user_push_id (pushreg.Upsert.Token on this call), and it must not
+// reach the log raw. The alarm creation itself must still succeed -- the
+// side effect failing never fails the 201 (spec §5.2).
+func TestCreateV2_SideEffectErrorSanitizesUserPushID(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegionWithBaseURL(t, store.Regions(), 1, "https://sidecar.example.org")
+
+	const userPushID = "supersecret-push-id-def456"
+	var buf bytes.Buffer
+	deps := httpapi.Deps{
+		Alarms:   store.Alarms(),
+		PushRegs: erroringPushRepo{upsertErr: fmt.Errorf("constraint failed for token %s", userPushID)},
+		Regions:  store.Regions(),
+		OBA:      &fakeAlarmsOBA{},
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT,
+		"user_push_id="+userPushID+"&operating_system=ios")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (side-effect failure must not fail the create); body = %s", rec.Code, rec.Body.String())
+	}
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, userPushID) {
+		t.Errorf("log output contains the raw user_push_id: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "[token]") {
+		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
+	}
 }
