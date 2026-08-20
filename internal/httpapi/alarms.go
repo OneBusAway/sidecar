@@ -81,14 +81,14 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		if version == 1 {
 			key := alarms.V1Key{RegionID: region.ID, UserPushID: userPushID,
 				TripID: tripID, StopID: stopID, ServiceDate: serviceDate}
-			if existing, err := h.deps.Alarms.FindV1(r.Context(), key); err == nil {
+			if existing, findErr := h.deps.Alarms.FindV1(r.Context(), key); findErr == nil {
 				// Idempotent re-POST: hand back the existing alarm untouched
 				// (spec §5.1 -- legacy clients re-POST aggressively).
 				writeJSON(w, h.deps.Logger, http.StatusCreated,
 					map[string]string{"url": alarmURL(region, r, version, existing.Token)})
 				return
-			} else if !errors.Is(err, alarms.ErrNotFound) {
-				writeServerError(w, h.deps.Logger, region.ID, "find v1 alarm", sanitizeToken(err, userPushID))
+			} else if !errors.Is(findErr, alarms.ErrNotFound) {
+				writeServerError(w, h.deps.Logger, region.ID, "find v1 alarm", sanitizeToken(findErr, userPushID))
 				return
 			}
 		}
@@ -155,7 +155,6 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 func (h *alarmsHandler) composeMessage(ctx context.Context, region regions.Region,
 	stopID, tripID string, serviceDate int64, vehicleID string, stopSeq *int64,
 	secondsBefore int64) string {
-
 	if h.deps.OBA == nil || stopID == "" || tripID == "" || serviceDate == 0 {
 		return alarms.GenericMessage(secondsBefore)
 	}

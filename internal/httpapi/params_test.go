@@ -127,7 +127,7 @@ func TestParseRequestParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(tt.method, "http://example.com?"+tt.query, strings.NewReader(tt.body))
+			req := httptest.NewRequestWithContext(t.Context(), tt.method, "http://example.com?"+tt.query, strings.NewReader(tt.body))
 			if tt.ct != "" {
 				req.Header.Set("Content-Type", tt.ct)
 			}
@@ -526,10 +526,8 @@ func TestParseAPNSSandbox(t *testing.T) {
 				if tt.logContent != "" && !strings.Contains(logOutput, tt.logContent) {
 					t.Errorf("parseAPNSSandbox() log should contain %q, got: %s", tt.logContent, logOutput)
 				}
-			} else {
-				if logOutput != "" && strings.Contains(logOutput, "Warn") {
-					t.Errorf("parseAPNSSandbox() should not have logged a warning, but got: %s", logOutput)
-				}
+			} else if logOutput != "" && strings.Contains(logOutput, "Warn") {
+				t.Errorf("parseAPNSSandbox() should not have logged a warning, but got: %s", logOutput)
 			}
 		})
 	}

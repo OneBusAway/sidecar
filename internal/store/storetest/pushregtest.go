@@ -309,10 +309,10 @@ func testLocaleOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStoreFunc
 		t.Fatalf("Locale = %q, want %q", got.Locale, "fr")
 	}
 
-	if err := repo.Upsert(ctx, pushreg.Upsert{
+	if upsertErr := repo.Upsert(ctx, pushreg.Upsert{
 		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: false,
-	}, base.Add(2*time.Hour)); err != nil {
-		t.Fatalf("Upsert(3, locale nil): %v", err)
+	}, base.Add(2*time.Hour)); upsertErr != nil {
+		t.Fatalf("Upsert(3, locale nil): %v", upsertErr)
 	}
 	got, err = repo.Get(ctx, 1, "tok-1")
 	if err != nil {
@@ -355,10 +355,10 @@ func testDescriptionOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStor
 		t.Errorf("TestDevice = %v, want unchanged true (its pointer was nil, must not follow Description's flag)", got.TestDevice)
 	}
 
-	if err := repo.Upsert(ctx, pushreg.Upsert{
+	if upsertErr := repo.Upsert(ctx, pushreg.Upsert{
 		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: false,
-	}, base.Add(2*time.Hour)); err != nil {
-		t.Fatalf("Upsert(3, description nil): %v", err)
+	}, base.Add(2*time.Hour)); upsertErr != nil {
+		t.Fatalf("Upsert(3, description nil): %v", upsertErr)
 	}
 	got, err = repo.Get(ctx, 1, "tok-1")
 	if err != nil {

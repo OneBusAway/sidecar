@@ -19,11 +19,10 @@ import (
 // fakePushRepo wraps a real pushreg.Repository but allows test control over
 // the DeleteByToken method (to verify it was called and with what token).
 type fakePushRepo struct {
-	real                  pushreg.Repository
-	deleteByTokenCalled   bool
-	deleteByTokenToken    string
-	deleteByTokenErr      error
-	deleteByTokenReturned int64
+	real                pushreg.Repository
+	deleteByTokenCalled bool
+	deleteByTokenToken  string
+	deleteByTokenErr    error
 }
 
 func (f *fakePushRepo) Get(ctx context.Context, regionID int64, token string) (pushreg.Registration, error) {

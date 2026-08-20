@@ -48,13 +48,15 @@ func putAlarmRegion(t *testing.T, repo regions.Repository, id int64) {
 }
 
 // fullAlarmIn builds a NewAlarm with every field set, for the subtests that
-// need a fully-populated starting row. StopSequence defaults to ptr(0): the
-// zero value is a real stop sequence (the trip's first stop) and must be
-// distinguishable from an absent one throughout the suite unless a subtest
-// overrides it.
-func fullAlarmIn(regionID int64, token string, apiVersion int) alarms.NewAlarm {
+// need a fully-populated starting row. RegionID is always 1: subtests that
+// need a different region call putAlarmRegion for the extra id and set
+// RegionID on the returned value themselves. StopSequence defaults to
+// ptr(0): the zero value is a real stop sequence (the trip's first stop)
+// and must be distinguishable from an absent one throughout the suite
+// unless a subtest overrides it.
+func fullAlarmIn(token string, apiVersion int) alarms.NewAlarm {
 	return alarms.NewAlarm{
-		RegionID:        regionID,
+		RegionID:        1,
 		Token:           token,
 		APIVersion:      apiVersion,
 		UserPushID:      "push-1",
@@ -92,7 +94,7 @@ func testAlarmCreateGetRoundTrip(t *testing.T, newStore newAlarmStoreFunc) {
 	ctx := context.Background()
 	putAlarmRegion(t, regionRepo, 1)
 
-	in := fullAlarmIn(1, "tok-round-trip", 2)
+	in := fullAlarmIn("tok-round-trip", 2)
 	created, err := repo.Create(ctx, in, base)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -163,13 +165,13 @@ func testStopSequenceZeroDistinctFromAbsent(t *testing.T, newStore newAlarmStore
 	ctx := context.Background()
 	putAlarmRegion(t, regionRepo, 1)
 
-	zeroIn := fullAlarmIn(1, "tok-zero", 2)
+	zeroIn := fullAlarmIn("tok-zero", 2)
 	zeroIn.StopSequence = ptr(int64(0))
 	if _, err := repo.Create(ctx, zeroIn, base); err != nil {
 		t.Fatalf("Create(zero): %v", err)
 	}
 
-	absentIn := fullAlarmIn(1, "tok-absent", 2)
+	absentIn := fullAlarmIn("tok-absent", 2)
 	absentIn.StopSequence = nil
 	if _, err := repo.Create(ctx, absentIn, base); err != nil {
 		t.Fatalf("Create(absent): %v", err)
@@ -202,7 +204,7 @@ func testV1FindMatchesExactKey(t *testing.T, newStore newAlarmStoreFunc) {
 	putAlarmRegion(t, regionRepo, 1)
 	putAlarmRegion(t, regionRepo, 2)
 
-	in := fullAlarmIn(1, "tok-v1-key", 1)
+	in := fullAlarmIn("tok-v1-key", 1)
 	created, err := repo.Create(ctx, in, base)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -249,12 +251,12 @@ func testV1DuplicateInsertReturnsErrDuplicate(t *testing.T, newStore newAlarmSto
 	ctx := context.Background()
 	putAlarmRegion(t, regionRepo, 1)
 
-	first := fullAlarmIn(1, "tok-v1-first", 1)
+	first := fullAlarmIn("tok-v1-first", 1)
 	if _, err := repo.Create(ctx, first, base); err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
 
-	second := fullAlarmIn(1, "tok-v1-second", 1) // different token, identical V1 key
+	second := fullAlarmIn("tok-v1-second", 1) // different token, identical V1 key
 	if _, err := repo.Create(ctx, second, base); !errors.Is(err, alarms.ErrDuplicate) {
 		t.Fatalf("Create(duplicate V1 key) = %v, want alarms.ErrDuplicate", err)
 	}
@@ -276,11 +278,11 @@ func testV2NeverDeduplicates(t *testing.T, newStore newAlarmStoreFunc) {
 	ctx := context.Background()
 	putAlarmRegion(t, regionRepo, 1)
 
-	first := fullAlarmIn(1, "tok-v2-first", 2)
+	first := fullAlarmIn("tok-v2-first", 2)
 	if _, err := repo.Create(ctx, first, base); err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
-	second := fullAlarmIn(1, "tok-v2-second", 2) // different token, identical trip-identity fields
+	second := fullAlarmIn("tok-v2-second", 2) // different token, identical trip-identity fields
 	if _, err := repo.Create(ctx, second, base); err != nil {
 		t.Fatalf("Create(second): %v, want no error (V2 never dedupes)", err)
 	}
@@ -306,7 +308,7 @@ func testDeleteByTokenReports204Contract(t *testing.T, newStore newAlarmStoreFun
 		t.Errorf("Delete(unknown) = %v, want alarms.ErrNotFound", err)
 	}
 
-	in := fullAlarmIn(1, "tok-delete", 2)
+	in := fullAlarmIn("tok-delete", 2)
 	if _, err := repo.Create(ctx, in, base); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -331,24 +333,24 @@ func testFailureCounterIncrementsAndResets(t *testing.T, newStore newAlarmStoreF
 	ctx := context.Background()
 	putAlarmRegion(t, regionRepo, 1)
 
-	in := fullAlarmIn(1, "tok-failures", 2)
+	in := fullAlarmIn("tok-failures", 2)
 	created, err := repo.Create(ctx, in, base)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	for i, want := range []int64{1, 2, 3} {
-		got, err := repo.RecordFailure(ctx, created.ID)
-		if err != nil {
-			t.Fatalf("RecordFailure(%d): %v", i, err)
+		got, recErr := repo.RecordFailure(ctx, created.ID)
+		if recErr != nil {
+			t.Fatalf("RecordFailure(%d): %v", i, recErr)
 		}
 		if got != want {
 			t.Fatalf("RecordFailure(%d) = %d, want %d", i, got, want)
 		}
 	}
 
-	if err := repo.ResetFailures(ctx, created.ID); err != nil {
-		t.Fatalf("ResetFailures: %v", err)
+	if resetErr := repo.ResetFailures(ctx, created.ID); resetErr != nil {
+		t.Fatalf("ResetFailures: %v", resetErr)
 	}
 
 	got, err := repo.RecordFailure(ctx, created.ID)
@@ -372,7 +374,7 @@ func testServiceDateBeyond32Bit(t *testing.T, newStore newAlarmStoreFunc) {
 
 	const want = (int64(1) << 32) + 123456789 // well beyond the 32-bit signed boundary
 
-	in := fullAlarmIn(1, "tok-service-date", 2)
+	in := fullAlarmIn("tok-service-date", 2)
 	in.ServiceDate = want
 	if _, err := repo.Create(ctx, in, base); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -399,7 +401,7 @@ func testAlarmRegionCascade(t *testing.T, newStore newAlarmStoreFunc) {
 	putAlarmRegion(t, regionRepo, 1)
 	putAlarmRegion(t, regionRepo, 2)
 
-	in := fullAlarmIn(1, "tok-cascade", 2)
+	in := fullAlarmIn("tok-cascade", 2)
 	if _, err := repo.Create(ctx, in, base); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -435,13 +437,13 @@ func testDeleteByIDTreatsMissingAsSuccess(t *testing.T, newStore newAlarmStoreFu
 		t.Errorf("DeleteByID(unknown) = %v, want nil", err)
 	}
 
-	in := fullAlarmIn(1, "tok-delete-by-id", 2)
+	in := fullAlarmIn("tok-delete-by-id", 2)
 	created, err := repo.Create(ctx, in, base)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := repo.DeleteByID(ctx, created.ID); err != nil {
-		t.Fatalf("DeleteByID(known): %v, want nil", err)
+	if deleteErr := repo.DeleteByID(ctx, created.ID); deleteErr != nil {
+		t.Fatalf("DeleteByID(known): %v, want nil", deleteErr)
 	}
 	list, err := repo.List(ctx)
 	if err != nil {

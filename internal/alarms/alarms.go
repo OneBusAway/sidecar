@@ -14,14 +14,22 @@ import (
 )
 
 var (
+	// ErrNotFound reports that no alarm matches the given token, region, or
+	// V1 dedupe key.
 	ErrNotFound = errors.New("alarm not found")
 	// ErrDuplicate reports a V1 create that lost the dedupe race to a
 	// concurrent identical registration; callers re-fetch the winner.
 	ErrDuplicate = errors.New("duplicate v1 alarm")
 )
 
-const DefaultSecondsBefore = 600 // spec §5.2
+// DefaultSecondsBefore is the lead time NormalizeSecondsBefore falls back
+// to when a client omits seconds_before or sends a non-positive value
+// (spec §5.2).
+const DefaultSecondsBefore = 600
 
+// Alarm is one server-owned scheduled push, as stored: the fields a client
+// submitted at creation plus the scheduler bookkeeping (FailureCount,
+// CreatedAt) that decides when and whether it still fires.
 type Alarm struct {
 	ID              int64
 	RegionID        int64
@@ -44,6 +52,8 @@ type Alarm struct {
 	CreatedAt     time.Time
 }
 
+// NewAlarm is the input to Repository.Create: an Alarm before the store
+// assigns an ID and CreatedAt.
 type NewAlarm struct {
 	RegionID        int64
 	Token           string
@@ -68,6 +78,10 @@ type V1Key struct {
 	ServiceDate int64
 }
 
+// Repository persists alarms. Implementations must be safe for concurrent
+// use: Create races other Creates on the V1 dedupe key, and the scheduler's
+// sweep runs List/RecordFailure/DeleteByID concurrently with the HTTP
+// handlers' Create/Delete.
 type Repository interface {
 	Create(ctx context.Context, in NewAlarm, now time.Time) (Alarm, error) // ErrDuplicate on V1 race
 	FindV1(ctx context.Context, key V1Key) (Alarm, error)                  // ErrNotFound
@@ -140,12 +154,17 @@ func (a Alarm) PushData() map[string]any {
 	return map[string]any{"arrival_and_departure": ad}
 }
 
+// Decision is what the scheduler's sweep does with one alarm on a given
+// tick, per Decide.
 type Decision int
 
+// The three outcomes Decide can return (spec §5.3): Wait leaves the alarm
+// alone, Fire sends the push and then deletes the row, and Expire deletes
+// the row without pushing because the departure already passed.
 const (
 	Wait Decision = iota
 	Fire
-	Expire // departure already passed: delete without pushing (spec §5.3)
+	Expire
 )
 
 // Decide implements the §5.3 firing rules given seconds until departure.

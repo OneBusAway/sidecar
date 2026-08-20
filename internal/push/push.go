@@ -9,6 +9,8 @@ import (
 // table; they are stable public API of that project.
 type Platform int
 
+// The platform codes gorush expects on the wire; values are fixed by that
+// project's API, not this package.
 const (
 	PlatformIOS     Platform = 1
 	PlatformAndroid Platform = 2

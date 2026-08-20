@@ -39,11 +39,13 @@ func parseRequestParams(w http.ResponseWriter, r *http.Request, maxBytes int64) 
 		// a DELETE with only ?token= must not fail a JSON decode.
 		return params{m: m}, nil
 	}
-	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if ct == "application/json" {
+	// An unparseable Content-Type is treated as "not JSON", same as a
+	// missing header: the body still falls through to form parsing below.
+	ct, _, parseErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if parseErr == nil && ct == "application/json" {
 		var decoded map[string]any
-		if err := json.Unmarshal(body, &decoded); err != nil {
-			return params{}, fmt.Errorf("invalid JSON body: %w", err)
+		if unmarshalErr := json.Unmarshal(body, &decoded); unmarshalErr != nil {
+			return params{}, fmt.Errorf("invalid JSON body: %w", unmarshalErr)
 		}
 		for k, v := range decoded {
 			if v == nil {
