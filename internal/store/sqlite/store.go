@@ -1,9 +1,10 @@
-// Package sqlite is the SQLite adapter for the alerts, regions, auth, and
-// push registration repositories. It maps generated sqlc rows to the domain
-// types defined in internal/alerts, internal/regions, internal/auth, and
-// internal/pushreg — nothing outside this package ever sees a gen.* struct,
-// which is what lets a Postgres adapter satisfy the same interfaces later
-// without touching any other package.
+// Package sqlite is the SQLite adapter for the alerts, regions, auth,
+// alarms, and push registration repositories. It maps generated sqlc rows
+// to the domain types defined in internal/alerts, internal/regions,
+// internal/auth, internal/alarms, and internal/pushreg — nothing outside
+// this package ever sees a gen.* struct, which is what lets a Postgres
+// adapter satisfy the same interfaces later without touching any other
+// package.
 package sqlite
 
 import (
@@ -47,9 +48,9 @@ func configureGoose() error {
 	return gooseConfigureErr
 }
 
-// Store owns the database connection pool and hands out the four
-// repositories: alerts, regions, auth, and push registrations. It is safe
-// for concurrent use.
+// Store owns the database connection pool and hands out the five
+// repositories: alerts, regions, auth, alarms, and push registrations. It
+// is safe for concurrent use.
 type Store struct {
 	db *sql.DB
 	q  *gen.Queries
