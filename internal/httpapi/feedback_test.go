@@ -250,3 +250,62 @@ func TestFeedbackNeverLogsToken(t *testing.T) {
 		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
 	}
 }
+
+func TestFeedbackSuccessLogNeverLogsToken(t *testing.T) {
+	t.Parallel()
+	const token = "supersecrettoken-abc123"
+
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	realRepo := store.PushRegs()
+
+	// Seed a real registration
+	if err := realRepo.Upsert(context.Background(), pushreg.Upsert{
+		RegionID:        1,
+		Token:           token,
+		OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Create router with logs captured to a buffer
+	var buf bytes.Buffer
+	deps := httpapi.Deps{
+		PushRegs: realRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// POST terminal error feedback for the real token
+	body := `{"type":"failed-push","platform":"ios","token":"` + token + `","error":"Unregistered"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the registration is gone
+	_, err := realRepo.Get(context.Background(), 1, token)
+	if err == nil {
+		t.Errorf("Get returned registration, want error (registration should be deleted)")
+	}
+
+	logOutput := buf.String()
+
+	// Verify the success log fired (contains the key phrase that proves the path was taken)
+	if !strings.Contains(logOutput, "pruned dead push token") {
+		t.Errorf("log output missing success log line: %s", logOutput)
+	}
+
+	// Verify the raw token does NOT appear in the logs
+	if strings.Contains(logOutput, token) {
+		t.Errorf("log output contains the raw token: %s", logOutput)
+	}
+
+	// Verify no attempt to log the token (this would appear as the token itself,
+	// not as [token], since we don't sanitize on the success path intentionally)
+	if strings.Contains(logOutput, "[token]") {
+		t.Errorf("log output should not contain [token] marker on success path, got: %s", logOutput)
+	}
+}
