@@ -10,6 +10,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
@@ -326,5 +327,17 @@ func TestAuthRepositoryConformance(t *testing.T) {
 	storetest.RunAuthRepository(t, func(t *testing.T) auth.Repository {
 		t.Helper()
 		return sqlitetest.Open(t).Auth()
+	})
+}
+
+// TestPushRegistrationConformance runs the shared push registration
+// conformance suite against the SQLite adapter. When a Postgres adapter is
+// added, it runs the same suite unchanged to prove behavioral equivalence.
+func TestPushRegistrationConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunPushRegistrationRepository(t, func(t *testing.T) (pushreg.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.PushRegs(), s.Regions()
 	})
 }

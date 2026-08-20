@@ -37,6 +37,20 @@ type AlertTranslation struct {
 	UpdatedAt    int64
 }
 
+type PushRegistration struct {
+	ID              int64
+	RegionID        int64
+	Token           string
+	OperatingSystem string
+	ApnsSandbox     bool
+	Locale          string
+	TestDevice      bool
+	Description     string
+	LastSeenAt      int64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
 type Region struct {
 	ID              int64
 	RegionName      string
