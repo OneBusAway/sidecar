@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
@@ -339,5 +340,17 @@ func TestPushRegistrationConformance(t *testing.T) {
 	storetest.RunPushRegistrationRepository(t, func(t *testing.T) (pushreg.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.PushRegs(), s.Regions()
+	})
+}
+
+// TestAlarmConformance runs the shared alarm conformance suite against the
+// SQLite adapter. When a Postgres adapter is added, it runs the same suite
+// unchanged to prove behavioral equivalence.
+func TestAlarmConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.Alarms(), s.Regions()
 	})
 }

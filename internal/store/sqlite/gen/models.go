@@ -8,6 +8,26 @@ import (
 	"database/sql"
 )
 
+type Alarm struct {
+	ID              int64
+	RegionID        int64
+	Token           string
+	ApiVersion      int64
+	UserPushID      string
+	OperatingSystem string
+	ApnsSandbox     bool
+	StopID          string
+	TripID          string
+	ServiceDate     int64
+	VehicleID       string
+	StopSequence    sql.NullInt64
+	SecondsBefore   int64
+	Message         string
+	FailureCount    int64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
 type Alert struct {
 	ID              int64
 	RegionID        int64

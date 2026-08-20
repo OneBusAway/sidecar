@@ -17,6 +17,7 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
@@ -139,6 +140,11 @@ func (s *Store) Auth() auth.Repository {
 // PushRegs returns the pushreg.Repository backed by this store.
 func (s *Store) PushRegs() pushreg.Repository {
 	return &pushRegRepo{db: s.db, q: s.q}
+}
+
+// Alarms returns the alarms.Repository backed by this store.
+func (s *Store) Alarms() alarms.Repository {
+	return &alarmRepo{q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
