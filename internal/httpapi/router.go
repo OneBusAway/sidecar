@@ -159,6 +159,10 @@ func NewRouter(deps Deps) http.Handler {
 			throttleByIP(deps.PushLimiter, deps, ph.register))
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/push_registrations",
 			throttleByIP(deps.PushLimiter, deps, ph.unregister))
+		// gorush is our own infrastructure, and throttling it would drop prune
+		// signals, so the feedback webhook is registered outside the throttle.
+		fh := &feedbackHandler{deps: deps}
+		mux.HandleFunc("POST /webhooks/gorush", fh.receive)
 	}
 
 	if deps.Alarms != nil {
