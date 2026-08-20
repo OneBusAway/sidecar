@@ -429,6 +429,11 @@ type arrivalServer struct {
 	status    int
 	entry     map[string]any
 	routes    []map[string]any
+	// nullBody serves a 200 whose entire body is the literal JSON `null` --
+	// the shape the live Puget Sound server produces for an unknown
+	// trip/service-date pair, which the SDK decodes into a nil response
+	// with a nil error.
+	nullBody bool
 }
 
 func newArrivalServer(t *testing.T, status int, entry map[string]any, routes []map[string]any) *arrivalServer {
@@ -440,6 +445,13 @@ func newArrivalServer(t *testing.T, status int, entry map[string]any, routes []m
 		s.lastQuery.Store(r.URL.Query())
 		if s.status != 0 {
 			w.WriteHeader(s.status)
+			return
+		}
+		if s.nullBody {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write([]byte("null")); err != nil {
+				t.Errorf("write null body: %v", err)
+			}
 			return
 		}
 		routes := s.routes
@@ -552,6 +564,25 @@ func TestArrivalAndDeparture_RouteShortNameFromReferences(t *testing.T) {
 // here" (alongside a bare 404) and must count toward the alarm reaper's
 // 3-strike streak the same way. The fake produces it simply by omitting
 // tripId from the entry map, exactly like a real "no such trip" response.
+// TestArrivalAndDeparture_NullBodyIsErrNotFound pins the third "not found"
+// shape observed on the live Puget Sound server: HTTP 200 with the literal
+// body `null`. encoding/json unmarshals that into a nil response pointer
+// with a nil error, so without an explicit nil check the lookup panics --
+// which is how this case was found, panicking the real server during
+// end-to-end exercise.
+func TestArrivalAndDeparture_NullBodyIsErrNotFound(t *testing.T) {
+	t.Parallel()
+	srv := newArrivalServer(t, 0, nil, nil)
+	srv.nullBody = true
+
+	_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+		ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+			DepartureQuery{StopID: "1_570", TripID: "1_604370", ServiceDate: 1755673200000})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestArrivalAndDeparture_EmptyEntryIsErrNotFound(t *testing.T) {
 	srv := newArrivalServer(t, 0, map[string]any{}, nil)
 

@@ -245,6 +245,13 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 		return Departure{}, fmt.Errorf("obaapi: arrival-and-departure in region %d: %w", region.ID, redact(err))
 	}
 
+	// The live Puget Sound server answers an unknown trip/service-date with
+	// HTTP 200 and the literal body `null`; encoding/json unmarshals that
+	// into a nil response pointer with a nil error, so this check must come
+	// before any field access or the lookup panics.
+	if resp == nil {
+		return Departure{}, ErrNotFound
+	}
 	entry := resp.Data.Entry
 	if entry.TripID == "" {
 		// A 200 with an empty entry is the same "nothing here" as a 404.
