@@ -23,7 +23,7 @@ type feedbackHandler struct{ deps Deps }
 // unauthenticated adds no new capability.
 func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 	var fb gorushFeedback
-	if err := decodeJSON(w, r, 64<<10, &fb); err != nil {
+	if err := decodeJSON(w, r, requestBodyLimit, &fb); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}

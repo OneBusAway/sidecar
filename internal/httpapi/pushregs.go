@@ -12,12 +12,6 @@ import (
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
 )
 
-// pushRegsBodyLimit caps registration bodies. Tokens are at most 4096 chars;
-// 64 KB leaves room for every documented field several times over while
-// denying the free memory amplifier an unbounded read would hand an
-// unauthenticated caller (spec §2.6).
-const pushRegsBodyLimit = 64 << 10
-
 const (
 	maxTokenLen       = 4096
 	maxDescriptionLen = 255
@@ -38,7 +32,7 @@ func (h *pushRegsHandler) register(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, err := parseRequestParams(w, r, pushRegsBodyLimit)
+	p, err := parseRequestParams(w, r, requestBodyLimit)
 	if err != nil {
 		errorWithMessages(w, h.deps.Logger, "Unable to register device", []string{err.Error()})
 		return
@@ -59,6 +53,13 @@ func (h *pushRegsHandler) register(w http.ResponseWriter, r *http.Request) {
 	case os != pushreg.OSIOS && os != pushreg.OSAndroid:
 		msgs = append(msgs, "Operating system is not included in the list")
 	}
+	if len(msgs) > 0 {
+		// Doomed requests must not cost a store read: the merged-row Get
+		// below is only worth anything for a request that can still 204,
+		// and this endpoint is unauthenticated (spec §2.6).
+		errorWithMessages(w, h.deps.Logger, "Unable to register device", msgs)
+		return
+	}
 
 	up := pushreg.Upsert{RegionID: region.ID, Token: token, OperatingSystem: os}
 	if os == pushreg.OSIOS {
@@ -71,14 +72,10 @@ func (h *pushRegsHandler) register(w http.ResponseWriter, r *http.Request) {
 	// of test_device=true without a description keeps the stored
 	// description rather than 422ing -- so the stored row is read first.
 	// The read-then-upsert race is benign: both writers carry full values.
-	var stored pushreg.Registration
-	if token != "" {
-		var err error
-		stored, err = h.deps.PushRegs.Get(r.Context(), region.ID, token)
-		if err != nil && !errors.Is(err, pushreg.ErrNotFound) {
-			writeServerError(w, h.deps.Logger, region.ID, "get push registration", sanitizeToken(err, token))
-			return
-		}
+	stored, err := h.deps.PushRegs.Get(r.Context(), region.ID, token)
+	if err != nil && !errors.Is(err, pushreg.ErrNotFound) {
+		writeServerError(w, h.deps.Logger, region.ID, "get push registration", sanitizeToken(err, token))
+		return
 	}
 	if locale, ok := p.str("locale"); ok && locale != "" {
 		up.Locale = &locale
@@ -148,7 +145,7 @@ func (h *pushRegsHandler) unregister(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	p, err := parseRequestParams(w, r, pushRegsBodyLimit)
+	p, err := parseRequestParams(w, r, requestBodyLimit)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

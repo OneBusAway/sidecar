@@ -12,6 +12,10 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 )
 
+// Error strings from this repo deliberately never embed token and user_push_id values:
+// tokens are device-addressable secrets (spec section 13), errors get
+// logged verbatim by callers, and scrubbing at the source is what makes
+// httpapi's sanitizeToken defense-in-depth rather than the only line.
 type alarmRepo struct {
 	q *gen.Queries
 }
@@ -84,9 +88,9 @@ func (r *alarmRepo) Create(ctx context.Context, in alarms.NewAlarm, now time.Tim
 	})
 	if err != nil {
 		if in.APIVersion == 1 && strings.Contains(err.Error(), "UNIQUE constraint failed: alarms.region_id") {
-			return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d, token %q): %w", in.RegionID, in.Token, alarms.ErrDuplicate)
+			return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d): %w", in.RegionID, alarms.ErrDuplicate)
 		}
-		return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d, token %q): %w", in.RegionID, in.Token, err)
+		return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d): %w", in.RegionID, err)
 	}
 	return alarmFromRow(row), nil
 }
@@ -101,9 +105,9 @@ func (r *alarmRepo) FindV1(ctx context.Context, key alarms.V1Key) (alarms.Alarm,
 	})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return alarms.Alarm{}, fmt.Errorf("sqlite: find v1 alarm %+v: %w", key, alarms.ErrNotFound)
+			return alarms.Alarm{}, fmt.Errorf("sqlite: find v1 alarm (region %d): %w", key.RegionID, alarms.ErrNotFound)
 		}
-		return alarms.Alarm{}, fmt.Errorf("sqlite: find v1 alarm %+v: %w", key, err)
+		return alarms.Alarm{}, fmt.Errorf("sqlite: find v1 alarm (region %d): %w", key.RegionID, err)
 	}
 	return alarmFromRow(row), nil
 }
@@ -115,10 +119,10 @@ func (r *alarmRepo) FindV1(ctx context.Context, key alarms.V1Key) (alarms.Alarm,
 func (r *alarmRepo) Delete(ctx context.Context, regionID int64, token string) error {
 	n, err := r.q.DeleteAlarmByToken(ctx, gen.DeleteAlarmByTokenParams{RegionID: regionID, Token: token})
 	if err != nil {
-		return fmt.Errorf("sqlite: delete alarm (region %d, token %q): %w", regionID, token, err)
+		return fmt.Errorf("sqlite: delete alarm (region %d): %w", regionID, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("sqlite: delete alarm (region %d, token %q): %w", regionID, token, alarms.ErrNotFound)
+		return fmt.Errorf("sqlite: delete alarm (region %d): %w", regionID, alarms.ErrNotFound)
 	}
 	return nil
 }

@@ -14,6 +14,13 @@ import (
 	"strings"
 )
 
+// requestBodyLimit caps every rider-facing POST/DELETE body this package
+// parses. The largest legitimate field is a 4096-char push token; 64 KB
+// leaves room for every documented field several times over while denying
+// the free memory amplifier an unbounded read would hand an unauthenticated
+// caller (spec §2.6).
+const requestBodyLimit = 64 << 10
+
 type params struct{ m map[string]any }
 
 func parseRequestParams(w http.ResponseWriter, r *http.Request, maxBytes int64) (params, error) {
@@ -121,22 +128,17 @@ func (p params) boolish(key string) (val, present bool) {
 	}
 }
 
-// parseAPNSSandbox applies the §2.7 allow-list. The two failure directions
-// are asymmetric -- a production token misrouted to the sandbox bounces in
-// front of a rider -- so anything unrecognized is production, logged rather
-// than guessed.
+// parseAPNSSandbox applies the §2.7 allow-list via boolish -- one truth
+// table, defined once. The two failure directions are asymmetric: a
+// production token misrouted to the sandbox bounces in front of a rider,
+// so anything unrecognized is production, logged rather than guessed.
 func parseAPNSSandbox(p params, logger *slog.Logger) bool {
-	raw, ok := p.str("apns_sandbox")
-	if !ok || raw == "" {
-		return false
+	val, present := p.boolish("apns_sandbox")
+	if present {
+		return val
 	}
-	switch strings.ToLower(raw) {
-	case "1", "t", "true", "on":
-		return true
-	case "0", "f", "false", "off":
-		return false
-	default:
+	if raw, ok := p.str("apns_sandbox"); ok && raw != "" {
 		logger.Warn("httpapi: unrecognized apns_sandbox value treated as production", "value", raw)
-		return false
 	}
+	return false
 }

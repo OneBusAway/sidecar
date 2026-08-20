@@ -14,11 +14,6 @@ import (
 	"github.com/OneBusAway/sidecar/internal/securetoken"
 )
 
-// alarmsBodyLimit caps registration bodies the same way pushRegsBodyLimit
-// does (spec §2.6): generous for every documented field, bounded against an
-// unauthenticated caller's free memory amplifier.
-const alarmsBodyLimit = 64 << 10
-
 type alarmsHandler struct{ deps Deps }
 
 // create handles both API versions (spec §5.1-§5.2). The two versions share
@@ -34,7 +29,7 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		p, err := parseRequestParams(w, r, alarmsBodyLimit)
+		p, err := parseRequestParams(w, r, requestBodyLimit)
 		if err != nil {
 			errorWithMessages(w, h.deps.Logger, "Unable to register alarm", []string{err.Error()})
 			return
@@ -78,17 +73,12 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		sb, sbOK := p.int64("seconds_before")
 		secondsBefore := alarms.NormalizeSecondsBefore(sb, sbOK)
 
+		v1Key := alarms.V1Key{RegionID: region.ID, UserPushID: userPushID,
+			TripID: tripID, StopID: stopID, ServiceDate: serviceDate}
 		if version == 1 {
-			key := alarms.V1Key{RegionID: region.ID, UserPushID: userPushID,
-				TripID: tripID, StopID: stopID, ServiceDate: serviceDate}
-			if existing, findErr := h.deps.Alarms.FindV1(r.Context(), key); findErr == nil {
-				// Idempotent re-POST: hand back the existing alarm untouched
-				// (spec §5.1 -- legacy clients re-POST aggressively).
-				writeJSON(w, h.deps.Logger, http.StatusCreated,
-					map[string]string{"url": alarmURL(region, r, version, existing.Token)})
-				return
-			} else if !errors.Is(findErr, alarms.ErrNotFound) {
-				writeServerError(w, h.deps.Logger, region.ID, "find v1 alarm", sanitizeToken(findErr, userPushID))
+			// Idempotent re-POST: hand back the existing alarm untouched
+			// (spec §5.1 -- legacy clients re-POST aggressively).
+			if done := h.respondExistingV1(w, r, region, v1Key); done {
 				return
 			}
 		}
@@ -111,11 +101,7 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 			if version == 1 && errors.Is(err, alarms.ErrDuplicate) {
 				// Lost the race to a concurrent identical registration; the
 				// winner is the alarm this client asked for.
-				key := alarms.V1Key{RegionID: region.ID, UserPushID: userPushID,
-					TripID: tripID, StopID: stopID, ServiceDate: serviceDate}
-				if existing, ferr := h.deps.Alarms.FindV1(r.Context(), key); ferr == nil {
-					writeJSON(w, h.deps.Logger, http.StatusCreated,
-						map[string]string{"url": alarmURL(region, r, version, existing.Token)})
+				if done := h.respondExistingV1(w, r, region, v1Key); done {
 					return
 				}
 			}
@@ -152,6 +138,27 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 
 		writeJSON(w, h.deps.Logger, http.StatusCreated,
 			map[string]string{"url": alarmURL(region, r, version, created.Token)})
+	}
+}
+
+// respondExistingV1 answers a V1 registration from the idempotency key
+// (spec section 5.1): an existing alarm gets its original URL back with no
+// fields applied, and a store failure gets a sanitized 500. It reports
+// whether it wrote a response; ErrNotFound reports false so the caller
+// proceeds to create. The version in the URL is always 1 -- only V1
+// dedupes.
+func (h *alarmsHandler) respondExistingV1(w http.ResponseWriter, r *http.Request, region regions.Region, key alarms.V1Key) bool {
+	existing, err := h.deps.Alarms.FindV1(r.Context(), key)
+	switch {
+	case err == nil:
+		writeJSON(w, h.deps.Logger, http.StatusCreated,
+			map[string]string{"url": alarmURL(region, r, 1, existing.Token)})
+		return true
+	case errors.Is(err, alarms.ErrNotFound):
+		return false
+	default:
+		writeServerError(w, h.deps.Logger, region.ID, "find v1 alarm", sanitizeToken(err, key.UserPushID))
+		return true
 	}
 }
 

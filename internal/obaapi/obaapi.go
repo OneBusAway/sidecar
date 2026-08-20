@@ -115,7 +115,10 @@ func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client
 	return &client{defaultKey: defaultKey, http: httpx.NoRedirectClient(httpClient), logger: logger}
 }
 
-func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {
+// sdkFor resolves the region's API key (falling back to the process-wide
+// default) and builds an SDK client for its OBA server. ErrNotConfigured
+// when neither source supplies a key; no request is attempted.
+func (c *client) sdkFor(region regions.Region) (*oba.Client, error) {
 	key := region.OBAAPIKey
 	if key == "" {
 		key = c.defaultKey
@@ -123,14 +126,20 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	if key == "" {
 		return nil, ErrNotConfigured
 	}
-
-	sdk := oba.NewClient(
+	return oba.NewClient(
 		option.WithBaseURL(region.OBABaseURL),
 		option.WithAPIKey(key),
 		option.WithHTTPClient(c.http),
 		option.WithRequestTimeout(perRequestTimeout),
 		option.WithMaxRetries(maxRetries),
-	)
+	), nil
+}
+
+func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return nil, err
+	}
 
 	agencies, err := c.agencies(ctx, sdk)
 	if err != nil {
@@ -166,6 +175,12 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 				}
 				return fmt.Errorf("obaapi: vehicles for agency %s in region %d: %w",
 					agency.ID, region.ID, redact(err))
+			}
+			// The 200-null-body shape guarded in ArrivalAndDeparture (a
+			// nil response with a nil error) would panic here too; treat
+			// it as an empty feed for this agency.
+			if list == nil {
+				return nil
 			}
 			out := make([]Vehicle, 0, len(list.Data.List))
 			for _, v := range list.Data.List {
@@ -208,20 +223,10 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 }
 
 func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
-	key := region.OBAAPIKey
-	if key == "" {
-		key = c.defaultKey
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return Departure{}, err
 	}
-	if key == "" {
-		return Departure{}, ErrNotConfigured
-	}
-	sdk := oba.NewClient(
-		option.WithBaseURL(region.OBABaseURL),
-		option.WithAPIKey(key),
-		option.WithHTTPClient(c.http),
-		option.WithRequestTimeout(perRequestTimeout),
-		option.WithMaxRetries(maxRetries),
-	)
 
 	params := oba.ArrivalAndDepartureGetParams{
 		TripID:      oba.F(q.TripID),
@@ -286,6 +291,11 @@ func (c *client) agencies(ctx context.Context, sdk *oba.Client) ([]Agency, error
 	resp, err := sdk.AgenciesWithCoverage.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("obaapi: agencies with coverage: %w", redact(err))
+	}
+	// See ArrivalAndDeparture: a 200 with a literal null body decodes to a
+	// nil response with a nil error. No agencies is the honest reading.
+	if resp == nil {
+		return nil, nil
 	}
 
 	names := make(map[string]string, len(resp.Data.References.Agencies))

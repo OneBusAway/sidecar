@@ -14,6 +14,11 @@ CREATE TABLE push_registrations (
   UNIQUE (region_id, token)
 );
 
+-- The gorush feedback webhook deletes by token across every region; the
+-- composite UNIQUE above leads with region_id, so without this index that
+-- delete is a full-table scan on exactly the table retention lets grow.
+CREATE INDEX push_registrations_token_idx ON push_registrations (token);
+
 -- The daily reaper scans by staleness alone (spec §4: 180 days unseen).
 CREATE INDEX push_registrations_prune_idx ON push_registrations (last_seen_at);
 

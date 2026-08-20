@@ -11,6 +11,10 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 )
 
+// Error strings from this repo deliberately never embed token values:
+// tokens are device-addressable secrets (spec section 13), errors get
+// logged verbatim by callers, and scrubbing at the source is what makes
+// httpapi's sanitizeToken defense-in-depth rather than the only line.
 type pushRegRepo struct {
 	db *sql.DB
 	q  *gen.Queries
@@ -63,7 +67,7 @@ func (r *pushRegRepo) Upsert(ctx context.Context, in pushreg.Upsert, now time.Ti
 		in.Locale != nil, in.TestDevice != nil, in.Description != nil,
 	)
 	if err != nil {
-		return fmt.Errorf("sqlite: upsert push registration (region %d, token %q): %w", in.RegionID, in.Token, err)
+		return fmt.Errorf("sqlite: upsert push registration (region %d): %w", in.RegionID, err)
 	}
 	return nil
 }
@@ -86,9 +90,9 @@ func (r *pushRegRepo) Get(ctx context.Context, regionID int64, token string) (pu
 	row, err := r.q.GetPushRegistration(ctx, gen.GetPushRegistrationParams{RegionID: regionID, Token: token})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return pushreg.Registration{}, fmt.Errorf("sqlite: get push registration (region %d, token %q): %w", regionID, token, pushreg.ErrNotFound)
+			return pushreg.Registration{}, fmt.Errorf("sqlite: get push registration (region %d): %w", regionID, pushreg.ErrNotFound)
 		}
-		return pushreg.Registration{}, fmt.Errorf("sqlite: get push registration (region %d, token %q): %w", regionID, token, err)
+		return pushreg.Registration{}, fmt.Errorf("sqlite: get push registration (region %d): %w", regionID, err)
 	}
 	return pushRegistrationFromRow(row), nil
 }
@@ -96,10 +100,10 @@ func (r *pushRegRepo) Get(ctx context.Context, regionID int64, token string) (pu
 func (r *pushRegRepo) Delete(ctx context.Context, regionID int64, token string) error {
 	n, err := r.q.DeletePushRegistration(ctx, gen.DeletePushRegistrationParams{RegionID: regionID, Token: token})
 	if err != nil {
-		return fmt.Errorf("sqlite: delete push registration (region %d, token %q): %w", regionID, token, err)
+		return fmt.Errorf("sqlite: delete push registration (region %d): %w", regionID, err)
 	}
 	if n == 0 {
-		return fmt.Errorf("sqlite: delete push registration (region %d, token %q): %w", regionID, token, pushreg.ErrNotFound)
+		return fmt.Errorf("sqlite: delete push registration (region %d): %w", regionID, pushreg.ErrNotFound)
 	}
 	return nil
 }
@@ -107,7 +111,7 @@ func (r *pushRegRepo) Delete(ctx context.Context, regionID int64, token string) 
 func (r *pushRegRepo) DeleteByToken(ctx context.Context, token string) (int64, error) {
 	n, err := r.q.DeletePushRegistrationsByToken(ctx, token)
 	if err != nil {
-		return 0, fmt.Errorf("sqlite: delete push registrations by token %q: %w", token, err)
+		return 0, fmt.Errorf("sqlite: delete push registrations by token: %w", err)
 	}
 	return n, nil
 }
