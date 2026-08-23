@@ -31,6 +31,7 @@ func TestContentValidate(t *testing.T) {
 		{"text with options", surveys.Content{Type: "text", LabelText: "x", Options: []string{"a"}}, "cannot have options"},
 		{"external no scheme", surveys.Content{Type: "external_survey", LabelText: "x", URL: "example.org/s"}, "absolute http(s)"},
 		{"external ftp", surveys.Content{Type: "external_survey", LabelText: "x", URL: "ftp://example.org/s"}, "absolute http(s)"},
+		{"external no host", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https:///path"}, "absolute http(s)"},
 		{"external bad sdk", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org",
 			SDKConfigurationValues: json.RawMessage(`[1]`)}, "JSON object"},
 		{"external null sdk", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org",
