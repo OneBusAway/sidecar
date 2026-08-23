@@ -25,6 +25,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // gooseConfigureOnce guards goose.SetBaseFS/goose.SetDialect, which mutate
@@ -152,6 +153,11 @@ func (s *Store) PushRegs() pushreg.Repository {
 // Alarms returns the alarms.Repository backed by this store.
 func (s *Store) Alarms() alarms.Repository {
 	return &alarmRepo{q: s.q}
+}
+
+// Surveys returns the surveys.Repository backed by this store.
+func (s *Store) Surveys() surveys.Repository {
+	return &surveyRepo{db: s.db, q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in

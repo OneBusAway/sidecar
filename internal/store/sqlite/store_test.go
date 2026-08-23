@@ -15,6 +15,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 
 	_ "modernc.org/sqlite"
 )
@@ -381,5 +382,17 @@ func TestAlarmConformance(t *testing.T) {
 	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.Alarms(), s.Regions()
+	})
+}
+
+// TestSurveyConformance runs the shared survey conformance suite against
+// the SQLite adapter through the production Open, so the _txlock=immediate
+// DSN the concurrency subtest depends on is the one production uses.
+func TestSurveyConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunSurveyRepository(t, func(t *testing.T) (surveys.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.Surveys(), s.Regions()
 	})
 }
