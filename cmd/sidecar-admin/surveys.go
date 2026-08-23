@@ -311,19 +311,24 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 	}
 	if _, err = store.Surveys().UpdateSurvey(ctx, id, def, now); err != nil {
 		if errors.Is(err, surveys.ErrQuestionsFrozen) {
-			// The count is informational only: if it also fails, the message
-			// still names the real problem (frozen questions) without
-			// asserting a response count the code could not confirm --
-			// never "0 responses" when the count itself is unknown.
-			n, countErr := store.Surveys().CountResponses(ctx, id)
-			if countErr != nil {
-				return fmt.Errorf("survey edit %d: survey has responses; its questions are frozen (edit only name, dates, flags, and targeting)", id)
-			}
-			return fmt.Errorf("survey edit %d: survey has %d responses; its questions are frozen (edit only name, dates, flags, and targeting)", id, n)
+			return fmt.Errorf("survey edit %d: survey has %s; its questions are frozen (edit only name, dates, flags, and targeting)",
+				id, responseCountPhrase(ctx, store, id))
 		}
 		return fmt.Errorf("survey edit %d: %w", id, err)
 	}
 	return nil
+}
+
+// responseCountPhrase renders "N response(s)" for a refusal message, or
+// just "responses" when the count itself cannot be read: the message must
+// name the real problem (responses exist) without asserting a number the
+// code could not confirm -- never "0 responses".
+func responseCountPhrase(ctx context.Context, store *sqlite.Store, id int64) string {
+	n, err := store.Surveys().CountResponses(ctx, id)
+	if err != nil {
+		return "responses"
+	}
+	return fmt.Sprintf("%d response(s)", n)
 }
 
 func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error {
@@ -333,15 +338,8 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 	}
 	if err := store.Surveys().DeleteSurvey(ctx, id); err != nil {
 		if errors.Is(err, surveys.ErrHasResponses) {
-			// The count is informational only: if it also fails, the
-			// message still names the real problem (responses exist) without
-			// asserting a count the code could not confirm -- never "0
-			// response(s)" when the count itself is unknown.
-			n, countErr := store.Surveys().CountResponses(ctx, id)
-			if countErr != nil {
-				return fmt.Errorf("survey delete %d: survey has responses; responses are retained indefinitely, so the survey cannot be deleted", id)
-			}
-			return fmt.Errorf("survey delete %d: survey has %d response(s); responses are retained indefinitely, so the survey cannot be deleted", id, n)
+			return fmt.Errorf("survey delete %d: survey has %s; responses are retained indefinitely, so the survey cannot be deleted",
+				id, responseCountPhrase(ctx, store, id))
 		}
 		return fmt.Errorf("survey delete %d: %w", id, err)
 	}

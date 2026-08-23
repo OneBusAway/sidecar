@@ -157,29 +157,60 @@ func insertQuestions(ctx context.Context, q *gen.Queries, surveyID int64, defs [
 	return nil
 }
 
+// studyLoader memoizes GetStudy for the life of one query set (a tx): a
+// region's surveys mostly share a study, so a list would otherwise re-read
+// the same study row once per survey.
+type studyLoader struct {
+	q     *gen.Queries
+	cache map[int64]surveys.Study
+}
+
+func newStudyLoader(q *gen.Queries) *studyLoader {
+	return &studyLoader{q: q, cache: make(map[int64]surveys.Study)}
+}
+
+func (l *studyLoader) get(ctx context.Context, id int64) (surveys.Study, error) {
+	if st, ok := l.cache[id]; ok {
+		return st, nil
+	}
+	row, err := l.q.GetStudy(ctx, id)
+	if err != nil {
+		return surveys.Study{}, err
+	}
+	st := studyFromRow(row)
+	l.cache[id] = st
+	return st, nil
+}
+
+// loadQuestions reads a survey's questions in position order.
+func loadQuestions(ctx context.Context, q *gen.Queries, surveyID int64) ([]surveys.Question, error) {
+	qrows, err := q.ListQuestionsBySurvey(ctx, surveyID)
+	if err != nil {
+		return nil, fmt.Errorf("questions for survey %d: %w", surveyID, err)
+	}
+	out := make([]surveys.Question, 0, len(qrows))
+	for _, qr := range qrows {
+		question, err := questionFromRow(qr)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, question)
+	}
+	return out, nil
+}
+
 // loadSurvey assembles a Survey from its row plus questions and study using
 // the given query set (a tx's or the db's).
-func loadSurvey(ctx context.Context, q *gen.Queries, row gen.Survey) (surveys.Survey, error) {
+func loadSurvey(ctx context.Context, q *gen.Queries, row gen.Survey, studies *studyLoader) (surveys.Survey, error) {
 	s, err := surveyFromRow(row)
 	if err != nil {
 		return surveys.Survey{}, err
 	}
-	study, err := q.GetStudy(ctx, row.StudyID)
-	if err != nil {
+	if s.Study, err = studies.get(ctx, row.StudyID); err != nil {
 		return surveys.Survey{}, fmt.Errorf("study %d for survey %d: %w", row.StudyID, row.ID, err)
 	}
-	s.Study = studyFromRow(study)
-	qrows, err := q.ListQuestionsBySurvey(ctx, row.ID)
-	if err != nil {
-		return surveys.Survey{}, fmt.Errorf("questions for survey %d: %w", row.ID, err)
-	}
-	s.Questions = make([]surveys.Question, 0, len(qrows))
-	for _, qr := range qrows {
-		question, err := questionFromRow(qr)
-		if err != nil {
-			return surveys.Survey{}, err
-		}
-		s.Questions = append(s.Questions, question)
+	if s.Questions, err = loadQuestions(ctx, q, row.ID); err != nil {
+		return surveys.Survey{}, err
 	}
 	return s, nil
 }
@@ -216,7 +247,7 @@ func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def survey
 	if err = insertQuestions(ctx, q, row.ID, def.Questions, now.Unix()); err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey %d: %w", row.ID, err)
 	}
-	s, err := loadSurvey(ctx, q, row)
+	s, err := loadSurvey(ctx, q, row, newStudyLoader(q))
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: %w", err)
 	}
@@ -241,7 +272,7 @@ func (r *surveyRepo) GetSurvey(ctx context.Context, id int64) (surveys.Survey, e
 		}
 		return surveys.Survey{}, fmt.Errorf("sqlite: get survey %d: %w", id, err)
 	}
-	s, err := loadSurvey(ctx, q, row)
+	s, err := loadSurvey(ctx, q, row, newStudyLoader(q))
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: get survey: %w", err)
 	}
@@ -254,40 +285,41 @@ func (r *surveyRepo) GetSurvey(ctx context.Context, id int64) (surveys.Survey, e
 // listSurveys runs the row query inside one read transaction and loads
 // each survey's questions and study, so a list is a consistent snapshot
 // (design spec 3.3).
-func (r *surveyRepo) listSurveys(ctx context.Context, op string, rows func(*gen.Queries) ([]gen.Survey, error)) ([]surveys.Survey, error) {
+func (r *surveyRepo) listSurveys(ctx context.Context, op string, regionID int64, rows func(*gen.Queries) ([]gen.Survey, error)) ([]surveys.Survey, error) {
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: %s: begin tx: %w", op, err)
+		return nil, fmt.Errorf("sqlite: %s in region %d: begin tx: %w", op, regionID, err)
 	}
 	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
 	defer func() { _ = tx.Rollback() }()
 	q := r.q.WithTx(tx)
 	srows, err := rows(q)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: %s: %w", op, err)
+		return nil, fmt.Errorf("sqlite: %s in region %d: %w", op, regionID, err)
 	}
+	studies := newStudyLoader(q)
 	out := make([]surveys.Survey, 0, len(srows))
 	for _, row := range srows {
-		s, err := loadSurvey(ctx, q, row)
+		s, err := loadSurvey(ctx, q, row, studies)
 		if err != nil {
-			return nil, fmt.Errorf("sqlite: %s: %w", op, err)
+			return nil, fmt.Errorf("sqlite: %s in region %d: %w", op, regionID, err)
 		}
 		out = append(out, s)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("sqlite: %s: commit: %w", op, err)
+		return nil, fmt.Errorf("sqlite: %s in region %d: commit: %w", op, regionID, err)
 	}
 	return out, nil
 }
 
 func (r *surveyRepo) ListSurveys(ctx context.Context, regionID int64) ([]surveys.Survey, error) {
-	return r.listSurveys(ctx, fmt.Sprintf("list surveys in region %d", regionID), func(q *gen.Queries) ([]gen.Survey, error) {
+	return r.listSurveys(ctx, "list surveys", regionID, func(q *gen.Queries) ([]gen.Survey, error) {
 		return q.ListSurveysByRegion(ctx, regionID)
 	})
 }
 
 func (r *surveyRepo) ListActiveSurveys(ctx context.Context, regionID int64, now time.Time) ([]surveys.Survey, error) {
-	return r.listSurveys(ctx, fmt.Sprintf("list active surveys in region %d", regionID), func(q *gen.Queries) ([]gen.Survey, error) {
+	return r.listSurveys(ctx, "list active surveys", regionID, func(q *gen.Queries) ([]gen.Survey, error) {
 		return q.ListActiveSurveysByRegion(ctx, gen.ListActiveSurveysByRegionParams{RegionID: regionID, Now: now.Unix()})
 	})
 }
@@ -330,7 +362,7 @@ func (r *surveyRepo) UpdateSurvey(ctx context.Context, id int64, def surveys.Def
 	// When they do differ and the survey has responses, the edit is
 	// refused: those ids are what stored answers reference and what iOS
 	// uses to dedupe locally (design spec §2.13).
-	stored, err := loadSurvey(ctx, q, current)
+	stored, err := loadSurvey(ctx, q, current, newStudyLoader(q))
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
 	}
@@ -359,9 +391,19 @@ func (r *surveyRepo) UpdateSurvey(ctx context.Context, id int64, def surveys.Def
 			return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d: %w", id, err)
 		}
 	}
-	s, err := loadSurvey(ctx, q, row)
+	// The study cannot change on an edit and the questions were just read
+	// (or just written), so the result is the updated row plus what this
+	// transaction already holds -- no second read under the write lock.
+	s, err := surveyFromRow(row)
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
+	}
+	s.Study = stored.Study
+	s.Questions = stored.Questions
+	if replaceQuestions {
+		if s.Questions, err = loadQuestions(ctx, q, id); err != nil {
+			return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d: commit: %w", id, err)

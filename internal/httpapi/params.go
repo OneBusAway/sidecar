@@ -23,6 +23,11 @@ const requestBodyLimit = 64 << 10
 
 type params struct{ m map[string]any }
 
+// errBodyTooLarge is the one parse failure whose text is fit for a rider-
+// facing body; handlers that distinguish it from "malformed" check with
+// errors.Is rather than comparing message text.
+var errBodyTooLarge = errors.New("request body too large")
+
 func parseRequestParams(w http.ResponseWriter, r *http.Request, maxBytes int64) (params, error) {
 	m := make(map[string]any)
 	for k, vs := range r.URL.Query() {
@@ -37,7 +42,7 @@ func parseRequestParams(w http.ResponseWriter, r *http.Request, maxBytes int64) 
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return params{}, errors.New("request body too large")
+			return params{}, errBodyTooLarge
 		}
 		return params{}, fmt.Errorf("read request body: %w", err)
 	}
@@ -89,6 +94,16 @@ func (p params) str(key string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// rawString returns key only if it arrived as a string, untrimmed and
+// uncoerced -- for payloads that are themselves encoded documents (a
+// JSON-array string), where str's trimming and number/bool coercion would
+// either corrupt the document or accept a native array the contract
+// forbids.
+func (p params) rawString(key string) (string, bool) {
+	s, ok := p.m[key].(string)
+	return s, ok
 }
 
 func (p params) int64(key string) (int64, bool) {

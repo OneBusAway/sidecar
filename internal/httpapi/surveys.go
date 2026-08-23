@@ -126,7 +126,7 @@ func (h *surveysHandler) parseSurveyParams(w http.ResponseWriter, r *http.Reques
 		return p, true
 	}
 	msg := "request body is invalid"
-	if err.Error() == "request body too large" {
+	if errors.Is(err, errBodyTooLarge) {
 		msg = err.Error()
 	}
 	h.deps.Logger.Info("httpapi: rejected "+op, "reason", "unparseable body", "err", err)
@@ -212,7 +212,7 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 	if lonPresent && !lonValid {
 		msgs = append(msgs, "Stop longitude is invalid")
 	}
-	raw, hasRaw := p.m["responses"].(string)
+	raw, hasRaw := p.rawString("responses")
 	var answers []surveys.Answer
 	if !hasRaw {
 		msgs = append(msgs, surveys.ErrMalformedAnswers.Error())
@@ -258,7 +258,7 @@ func (h *surveysHandler) amend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	raw, hasRaw := p.m["responses"].(string)
+	raw, hasRaw := p.rawString("responses")
 	if !hasRaw {
 		writeErrors(w, h.deps.Logger, []string{surveys.ErrMalformedAnswers.Error()})
 		return

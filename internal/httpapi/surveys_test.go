@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -72,14 +73,6 @@ func fullDefinition() surveys.Definition {
 	}
 }
 
-func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
 // iosSurveyList mirrors the iOS app's StudyResponse/Survey/SurveyQuestion
 // Codable types: every pointer field here is one iOS hard-requires, so a
 // nil after decoding is exactly the failure that would blank the region's
@@ -129,7 +122,7 @@ func TestSurveyList_IOSRequiredKeys(t *testing.T) {
 	seedSurvey(t, repo, regs, 1, fullDefinition())
 
 	for _, path := range []string{"/api/v1/regions/1/surveys?user_id=u1", "/api/v1/regions/1/surveys.json?user_id=u1"} {
-		rec := get(t, h, path)
+		rec := doGet(t, h, path)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, body = %s", path, rec.Code, rec.Body.String())
 		}
@@ -210,7 +203,7 @@ func TestSurveyList_PerTypeContentKeys(t *testing.T) {
 	t.Parallel()
 	h, repo, regs := surveyDeps(t, nil, nil)
 	seedSurvey(t, repo, regs, 1, fullDefinition())
-	rec := get(t, h, "/api/v1/regions/1/surveys?user_id=u1")
+	rec := doGet(t, h, "/api/v1/regions/1/surveys?user_id=u1")
 	var body struct {
 		Surveys []struct {
 			Questions []struct {
@@ -233,7 +226,7 @@ func TestSurveyList_PerTypeContentKeys(t *testing.T) {
 		for k := range q.Content {
 			got = append(got, k)
 		}
-		sortStrings(got)
+		sort.Strings(got)
 		if strings.Join(got, ",") != strings.Join(want[i], ",") {
 			t.Errorf("question %d keys = %v, want %v", i, got, want[i])
 		}
@@ -243,20 +236,12 @@ func TestSurveyList_PerTypeContentKeys(t *testing.T) {
 	}
 }
 
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
-}
-
 func TestSurveyList_UnsetWindowAndEmptyList(t *testing.T) {
 	t.Parallel()
 	h, repo, regs := surveyDeps(t, nil, nil)
 	seedSurvey(t, repo, regs, 1, surveys.Definition{Name: "Minimal", Available: true})
 	putRegion(t, regs, 2)
-	rec := get(t, h, "/api/v1/regions/1/surveys?user_id=u1")
+	rec := doGet(t, h, "/api/v1/regions/1/surveys?user_id=u1")
 	var body struct {
 		Surveys []struct {
 			StartDate json.RawMessage `json:"start_date"`
@@ -274,7 +259,7 @@ func TestSurveyList_UnsetWindowAndEmptyList(t *testing.T) {
 	if string(s.Questions) != "[]" {
 		t.Errorf("questions = %s, want []", s.Questions)
 	}
-	empty := get(t, h, "/api/v1/regions/2/surveys?user_id=u1")
+	empty := doGet(t, h, "/api/v1/regions/2/surveys?user_id=u1")
 	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"surveys":[]`) {
 		t.Errorf("region with no surveys: %d %s", empty.Code, empty.Body.String())
 	}
@@ -299,7 +284,7 @@ func TestSurveyList_Errors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rec := get(t, h, tt.path)
+			rec := doGet(t, h, tt.path)
 			if rec.Code != tt.status || !strings.Contains(strings.TrimSpace(rec.Body.String()), tt.body) {
 				t.Fatalf("status = %d body = %s; want %d containing %s", rec.Code, rec.Body.String(), tt.status, tt.body)
 			}
@@ -314,7 +299,7 @@ func TestSurveyList_WindowFilterIsServerSide(t *testing.T) {
 	h, repo, regs := surveyDeps(t, nil, nil)
 	start, end := base.Add(-48*time.Hour), base.Add(-24*time.Hour)
 	seedSurvey(t, repo, regs, 1, surveys.Definition{Name: "Expired", Available: true, StartTime: &start, EndTime: &end})
-	rec := get(t, h, "/api/v1/regions/1/surveys?user_id=u1")
+	rec := doGet(t, h, "/api/v1/regions/1/surveys?user_id=u1")
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"surveys":[]`) {
 		t.Fatalf("expired survey leaked: %d %s", rec.Code, rec.Body.String())
 	}
