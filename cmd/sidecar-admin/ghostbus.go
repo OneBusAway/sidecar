@@ -45,7 +45,7 @@ func ghostBusCmd(ctx context.Context, stdout io.Writer, store *sqlite.Store, arg
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	if *regionID == 0 && *since == "" && fs.NFlag() == 0 {
+	if *regionID == 0 {
 		return errors.New("usage: ghostbus export --region N [--since RFC3339]")
 	}
 	region, err := store.Regions().Get(ctx, *regionID)

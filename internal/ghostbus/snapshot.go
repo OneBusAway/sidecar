@@ -115,13 +115,13 @@ func (s *SnapshotScheduler) capture(ctx context.Context, rep Report, region *reg
 		// increment reaches the cap -- in the same UPDATE, so a crash here
 		// cannot strand a row both capped and pending.
 		if _, ferr := s.Repo.RecordSnapshotFailure(ctx, rep.ID, s.Now()); ferr != nil {
-			s.Logger.Warn("ghostbus: record snapshot failure", "err", ferr)
+			s.Logger.Warn("ghostbus: record snapshot failure", "region_id", rep.RegionID, "err", ferr)
 		}
 		s.Logger.Warn("ghostbus: snapshot lookup failed", "region_id", rep.RegionID, "err", err)
 		return
 	}
 	if err := s.Repo.MarkSnapshotCaptured(ctx, rep.ID, string(snap), s.Now()); err != nil {
-		s.Logger.Error("ghostbus: mark snapshot captured", "err", err)
+		s.Logger.Error("ghostbus: mark snapshot captured", "region_id", rep.RegionID, "err", err)
 	}
 }
 
