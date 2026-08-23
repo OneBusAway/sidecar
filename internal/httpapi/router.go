@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -147,9 +148,12 @@ func NewRouter(deps Deps) http.Handler {
 
 	if deps.PushRegs != nil {
 		// The handlers deref Regions (resolveRegion) and Now on the first
-		// request; fail at boot, matching the Auth block's precedent.
-		if deps.Now == nil || deps.Regions == nil {
-			panic("httpapi: Deps.Now and Deps.Regions required when Deps.PushRegs is set")
+		// request; fail at boot, naming everything missing so the fix is one
+		// edit rather than three restarts, matching the Auth block below.
+		if missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.PushRegs is set")
 		}
 		if deps.PushLimiter == nil {
 			deps.PushLimiter = ratelimit.New(30, time.Minute)
@@ -168,9 +172,14 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Alarms != nil {
 		// The V2 side-effect upsert (spec §5.2) needs the registry, and the
 		// handlers deref Regions and Now; failing at boot beats a nil deref
-		// on the first alarm.
-		if deps.PushRegs == nil || deps.Now == nil || deps.Regions == nil {
-			panic("httpapi: Deps.PushRegs, Deps.Now, and Deps.Regions required when Deps.Alarms is set")
+		// on the first alarm. Checked independently of the PushRegs block
+		// above rather than leaning on its guard: these are this block's own
+		// requirements, and the panic should say which one is missing.
+		if missing := missingDeps(map[string]bool{
+			"Deps.PushRegs": deps.PushRegs == nil, "Deps.Now": deps.Now == nil,
+			"Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Alarms is set")
 		}
 		ah := &alarmsHandler{deps: deps}
 		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
@@ -199,16 +208,10 @@ func NewRouter(deps Deps) http.Handler {
 	// there is still a stack trace worth reading, naming everything missing so
 	// the fix is one edit rather than three restarts.
 	if deps.Auth != nil {
-		var missing []string
-		if deps.Now == nil {
-			missing = append(missing, "Deps.Now")
-		}
-		if deps.Alerts == nil {
-			missing = append(missing, "Deps.Alerts")
-		}
-		if deps.Regions == nil {
-			missing = append(missing, "Deps.Regions")
-		}
+		missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Alerts": deps.Alerts == nil,
+			"Deps.Regions": deps.Regions == nil,
+		})
 		if len(missing) > 0 {
 			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
 		}
@@ -292,4 +295,17 @@ func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 		}
 		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
+}
+
+// missingDeps returns the names of the absent dependencies, sorted so the
+// panic message is stable across runs (Go map iteration order is not).
+func missingDeps(absent map[string]bool) []string {
+	var missing []string
+	for name, isAbsent := range absent {
+		if isAbsent {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }

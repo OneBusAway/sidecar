@@ -61,17 +61,26 @@ func (s *Scheduler) CheckAll(ctx context.Context) {
 	var mu sync.Mutex
 	regionFor := func(id int64) *regions.Region {
 		mu.Lock()
-		defer mu.Unlock()
-		if r, ok := regionCache[id]; ok {
+		r, ok := regionCache[id]
+		mu.Unlock()
+		if ok {
 			return r
 		}
+		// Fetched with the lock released: checkConcurrency goroutines share
+		// this cache, and holding mu across the store round trip would make
+		// the first touch of two different regions serialize on the database
+		// instead of overlapping. A simultaneous first touch of the same
+		// region can now fetch twice, which is far cheaper than serializing
+		// every miss -- and both writers store the same value.
 		region, err := s.Regions.Get(ctx, id)
-		if err != nil {
-			regionCache[id] = nil
-			return nil
+		var resolved *regions.Region
+		if err == nil {
+			resolved = &region
 		}
-		regionCache[id] = &region
-		return &region
+		mu.Lock()
+		regionCache[id] = resolved
+		mu.Unlock()
+		return resolved
 	}
 
 	g, gctx := errgroup.WithContext(ctx)

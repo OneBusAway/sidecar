@@ -39,10 +39,11 @@ func RunPushRegistrationRepository(t *testing.T, newStore newPushRegStoreFunc) {
 	t.Run("ConcurrentFirstRegistrationRaces", func(t *testing.T) { testConcurrentFirstRegistrationRaces(t, newStore) })
 }
 
-// putPushRegRegion inserts a minimal directory-sourced region with the given
-// id: push_registrations.region_id is a foreign key, so every subtest needs
-// at least one region to satisfy it before it can register a device.
-func putPushRegRegion(t *testing.T, repo regions.Repository, id int64) {
+// putStoretestRegion inserts a minimal directory-sourced region with the
+// given id. Both conformance suites need it: push_registrations.region_id
+// and alarms.region_id are foreign keys, so every subtest needs at least one
+// region to satisfy before it can write a row.
+func putStoretestRegion(t *testing.T, repo regions.Repository, id int64) {
 	t.Helper()
 	if err := repo.UpsertFromDirectory(context.Background(), []regions.Region{{
 		ID:         id,
@@ -105,7 +106,7 @@ func assertPushRegistration(t *testing.T, label string, got, want pushreg.Regist
 func testUpsertInsertsAndGetRoundTrips(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	in := fullUpsert(1, "tok-1")
 	if err := repo.Upsert(ctx, in, base); err != nil {
@@ -134,7 +135,7 @@ func testUpsertInsertsAndGetRoundTrips(t *testing.T, newStore newPushRegStoreFun
 func testReRegistrationRefreshesLastSeen(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "tok-1"), base); err != nil {
 		t.Fatalf("Upsert(1): %v", err)
@@ -181,7 +182,7 @@ func testReRegistrationRefreshesLastSeen(t *testing.T, newStore newPushRegStoreF
 func testNilPointersKeepStoredValues(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "tok-1"), base); err != nil {
 		t.Fatalf("Upsert(1): %v", err)
@@ -221,7 +222,7 @@ func testNilPointersKeepStoredValues(t *testing.T, newStore newPushRegStoreFunc)
 func testExplicitFalseDemotesAndClearsDescription(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "tok-1"), base); err != nil {
 		t.Fatalf("Upsert(1): %v", err)
@@ -258,7 +259,7 @@ func testExplicitFalseDemotesAndClearsDescription(t *testing.T, newStore newPush
 func testOperatingSystemAndSandboxAlwaysOverwritten(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, pushreg.Upsert{
 		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: true,
@@ -290,7 +291,7 @@ func testOperatingSystemAndSandboxAlwaysOverwritten(t *testing.T, newStore newPu
 func testLocaleOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "tok-1"), base); err != nil {
 		t.Fatalf("Upsert(1): %v", err)
@@ -332,7 +333,7 @@ func testLocaleOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStoreFunc
 func testDescriptionOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "tok-1"), base); err != nil {
 		t.Fatalf("Upsert(1): %v", err)
@@ -375,7 +376,7 @@ func testDescriptionOverwrittenOnlyWhenSet(t *testing.T, newStore newPushRegStor
 func testPushRegDeleteReportsNotFound(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Delete(ctx, 1, "ghost"); !errors.Is(err, pushreg.ErrNotFound) {
 		t.Errorf("Delete(unknown) = %v, want pushreg.ErrNotFound", err)
@@ -399,8 +400,8 @@ func testPushRegDeleteReportsNotFound(t *testing.T, newStore newPushRegStoreFunc
 func testDeleteByTokenSpansRegions(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
-	putPushRegRegion(t, regionRepo, 2)
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
 
 	if err := repo.Upsert(ctx, fullUpsert(1, "shared-tok"), base); err != nil {
 		t.Fatalf("Upsert(region 1): %v", err)
@@ -442,7 +443,7 @@ func testDeleteByTokenSpansRegions(t *testing.T, newStore newPushRegStoreFunc) {
 func testPruneRemovesOnlyStale(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	cutoff := base.Add(time.Hour)
 
@@ -484,8 +485,8 @@ func testPruneRemovesOnlyStale(t *testing.T, newStore newPushRegStoreFunc) {
 func testPushRegRegionScoping(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
-	putPushRegRegion(t, regionRepo, 2)
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
 
 	in1 := fullUpsert(1, "shared-tok")
 	in1.Locale = ptr("es-MX")
@@ -531,7 +532,7 @@ func testPushRegRegionScoping(t *testing.T, newStore newPushRegStoreFunc) {
 func testConcurrentFirstRegistrationRaces(t *testing.T, newStore newPushRegStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putPushRegRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	const n = 8
 	errs := make([]error, n)

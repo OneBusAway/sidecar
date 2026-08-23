@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -102,6 +103,18 @@ type client struct {
 	defaultKey string
 	http       *http.Client
 	logger     *slog.Logger
+
+	// sdks memoizes one *oba.Client per (base URL, key) pair. oba.NewClient
+	// builds out the SDK's full set of sub-service structs, and
+	// ArrivalAndDeparture calls sdkFor on every invocation -- once per
+	// pending alarm on the scheduler's 60-second sweep -- so without this a
+	// region with N alarms rebuilds N identical clients every cycle. Fleet
+	// already builds one and shares it across its agency fan-out; this gives
+	// the per-alarm path the same treatment. The key is part of the cache
+	// key, so a rotated API key lands on a fresh entry instead of serving a
+	// stale client.
+	sdkMu sync.Mutex
+	sdks  map[string]*oba.Client // cacheKey -> client
 }
 
 // New builds a Client. defaultKey is the process-wide fallback used for any
@@ -112,7 +125,12 @@ func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client
 	}
 	// The key travels in the query string, so a followed redirect would leak
 	// it to the redirect target via Referer; see httpx.NoRedirectClient.
-	return &client{defaultKey: defaultKey, http: httpx.NoRedirectClient(httpClient), logger: logger}
+	return &client{
+		defaultKey: defaultKey,
+		http:       httpx.NoRedirectClient(httpClient),
+		logger:     logger,
+		sdks:       make(map[string]*oba.Client),
+	}
 }
 
 // sdkFor resolves the region's API key (falling back to the process-wide
@@ -126,13 +144,34 @@ func (c *client) sdkFor(region regions.Region) (*oba.Client, error) {
 	if key == "" {
 		return nil, ErrNotConfigured
 	}
-	return oba.NewClient(
+	// NUL separates the fields so no base URL and key pair can collide with
+	// a different pair by concatenation.
+	cacheKey := region.OBABaseURL + "\x00" + key
+	c.sdkMu.Lock()
+	cached, ok := c.sdks[cacheKey]
+	c.sdkMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	sdk := oba.NewClient(
 		option.WithBaseURL(region.OBABaseURL),
 		option.WithAPIKey(key),
 		option.WithHTTPClient(c.http),
 		option.WithRequestTimeout(perRequestTimeout),
 		option.WithMaxRetries(maxRetries),
-	), nil
+	)
+
+	c.sdkMu.Lock()
+	defer c.sdkMu.Unlock()
+	// Re-check under the lock: two goroutines racing the same first lookup
+	// must end up sharing one client, so the loser adopts the winner's
+	// rather than overwriting it.
+	if existing, ok := c.sdks[cacheKey]; ok {
+		return existing, nil
+	}
+	c.sdks[cacheKey] = sdk
+	return sdk, nil
 }
 
 func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {

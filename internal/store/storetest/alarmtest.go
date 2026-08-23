@@ -32,24 +32,9 @@ func RunAlarmRepository(t *testing.T, newStore newAlarmStoreFunc) {
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testDeleteByIDTreatsMissingAsSuccess(t, newStore) })
 }
 
-// putAlarmRegion inserts a minimal directory-sourced region with the given
-// id: alarms.region_id is a foreign key, so every subtest needs at least one
-// region to satisfy it before it can create an alarm.
-func putAlarmRegion(t *testing.T, repo regions.Repository, id int64) {
-	t.Helper()
-	if err := repo.UpsertFromDirectory(context.Background(), []regions.Region{{
-		ID:         id,
-		Name:       "Region",
-		OBABaseURL: "https://example.org/",
-		Active:     true,
-	}}, base); err != nil {
-		t.Fatalf("UpsertFromDirectory(%d): %v", id, err)
-	}
-}
-
 // fullAlarmIn builds a NewAlarm with every field set, for the subtests that
 // need a fully-populated starting row. RegionID is always 1: subtests that
-// need a different region call putAlarmRegion for the extra id and set
+// need a different region call putStoretestRegion for the extra id and set
 // RegionID on the returned value themselves. StopSequence defaults to
 // ptr(0): the zero value is a real stop sequence (the trip's first stop)
 // and must be distinguishable from an absent one throughout the suite
@@ -92,7 +77,7 @@ func findAlarmByToken(t *testing.T, list []alarms.Alarm, token string) alarms.Al
 func testAlarmCreateGetRoundTrip(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	in := fullAlarmIn("tok-round-trip", 2)
 	created, err := repo.Create(ctx, in, base)
@@ -163,7 +148,7 @@ func testAlarmCreateGetRoundTrip(t *testing.T, newStore newAlarmStoreFunc) {
 func testStopSequenceZeroDistinctFromAbsent(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	zeroIn := fullAlarmIn("tok-zero", 2)
 	zeroIn.StopSequence = ptr(int64(0))
@@ -201,8 +186,8 @@ func testStopSequenceZeroDistinctFromAbsent(t *testing.T, newStore newAlarmStore
 func testV1FindMatchesExactKey(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
-	putAlarmRegion(t, regionRepo, 2)
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
 
 	in := fullAlarmIn("tok-v1-key", 1)
 	created, err := repo.Create(ctx, in, base)
@@ -249,7 +234,7 @@ func testV1FindMatchesExactKey(t *testing.T, newStore newAlarmStoreFunc) {
 func testV1DuplicateInsertReturnsErrDuplicate(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	first := fullAlarmIn("tok-v1-first", 1)
 	if _, err := repo.Create(ctx, first, base); err != nil {
@@ -276,7 +261,7 @@ func testV1DuplicateInsertReturnsErrDuplicate(t *testing.T, newStore newAlarmSto
 func testV2NeverDeduplicates(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	first := fullAlarmIn("tok-v2-first", 2)
 	if _, err := repo.Create(ctx, first, base); err != nil {
@@ -302,7 +287,7 @@ func testV2NeverDeduplicates(t *testing.T, newStore newAlarmStoreFunc) {
 func testDeleteByTokenReports204Contract(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	if err := repo.Delete(ctx, 1, "ghost"); !errors.Is(err, alarms.ErrNotFound) {
 		t.Errorf("Delete(unknown) = %v, want alarms.ErrNotFound", err)
@@ -331,7 +316,7 @@ func testDeleteByTokenReports204Contract(t *testing.T, newStore newAlarmStoreFun
 func testFailureCounterIncrementsAndResets(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	in := fullAlarmIn("tok-failures", 2)
 	created, err := repo.Create(ctx, in, base)
@@ -370,7 +355,7 @@ func testFailureCounterIncrementsAndResets(t *testing.T, newStore newAlarmStoreF
 func testServiceDateBeyond32Bit(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	const want = (int64(1) << 32) + 123456789 // well beyond the 32-bit signed boundary
 
@@ -398,8 +383,8 @@ func testServiceDateBeyond32Bit(t *testing.T, newStore newAlarmStoreFunc) {
 func testAlarmRegionCascade(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
-	putAlarmRegion(t, regionRepo, 2)
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
 
 	in := fullAlarmIn("tok-cascade", 2)
 	if _, err := repo.Create(ctx, in, base); err != nil {
@@ -430,7 +415,7 @@ func testAlarmRegionCascade(t *testing.T, newStore newAlarmStoreFunc) {
 func testDeleteByIDTreatsMissingAsSuccess(t *testing.T, newStore newAlarmStoreFunc) {
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
-	putAlarmRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 1)
 
 	const unknownID = 999999
 	if err := repo.DeleteByID(ctx, unknownID); err != nil {

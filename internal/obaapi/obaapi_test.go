@@ -658,3 +658,74 @@ func TestArrivalAndDeparture_WithoutKeyMakesNoRequest(t *testing.T) {
 		t.Errorf("made %d requests, want 0", srv.calls.Load())
 	}
 }
+
+// TestSDKClientCacheKeyedOnBaseURLAndKey pins the memoization in sdkFor.
+// The cache exists because ArrivalAndDeparture builds a client on every call
+// and the alarm scheduler calls it once per pending alarm each minute; but a
+// cache keyed too loosely is worse than no cache, since it would route one
+// region's request at another region's server or with a rotated-away key.
+// Both halves of the key are asserted, and so is the memoization itself --
+// without the last check the cache could quietly stop caching.
+func TestSDKClientCacheKeyedOnBaseURLAndKey(t *testing.T) {
+	t.Parallel()
+	c := New("", nil, slog.New(slog.DiscardHandler)).(*client)
+
+	a1, err := c.sdkFor(testRegion("https://a.example", "key-a"))
+	if err != nil {
+		t.Fatalf("sdkFor(a): %v", err)
+	}
+	a2, err := c.sdkFor(testRegion("https://a.example", "key-a"))
+	if err != nil {
+		t.Fatalf("sdkFor(a) again: %v", err)
+	}
+	if a1 != a2 {
+		t.Error("same base URL and key returned two clients; the cache is not caching")
+	}
+
+	b, err := c.sdkFor(testRegion("https://b.example", "key-a"))
+	if err != nil {
+		t.Fatalf("sdkFor(b): %v", err)
+	}
+	if b == a1 {
+		t.Error("different base URLs shared one client; requests would go to the wrong OBA server")
+	}
+
+	rotated, err := c.sdkFor(testRegion("https://a.example", "key-a2"))
+	if err != nil {
+		t.Fatalf("sdkFor(rotated): %v", err)
+	}
+	if rotated == a1 {
+		t.Error("a rotated API key served the client built with the old key")
+	}
+}
+
+// TestSDKClientCacheSendsToTheRightServer is the behavioral counterpart: the
+// pointer-identity test above cannot catch a client that is distinct but
+// still configured for the wrong host.
+func TestSDKClientCacheSendsToTheRightServer(t *testing.T) {
+	t.Parallel()
+	newServer := func(hits *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			writeOBA(w, map[string]any{
+				"list":       []any{},
+				"references": map[string]any{"agencies": []any{}, "routes": []any{}, "situations": []any{}, "stops": []any{}, "stopTimes": []any{}, "trips": []any{}},
+			})
+		}))
+	}
+	var hitsA, hitsB atomic.Int64
+	srvA, srvB := newServer(&hitsA), newServer(&hitsB)
+	defer srvA.Close()
+	defer srvB.Close()
+
+	c := New("shared-key", srvA.Client(), slog.New(slog.DiscardHandler))
+	// Region A first, so a cache keyed only on the key would hand region B
+	// the client already built for A.
+	_, _ = c.Fleet(context.Background(), testRegion(srvA.URL, "shared-key"))
+	beforeB := hitsB.Load()
+	_, _ = c.Fleet(context.Background(), testRegion(srvB.URL, "shared-key"))
+
+	if hitsB.Load() == beforeB {
+		t.Error("region B's server saw no request; its lookup went to region A's server")
+	}
+}
