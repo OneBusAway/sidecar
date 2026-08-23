@@ -55,15 +55,18 @@ func ParseAnswers(raw string) ([]Answer, error) {
 	return out, nil
 }
 
-// questionID accepts a JSON number with no fractional part or a string of
-// digits; anything else (absent, null, 1.5, "abc") is malformed.
+// questionID accepts a JSON number with no fractional part, or a string that
+// strconv.ParseInt accepts after trimming; anything else (absent, null, 1.5,
+// "abc") is malformed.
 func questionID(raw json.RawMessage) (int64, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
 	var f float64
 	if err := json.Unmarshal(raw, &f); err == nil {
-		if f != math.Trunc(f) || math.Abs(f) > math.MaxInt32*1024 {
+		// Beyond 2^53 a float64 cannot represent the integer exactly, so the id
+		// the client meant is unknowable; reject to prevent silent corruption.
+		if f != math.Trunc(f) || math.Abs(f) > 1<<53 {
 			return 0, false
 		}
 		return int64(f), true

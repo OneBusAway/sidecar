@@ -45,6 +45,8 @@ func TestParseAnswers(t *testing.T) {
 		{"missing question_id", `[{"answer":"x"}]`, nil, surveys.ErrMalformedAnswers},
 		{"fractional question_id", `[{"question_id":1.5}]`, nil, surveys.ErrMalformedAnswers},
 		{"non-numeric string id", `[{"question_id":"abc"}]`, nil, surveys.ErrMalformedAnswers},
+		{"large integral id", `[{"question_id":5000000000000,"answer":"x"}]`, []surveys.Answer{{QuestionID: 5000000000000, Answer: "x"}}, nil},
+		{"id beyond float64 exactness", `[{"question_id":1e17}]`, nil, surveys.ErrMalformedAnswers},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
