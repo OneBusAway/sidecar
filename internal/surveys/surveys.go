@@ -158,8 +158,6 @@ type Repository interface {
 // compactJSON is the one place json.RawMessage values are normalized, so
 // equality comparisons (QuestionsEqual) and stored bytes never depend on
 // the author's whitespace. Empty in, nil out.
-//
-//nolint:unused // used in future tasks
 func compactJSON(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
