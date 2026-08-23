@@ -332,9 +332,7 @@ func mustCreateResponse(t *testing.T, repo surveys.Repository, surveyID int64, p
 	return r
 }
 
-//nolint:unparam // newStore is unused only because t.Skip below short-circuits the body; Task 6 removes the skip, making it used again
 func testUpdateFreezesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
-	t.Skip("Task 6")
 	t.Parallel()
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
@@ -358,9 +356,7 @@ func testUpdateFreezesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 }
 
-//nolint:unparam // newStore is unused only because t.Skip below short-circuits the body; Task 6 removes the skip, making it used again
 func testUpdateScalarsOnFrozen(t *testing.T, newStore newSurveyStoreFunc) {
-	t.Skip("Task 6")
 	t.Parallel()
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
@@ -383,9 +379,7 @@ func testUpdateScalarsOnFrozen(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 }
 
-//nolint:unparam // newStore is unused only because t.Skip below short-circuits the body; Task 6 removes the skip, making it used again
 func testDeleteRefusesWithResponses(t *testing.T, newStore newSurveyStoreFunc) {
-	t.Skip("Task 6")
 	t.Parallel()
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
@@ -420,9 +414,7 @@ func testDeleteCascadesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 }
 
-//nolint:unparam // newStore is unused only because t.Skip below short-circuits the body; Task 6 removes the skip, making it used again
 func testCountResponses(t *testing.T, newStore newSurveyStoreFunc) {
-	t.Skip("Task 6")
 	t.Parallel()
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
@@ -438,9 +430,171 @@ func testCountResponses(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 }
 
-func testResponseCreateGet(t *testing.T, _ newSurveyStoreFunc)           { t.Skip("Task 6") }
-func testResponseCreateUnknownSurvey(t *testing.T, _ newSurveyStoreFunc) { t.Skip("Task 6") }
-func testAmendMerges(t *testing.T, _ newSurveyStoreFunc)                 { t.Skip("Task 6") }
-func testAmendNotFoundAndCap(t *testing.T, _ newSurveyStoreFunc)         { t.Skip("Task 6") }
-func testConcurrentAmendsBothLand(t *testing.T, _ newSurveyStoreFunc)    { t.Skip("Task 6") }
-func testListResponsesOrdered(t *testing.T, _ newSurveyStoreFunc)        { t.Skip("Task 6") }
+func testResponseCreateGet(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+	lat, lon := 47.6, -122.3
+	in := surveys.NewResponse{
+		SurveyID: s.ID, PublicID: "pub-1", UserIdentifier: "device-1",
+		StopIdentifier: "1_570", StopLatitude: &lat, StopLongitude: &lon,
+		Answers: []surveys.Answer{{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "Trip?", Answer: "[Bus, Train]"}},
+	}
+	created, err := repo.CreateResponse(context.Background(), in, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.GetResponse(context.Background(), "pub-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != created.ID || got.SurveyID != s.ID || got.PublicID != "pub-1" || got.UserIdentifier != "device-1" ||
+		got.StopIdentifier != "1_570" || got.StopLatitude == nil || *got.StopLatitude != lat ||
+		got.StopLongitude == nil || *got.StopLongitude != lon {
+		t.Errorf("GetResponse = %+v", got)
+	}
+	if !reflect.DeepEqual(got.Answers, in.Answers) {
+		t.Errorf("Answers = %+v, want %+v stored verbatim", got.Answers, in.Answers)
+	}
+	if !got.CreatedAt.Equal(base) || !got.UpdatedAt.Equal(base) {
+		t.Errorf("timestamps = %v / %v", got.CreatedAt, got.UpdatedAt)
+	}
+	// Absent stop fields round-trip as absent, not zero (Android sends
+	// 0.0 coordinates *with no identifier*; the two cases must stay apart).
+	bare := mustCreateResponse(t, repo, s.ID, "pub-2")
+	gotBare, err := repo.GetResponse(context.Background(), bare.PublicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBare.StopIdentifier != "" || gotBare.StopLatitude != nil || gotBare.StopLongitude != nil {
+		t.Errorf("bare response stop fields = %q %v %v, want absent", gotBare.StopIdentifier, gotBare.StopLatitude, gotBare.StopLongitude)
+	}
+	if gotBare.Answers == nil || len(gotBare.Answers) != 0 {
+		t.Errorf("bare Answers = %#v, want empty non-nil", gotBare.Answers)
+	}
+	if _, err := repo.GetResponse(context.Background(), "nope"); !errors.Is(err, surveys.ErrNotFound) {
+		t.Fatalf("GetResponse(nope) err = %v", err)
+	}
+}
+
+func testResponseCreateUnknownSurvey(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, _ := newStore(t)
+	_, err := repo.CreateResponse(context.Background(), surveys.NewResponse{SurveyID: 999, PublicID: "p", UserIdentifier: "d"}, base)
+	if !errors.Is(err, surveys.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func testAmendMerges(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+	mustCreateResponse(t, repo, s.ID, "pub-1", answerFor(1, "a"), answerFor(2, "b"))
+	got, err := repo.AmendResponse(context.Background(), "pub-1", []surveys.Answer{answerFor(2, "B"), answerFor(3, "c")}, base.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []surveys.Answer{answerFor(1, "a"), answerFor(2, "B"), answerFor(3, "c")}
+	if !reflect.DeepEqual(got.Answers, want) {
+		t.Fatalf("Answers = %+v, want %+v", got.Answers, want)
+	}
+	if !got.UpdatedAt.Equal(base.Add(time.Minute)) || !got.CreatedAt.Equal(base) {
+		t.Errorf("timestamps = %v / %v", got.CreatedAt, got.UpdatedAt)
+	}
+	// An empty amend is a no-op that still bumps updated_at (design spec 4.4).
+	again, err := repo.AmendResponse(context.Background(), "pub-1", nil, base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(again.Answers, want) || !again.UpdatedAt.Equal(base.Add(2*time.Minute)) {
+		t.Errorf("empty amend = %+v", again)
+	}
+}
+
+func testAmendNotFoundAndCap(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+	if _, err := repo.AmendResponse(context.Background(), "nope", []surveys.Answer{answerFor(1, "a")}, base); !errors.Is(err, surveys.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	stored := make([]surveys.Answer, surveys.MaxAnswers)
+	for i := range stored {
+		stored[i] = answerFor(int64(i+1), "x")
+	}
+	mustCreateResponse(t, repo, s.ID, "full", stored...)
+	if _, err := repo.AmendResponse(context.Background(), "full", []surveys.Answer{answerFor(1, "replaced")}, base); err != nil {
+		t.Fatalf("replacing within the cap: %v", err)
+	}
+	_, err := repo.AmendResponse(context.Background(), "full", []surveys.Answer{answerFor(surveys.MaxAnswers+1, "new")}, base)
+	if !errors.Is(err, surveys.ErrTooManyAnswers) {
+		t.Fatalf("err = %v, want ErrTooManyAnswers", err)
+	}
+}
+
+// testConcurrentAmendsBothLand is the reason sqlite.Open sets
+// _txlock=immediate (design spec 2.6, 3.2): two amends racing on one row
+// must both succeed and both be visible. Mutation to trust this test:
+// remove _txlock=immediate from the DSN and it fails with SQLITE_BUSY.
+func testConcurrentAmendsBothLand(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	const attempts = 25
+	for i := range attempts {
+		repo, regs := newStore(t)
+		st := seedStudy(t, repo, regs, 1)
+		s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+		mustCreateResponse(t, repo, s.ID, "pub-1", answerFor(1, "hero"))
+
+		var errA, errB error
+		start := make(chan struct{})
+		done := make(chan struct{}, 2)
+		go func() {
+			<-start
+			_, errA = repo.AmendResponse(context.Background(), "pub-1", []surveys.Answer{answerFor(2, "a")}, base)
+			done <- struct{}{}
+		}()
+		go func() {
+			<-start
+			_, errB = repo.AmendResponse(context.Background(), "pub-1", []surveys.Answer{answerFor(3, "b")}, base)
+			done <- struct{}{}
+		}()
+		close(start)
+		<-done
+		<-done
+		if errA != nil || errB != nil {
+			t.Fatalf("attempt %d: concurrent amends must both succeed: a=%v b=%v", i, errA, errB)
+		}
+		got, err := repo.GetResponse(context.Background(), "pub-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Answers) != 3 {
+			t.Fatalf("attempt %d: answers = %+v, want hero + both amends (lost update)", i, got.Answers)
+		}
+	}
+}
+
+func testListResponsesOrdered(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+	other := mustCreateSurvey(t, repo, st.ID, surveyDef("other"))
+	later, err := repo.CreateResponse(context.Background(), surveys.NewResponse{SurveyID: s.ID, PublicID: "later", UserIdentifier: "d"}, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlier := mustCreateResponse(t, repo, s.ID, "earlier")
+	mustCreateResponse(t, repo, other.ID, "elsewhere")
+	list, err := repo.ListResponses(context.Background(), s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].ID != earlier.ID || list[1].ID != later.ID {
+		t.Fatalf("ListResponses = %+v, want [earlier, later] by created_at", list)
+	}
+}

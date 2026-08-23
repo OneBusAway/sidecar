@@ -399,13 +399,155 @@ func (r *surveyRepo) CountResponses(ctx context.Context, surveyID int64) (int64,
 	return n, nil
 }
 
-func (r *surveyRepo) CreateResponse(context.Context, surveys.NewResponse, time.Time) (surveys.Response, error) {
-	panic("Task 6")
+func floatToNull(v *float64) sql.NullFloat64 {
+	if v == nil {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Float64: *v, Valid: true}
 }
-func (r *surveyRepo) GetResponse(context.Context, string) (surveys.Response, error) { panic("Task 6") }
-func (r *surveyRepo) AmendResponse(context.Context, string, []surveys.Answer, time.Time) (surveys.Response, error) {
-	panic("Task 6")
+
+func nullToFloat(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	f := v.Float64
+	return &f
 }
-func (r *surveyRepo) ListResponses(context.Context, int64) ([]surveys.Response, error) {
-	panic("Task 6")
+
+func encodeAnswers(in []surveys.Answer) (string, error) {
+	if in == nil {
+		in = []surveys.Answer{}
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func responseFromRow(r gen.SurveyResponse) (surveys.Response, error) {
+	answers := []surveys.Answer{}
+	if err := json.Unmarshal([]byte(r.Answers), &answers); err != nil {
+		return surveys.Response{}, fmt.Errorf("response %d: answers: %w", r.ID, err)
+	}
+	if answers == nil {
+		answers = []surveys.Answer{}
+	}
+	return surveys.Response{
+		ID: r.ID, SurveyID: r.SurveyID, PublicID: r.PublicID, UserIdentifier: r.UserIdentifier,
+		StopIdentifier: r.StopIdentifier.String,
+		StopLatitude:   nullToFloat(r.StopLatitude), StopLongitude: nullToFloat(r.StopLongitude),
+		Answers:   answers,
+		CreatedAt: unixToTime(r.CreatedAt), UpdatedAt: unixToTime(r.UpdatedAt),
+	}, nil
+}
+
+func (r *surveyRepo) CreateResponse(ctx context.Context, in surveys.NewResponse, now time.Time) (surveys.Response, error) {
+	answers, err := encodeAnswers(in.Answers)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, err)
+	}
+	// The survey existence check and the insert do not need a transaction:
+	// a survey deleted in between fails the insert's foreign key, which is
+	// the same ErrNotFound answer.
+	if _, err = r.q.GetSurvey(ctx, in.SurveyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, surveys.ErrNotFound)
+		}
+		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, err)
+	}
+	stop := sql.NullString{}
+	if in.StopIdentifier != "" {
+		stop = sql.NullString{String: in.StopIdentifier, Valid: true}
+	}
+	row, err := r.q.CreateResponse(ctx, gen.CreateResponseParams{
+		SurveyID: in.SurveyID, PublicID: in.PublicID, UserIdentifier: in.UserIdentifier,
+		StopIdentifier: stop, StopLatitude: floatToNull(in.StopLatitude), StopLongitude: floatToNull(in.StopLongitude),
+		Answers: answers, Now: now.Unix(),
+	})
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, err)
+	}
+	out, err := responseFromRow(row)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: create response: %w", err)
+	}
+	return out, nil
+}
+
+func (r *surveyRepo) GetResponse(ctx context.Context, publicID string) (surveys.Response, error) {
+	row, err := r.q.GetResponseByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Response{}, fmt.Errorf("sqlite: get response: %w", surveys.ErrNotFound)
+		}
+		return surveys.Response{}, fmt.Errorf("sqlite: get response: %w", err)
+	}
+	out, err := responseFromRow(row)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: get response: %w", err)
+	}
+	return out, nil
+}
+
+// AmendResponse is a read-merge-write inside one write transaction. With
+// the store's _txlock=immediate DSN the transaction holds the write lock
+// from BEGIN, so a concurrent amend waits on busy_timeout rather than
+// failing after its read with SQLITE_BUSY_SNAPSHOT (design spec 2.6).
+func (r *surveyRepo) AmendResponse(ctx context.Context, publicID string, incoming []surveys.Answer, now time.Time) (surveys.Response, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response: begin tx: %w", err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	current, err := q.GetResponseByPublicID(ctx, publicID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Response{}, fmt.Errorf("sqlite: amend response: %w", surveys.ErrNotFound)
+		}
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response: %w", err)
+	}
+	stored, err := responseFromRow(current)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response: %w", err)
+	}
+	merged := surveys.MergeAnswers(stored.Answers, incoming)
+	if len(merged) > surveys.MaxAnswers {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: %w", stored.ID, surveys.ErrTooManyAnswers)
+	}
+	encoded, err := encodeAnswers(merged)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: %w", stored.ID, err)
+	}
+	row, err := q.UpdateResponseAnswers(ctx, gen.UpdateResponseAnswersParams{PublicID: publicID, Answers: encoded, Now: now.Unix()})
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: %w", stored.ID, err)
+	}
+	out, err := responseFromRow(row)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: commit: %w", stored.ID, err)
+	}
+	return out, nil
+}
+
+func (r *surveyRepo) ListResponses(ctx context.Context, surveyID int64) ([]surveys.Response, error) {
+	rows, err := r.q.ListResponsesBySurvey(ctx, surveyID)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list responses for survey %d: %w", surveyID, err)
+	}
+	out := make([]surveys.Response, 0, len(rows))
+	for _, row := range rows {
+		resp, err := responseFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: list responses for survey %d: %w", surveyID, err)
+		}
+		out = append(out, resp)
+	}
+	return out, nil
 }
