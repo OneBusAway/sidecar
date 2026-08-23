@@ -13,6 +13,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
+	"github.com/OneBusAway/sidecar/internal/ratelimit"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
@@ -306,5 +307,153 @@ func TestFeedbackSuccessLogNeverLogsToken(t *testing.T) {
 	// not as [token], since we don't sanitize on the success path intentionally)
 	if strings.Contains(logOutput, "[token]") {
 		t.Errorf("log output should not contain [token] marker on success path, got: %s", logOutput)
+	}
+}
+
+// feedbackServerWithSecret builds a router whose gorush webhook requires the
+// given bearer token, plus the fake repo so a test can prove no delete ran.
+func feedbackServerWithSecret(t *testing.T, secret string) (http.Handler, *fakePushRepo) {
+	t.Helper()
+	store := sqlitetest.Open(t)
+	repo := &fakePushRepo{real: store.PushRegs()}
+	return httpapi.NewRouter(httpapi.Deps{
+		PushRegs:       repo,
+		Regions:        store.Regions(),
+		Now:            func() time.Time { return base },
+		Logger:         slog.New(slog.DiscardHandler),
+		FeedbackSecret: secret,
+	}), repo
+}
+
+// authedFeedbackRequest is feedbackRequest with an Authorization header.
+func authedFeedbackRequest(t *testing.T, h http.Handler, authorization, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestFeedbackSecretRequiredWhenConfigured pins the shared-secret gate. The
+// webhook deletes a token's registrations in every region on a caller-supplied
+// value, so an unauthorized caller must be turned away before the body is even
+// read -- otherwise the response distinguishes a token that exists from one
+// that does not.
+func TestFeedbackSecretRequiredWhenConfigured(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cr3t-value"
+	const body = `{"type":"failed-push","platform":"ios","token":"tok1","error":"Unregistered"}`
+
+	for _, tc := range []struct {
+		name       string
+		authHeader string
+		wantStatus int
+		wantDelete bool
+	}{
+		{"correct secret", "Bearer " + secret, http.StatusOK, true},
+		{"wrong secret", "Bearer nope", http.StatusUnauthorized, false},
+		{"no header at all", "", http.StatusUnauthorized, false},
+		// The prefix is optional on purpose: requiring it would add no
+		// security (the secret still has to match) while breaking a sender
+		// that can only set a raw header value.
+		{"right value, no Bearer prefix", secret, http.StatusOK, true},
+		{"prefix of the real secret", "Bearer s3cr3t", http.StatusUnauthorized, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, repo := feedbackServerWithSecret(t, secret)
+			rec := authedFeedbackRequest(t, h, tc.authHeader, body)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if repo.deleteByTokenCalled != tc.wantDelete {
+				t.Errorf("DeleteByToken called = %v, want %v", repo.deleteByTokenCalled, tc.wantDelete)
+			}
+		})
+	}
+}
+
+// TestFeedbackOpenWebhookIsThrottled pins the other half of the trade: with no
+// secret configured the endpoint stays open so a deployment whose gorush
+// cannot send a header keeps its prune signal, but it is no longer an
+// unmetered path to cross-region deletes.
+func TestFeedbackOpenWebhookIsThrottled(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs: store.PushRegs(),
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+		// No FeedbackSecret: the open configuration.
+		FeedbackLimiter: ratelimit.New(2, time.Minute),
+	})
+
+	const body = `{"type":"failed-push","platform":"ios","token":"tok1","error":"Timeout"}`
+	post := func(port int) int {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// A fresh source port per request, as real ones have: the bucket
+		// keys on the host, so reusing one address would pass even against
+		// a limiter keyed on host:port.
+		req.RemoteAddr = fmt.Sprintf("1.2.3.4:%d", port)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for i, port := range []int{5001, 5002} {
+		if got := post(port); got != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i+1, got)
+		}
+	}
+	if got := post(5003); got != http.StatusTooManyRequests {
+		t.Errorf("third request: status = %d, want 429", got)
+	}
+	// A different host keeps its own budget.
+	if got := post2(t, h, "9.9.9.9:5001", body); got != http.StatusOK {
+		t.Errorf("other IP: status = %d, want 200", got)
+	}
+}
+
+func post2(t *testing.T, h http.Handler, addr, body string) int {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = addr
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestFeedbackAuthenticatedWebhookIsNotThrottled pins the reason the secret
+// exists. gorush reports one failure per dead token, so a mass uninstall
+// arrives as a burst; throttling a caller we have already authenticated would
+// drop those prune signals for no security gain. The limiter injected here is
+// deliberately tiny, so this asserts the routing decision -- no bucket at all
+// on the authenticated path -- rather than that the default bucket happens to
+// be roomy enough.
+func TestFeedbackAuthenticatedWebhookIsNotThrottled(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cr3t-value"
+	store := sqlitetest.Open(t)
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs:        store.PushRegs(),
+		Regions:         store.Regions(),
+		Now:             func() time.Time { return base },
+		Logger:          slog.New(slog.DiscardHandler),
+		FeedbackSecret:  secret,
+		FeedbackLimiter: ratelimit.New(2, time.Minute),
+	})
+
+	for i := range 5 {
+		body := fmt.Sprintf(`{"type":"failed-push","platform":"ios","token":"tok%d","error":"Unregistered"}`, i)
+		if got := authedFeedbackRequest(t, h, "Bearer "+secret, body).Code; got != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 (an authenticated webhook must never be throttled)", i, got)
+		}
 	}
 }

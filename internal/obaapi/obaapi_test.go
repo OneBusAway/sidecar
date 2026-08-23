@@ -525,39 +525,32 @@ func TestArrivalAndDeparture_MapsEntry(t *testing.T) {
 }
 
 func TestArrivalAndDeparture_RouteShortNameFromReferences(t *testing.T) {
-	t.Run("short name from references", func(t *testing.T) {
-		entry := map[string]any{"tripId": "1_1", "routeId": "1_100224", "routeShortName": ""}
-		routes := []map[string]any{{"id": "1_100224", "agencyId": "1", "type": 3, "shortName": "44"}}
-		srv := newArrivalServer(t, 0, entry, routes)
+	// The entry carries no routeShortName, so the label has to come out of
+	// references -- and a route that has only a longName still needs to
+	// produce something a rider can read rather than an empty label.
+	for _, tc := range []struct {
+		name  string
+		route map[string]any
+		want  string
+	}{
+		{"short name from references", map[string]any{"id": "1_100224", "agencyId": "1", "type": 3, "shortName": "44"}, "44"},
+		{"falls back to long name", map[string]any{"id": "1_100224", "agencyId": "1", "type": 3, "longName": "Ballard Local"}, "Ballard Local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := map[string]any{"tripId": "1_1", "routeId": "1_100224", "routeShortName": ""}
+			srv := newArrivalServer(t, 0, entry, []map[string]any{tc.route})
 
-		got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
-			ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
-				DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
-		if err != nil {
-			t.Fatalf("ArrivalAndDeparture: %v", err)
-		}
-		if got.RouteShortName != "44" {
-			t.Errorf("RouteShortName = %q, want 44", got.RouteShortName)
-		}
-	})
-
-	// A references route with no shortName (only a longName) still needs to
-	// produce something riders can read rather than an empty label.
-	t.Run("falls back to long name", func(t *testing.T) {
-		entry := map[string]any{"tripId": "1_1", "routeId": "1_100224", "routeShortName": ""}
-		routes := []map[string]any{{"id": "1_100224", "agencyId": "1", "type": 3, "longName": "Ballard Local"}}
-		srv := newArrivalServer(t, 0, entry, routes)
-
-		got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
-			ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
-				DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
-		if err != nil {
-			t.Fatalf("ArrivalAndDeparture: %v", err)
-		}
-		if got.RouteShortName != "Ballard Local" {
-			t.Errorf("RouteShortName = %q, want Ballard Local", got.RouteShortName)
-		}
-	})
+			got, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+				ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+					DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+			if err != nil {
+				t.Fatalf("ArrivalAndDeparture: %v", err)
+			}
+			if got.RouteShortName != tc.want {
+				t.Errorf("RouteShortName = %q, want %q", got.RouteShortName, tc.want)
+			}
+		})
+	}
 }
 
 // A 200 whose entry has no tripId is OBA's other way of saying "nothing

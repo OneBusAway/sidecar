@@ -24,7 +24,12 @@ func TestGorushSendPostsExpectedJSON(t *testing.T) {
 		var err error
 		capturedBody, err = io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("failed to read body in server: %v", err)
+			// t.Fatalf would stop only this handler goroutine, leaving the
+			// request without a response and the client blocked until its
+			// timeout; the test would keep running on stale captures.
+			t.Errorf("failed to read body in server: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -127,94 +132,63 @@ func TestGorushSendPostsExpectedJSON(t *testing.T) {
 	}
 }
 
-func TestGorushAndroidOmitsDevelopment(t *testing.T) {
-	var capturedBody []byte
+// TestGorushOmitsDevelopment covers when the sandbox flag must not appear on
+// the wire at all. `development` is omitempty, so a false value is absent --
+// but the two cases get there differently: Android never sets it (the field
+// is meaningless off APNs), while an iOS production send sets it to false.
+// Both must produce a payload with no `development` key.
+func TestGorushOmitsDevelopment(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		platform     Platform
+		sandbox      bool
+		wantPlatform float64
+	}{
+		// Sandbox: true is garbage for Android -- the flag is APNs-only. It
+		// is set deliberately: with false, a sender that wrongly forwarded
+		// it would still produce an absent (omitempty) key and look correct.
+		{"android never carries it", PlatformAndroid, true, 2},
+		{"ios production sends false", PlatformIOS, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				capturedBody, err = io.ReadAll(r.Body)
+				if err != nil {
+					// t.Fatalf would stop only this handler goroutine,
+					// leaving the request unanswered and the client blocked.
+					t.Errorf("failed to read body in server: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		capturedBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read body in server: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
+			g := NewGorush(server.URL, server.Client())
+			if err := g.Send(context.Background(), Notification{
+				Tokens: []string{"tok1"}, Platform: tc.platform, Sandbox: tc.sandbox,
+				Title: "Test", Message: "Test message",
+			}); err != nil {
+				t.Fatalf("Send() returned unexpected error: %v", err)
+			}
 
-	g := NewGorush(server.URL, server.Client())
+			var reqBody map[string]any
+			if err := json.Unmarshal(capturedBody, &reqBody); err != nil {
+				t.Fatalf("failed to unmarshal body: %v", err)
+			}
+			notif := reqBody["notifications"].([]any)[0].(map[string]any)
 
-	n := Notification{
-		Tokens:   []string{"tok1"},
-		Platform: PlatformAndroid,
-		Sandbox:  true, // garbage for Android
-		Title:    "Test",
-		Message:  "Test message",
-	}
-
-	err := g.Send(context.Background(), n)
-	if err != nil {
-		t.Fatalf("Send() returned unexpected error: %v", err)
-	}
-
-	var reqBody map[string]any
-	err = json.Unmarshal(capturedBody, &reqBody)
-	if err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	notifs := reqBody["notifications"].([]any)
-	notif := notifs[0].(map[string]any)
-
-	platform, ok := notif["platform"].(float64)
-	if !ok || platform != 2 {
-		t.Errorf("expected platform 2, got %v", notif["platform"])
-	}
-
-	_, hasDevelopment := notif["development"]
-	if hasDevelopment {
-		t.Error("development key should not be present for Android")
-	}
-}
-
-func TestGorushProductionOmitsDevelopment(t *testing.T) {
-	var capturedBody []byte
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var err error
-		capturedBody, err = io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read body in server: %v", err)
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	g := NewGorush(server.URL, server.Client())
-
-	n := Notification{
-		Tokens:   []string{"tok1"},
-		Platform: PlatformIOS,
-		Sandbox:  false,
-		Title:    "Test",
-		Message:  "Test message",
-	}
-
-	err := g.Send(context.Background(), n)
-	if err != nil {
-		t.Fatalf("Send() returned unexpected error: %v", err)
-	}
-
-	var reqBody map[string]any
-	err = json.Unmarshal(capturedBody, &reqBody)
-	if err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	notifs := reqBody["notifications"].([]any)
-	notif := notifs[0].(map[string]any)
-
-	_, hasDevelopment := notif["development"]
-	if hasDevelopment {
-		t.Error("development key should not be present for iOS production")
+			if platform, ok := notif["platform"].(float64); !ok || platform != tc.wantPlatform {
+				t.Errorf("platform = %v, want %v", notif["platform"], tc.wantPlatform)
+			}
+			if _, hasDevelopment := notif["development"]; hasDevelopment {
+				t.Errorf("development key present, want it omitted; payload = %s", capturedBody)
+			}
+		})
 	}
 }
 

@@ -57,6 +57,16 @@ type Deps struct {
 	// NewRouter defaults it (30/minute per IP); tests inject tighter ones.
 	PushLimiter *ratelimit.Limiter
 
+	// FeedbackSecret, when non-empty, is the bearer token /webhooks/gorush
+	// requires. Empty keeps the endpoint open, because a deployment whose
+	// gorush cannot send a header must not lose its prune signal entirely --
+	// but an open endpoint is throttled instead (see below), since it deletes
+	// registrations across every region on a caller-supplied token.
+	FeedbackSecret string
+	// FeedbackLimiter bounds an unauthenticated /webhooks/gorush. NewRouter
+	// defaults it; it is unused when FeedbackSecret is set.
+	FeedbackLimiter *ratelimit.Limiter
+
 	// Alarms backs the alarm create/delete endpoints (spec §5.1-§5.2). Nil
 	// means those routes are not registered.
 	Alarms alarms.Repository
@@ -163,10 +173,24 @@ func NewRouter(deps Deps) http.Handler {
 			throttleByIP(deps.PushLimiter, deps, ph.register))
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/push_registrations",
 			throttleByIP(deps.PushLimiter, deps, ph.unregister))
-		// gorush is our own infrastructure, and throttling it would drop prune
-		// signals, so the feedback webhook is registered outside the throttle.
+		// gorush is our own infrastructure and throttling it would drop prune
+		// signals during a mass bounce -- but that argument only holds for a
+		// caller we can actually identify. With a shared secret configured
+		// the webhook runs unthrottled as intended; without one it is an
+		// unauthenticated endpoint that deletes a token's registrations in
+		// every region, so it gets a bucket of its own. That bucket is far
+		// looser than the push_registrations one: dropping a prune signal
+		// only delays a dead token to the 180-day sweep, so the limit exists
+		// to bound abuse, not to police normal volume.
 		fh := &feedbackHandler{deps: deps}
-		mux.HandleFunc("POST /webhooks/gorush", fh.receive)
+		feedback := fh.receive
+		if deps.FeedbackSecret == "" {
+			if deps.FeedbackLimiter == nil {
+				deps.FeedbackLimiter = ratelimit.New(feedbackLimitPerMinute, time.Minute)
+			}
+			feedback = throttleByIP(deps.FeedbackLimiter, deps, feedback)
+		}
+		mux.HandleFunc("POST /webhooks/gorush", feedback)
 	}
 
 	if deps.Alarms != nil {

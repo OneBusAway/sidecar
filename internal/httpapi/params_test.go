@@ -320,105 +320,39 @@ func TestParamsInt64(t *testing.T) {
 func TestParamsBoolish(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	// One line per case: every case keys the same map under the same name,
+	// so spelling that out per case only repeated the scaffolding.
+	// present=false is boolish's "I could not read a bool here" -- an empty,
+	// unrecognized, or absent value -- which callers treat as "not supplied".
+	const key = "flag"
+	for _, tt := range []struct {
 		name        string
-		m           map[string]any
-		key         string
+		value       any // nil means the key is absent entirely
 		wantVal     bool
 		wantPresent bool
 	}{
-		{
-			name:        "string 1",
-			m:           map[string]any{"flag": "1"},
-			key:         "flag",
-			wantVal:     true,
-			wantPresent: true,
-		},
-		{
-			name:        "string t",
-			m:           map[string]any{"flag": "t"},
-			key:         "flag",
-			wantVal:     true,
-			wantPresent: true,
-		},
-		{
-			name:        "string TRUE uppercase",
-			m:           map[string]any{"flag": "TRUE"},
-			key:         "flag",
-			wantVal:     true,
-			wantPresent: true,
-		},
-		{
-			name:        "string on",
-			m:           map[string]any{"flag": "on"},
-			key:         "flag",
-			wantVal:     true,
-			wantPresent: true,
-		},
-		{
-			name:        "string 0",
-			m:           map[string]any{"flag": "0"},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: true,
-		},
-		{
-			name:        "string f",
-			m:           map[string]any{"flag": "f"},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: true,
-		},
-		{
-			name:        "string false",
-			m:           map[string]any{"flag": "false"},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: true,
-		},
-		{
-			name:        "string off",
-			m:           map[string]any{"flag": "off"},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: true,
-		},
-		{
-			name:        "string empty",
-			m:           map[string]any{"flag": ""},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: false,
-		},
-		{
-			name:        "string unrecognized",
-			m:           map[string]any{"flag": "yes"},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: false,
-		},
-		{
-			name:        "missing key",
-			m:           map[string]any{},
-			key:         "flag",
-			wantVal:     false,
-			wantPresent: false,
-		},
-		{
-			name:        "string with trailing space",
-			m:           map[string]any{"flag": "on "},
-			key:         "flag",
-			wantVal:     true,
-			wantPresent: true,
-		},
-	}
-
-	for _, tt := range tests {
+		{"string 1", "1", true, true},
+		{"string t", "t", true, true},
+		{"string TRUE uppercase", "TRUE", true, true},
+		{"string on", "on", true, true},
+		{"string with trailing space", "on ", true, true},
+		{"string 0", "0", false, true},
+		{"string f", "f", false, true},
+		{"string false", "false", false, true},
+		{"string off", "off", false, true},
+		{"string empty", "", false, false},
+		{"string unrecognized", "yes", false, false},
+		{"missing key", nil, false, false},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			p := params{m: tt.m}
-			val, present := p.boolish(tt.key)
+			t.Parallel()
+			m := map[string]any{}
+			if tt.value != nil {
+				m[key] = tt.value
+			}
+			val, present := params{m: m}.boolish(key)
 			if val != tt.wantVal || present != tt.wantPresent {
-				t.Errorf("boolish(%q) = (%v, %v), want (%v, %v)", tt.key, val, present, tt.wantVal, tt.wantPresent)
+				t.Errorf("boolish(%q) = (%v, %v), want (%v, %v)", key, val, present, tt.wantVal, tt.wantPresent)
 			}
 		})
 	}
@@ -427,107 +361,52 @@ func TestParamsBoolish(t *testing.T) {
 func TestParseAPNSSandbox(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	// §2.7: anything unrecognized is production, and says so in the log --
+	// misrouting a production token to the sandbox bounces in front of a
+	// rider, so the parser never guesses silently.
+	const key = "apns_sandbox"
+	for _, tt := range []struct {
 		name        string
-		m           map[string]any
-		input       string
+		value       any // nil means the key is absent entirely
 		wantBool    bool
 		wantLogWarn bool
-		logContent  string
 	}{
-		{
-			name:        "string 1",
-			m:           map[string]any{"apns_sandbox": "1"},
-			wantBool:    true,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string t",
-			m:           map[string]any{"apns_sandbox": "t"},
-			wantBool:    true,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string true",
-			m:           map[string]any{"apns_sandbox": "true"},
-			wantBool:    true,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string on",
-			m:           map[string]any{"apns_sandbox": "on"},
-			wantBool:    true,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string 0",
-			m:           map[string]any{"apns_sandbox": "0"},
-			wantBool:    false,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string f",
-			m:           map[string]any{"apns_sandbox": "f"},
-			wantBool:    false,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string false",
-			m:           map[string]any{"apns_sandbox": "false"},
-			wantBool:    false,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string off",
-			m:           map[string]any{"apns_sandbox": "off"},
-			wantBool:    false,
-			wantLogWarn: false,
-		},
-		{
-			name:        "missing key",
-			m:           map[string]any{},
-			wantBool:    false,
-			wantLogWarn: false,
-		},
-		{
-			name:        "string yes unrecognized",
-			m:           map[string]any{"apns_sandbox": "yes"},
-			wantBool:    false,
-			wantLogWarn: true,
-			logContent:  "yes",
-		},
-		{
-			name:        "JSON boolean true",
-			m:           map[string]any{"apns_sandbox": true},
-			wantBool:    true,
-			wantLogWarn: false,
-		},
-	}
-
-	for _, tt := range tests {
+		{"string 1", "1", true, false},
+		{"string t", "t", true, false},
+		{"string true", "true", true, false},
+		{"string on", "on", true, false},
+		{"JSON boolean true", true, true, false},
+		{"string 0", "0", false, false},
+		{"string f", "f", false, false},
+		{"string false", "false", false, false},
+		{"string off", "off", false, false},
+		{"missing key", nil, false, false},
+		{"string yes unrecognized", "yes", false, true},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := map[string]any{}
+			if tt.value != nil {
+				m[key] = tt.value
+			}
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&buf, nil))
-			p := params{m: tt.m}
 
-			got := parseAPNSSandbox(p, logger)
-			if got != tt.wantBool {
+			if got := parseAPNSSandbox(params{m: m}, logger); got != tt.wantBool {
 				t.Errorf("parseAPNSSandbox() = %v, want %v", got, tt.wantBool)
 			}
 
 			logOutput := buf.String()
+			loggedWarn := strings.Contains(logOutput, "WARN") || strings.Contains(logOutput, "Warn")
+			if loggedWarn != tt.wantLogWarn {
+				t.Errorf("logged a warning = %v, want %v; log = %q", loggedWarn, tt.wantLogWarn, logOutput)
+			}
+			// The rejected value has to reach the log, or an operator cannot
+			// tell which client is sending garbage.
 			if tt.wantLogWarn {
-				if logOutput == "" {
-					t.Errorf("parseAPNSSandbox() should have logged a warning, but got empty log")
+				if raw, ok := tt.value.(string); ok && !strings.Contains(logOutput, raw) {
+					t.Errorf("log should quote the rejected value %q, got: %s", raw, logOutput)
 				}
-				if !strings.Contains(logOutput, "Warn") && !strings.Contains(logOutput, "WARN") {
-					t.Errorf("parseAPNSSandbox() log should contain Warn level, got: %s", logOutput)
-				}
-				if tt.logContent != "" && !strings.Contains(logOutput, tt.logContent) {
-					t.Errorf("parseAPNSSandbox() log should contain %q, got: %s", tt.logContent, logOutput)
-				}
-			} else if logOutput != "" && strings.Contains(logOutput, "Warn") {
-				t.Errorf("parseAPNSSandbox() should not have logged a warning, but got: %s", logOutput)
 			}
 		})
 	}

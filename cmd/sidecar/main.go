@@ -119,6 +119,9 @@ func run(stdout, stderr io.Writer, args []string) error {
 		"default OneBusAway REST API key, used for regions with no key of their own")
 	pirateKey := fs.String("pirate-weather-key", envOrDefault("SIDECAR_PIRATE_WEATHER_KEY", ""),
 		"Pirate Weather API key; without it the weather endpoint returns 403")
+	webhookSecret := fs.String("gorush-webhook-secret", envOrDefault("SIDECAR_GORUSH_WEBHOOK_SECRET", ""),
+		"shared secret gorush must send as a bearer token on POST /webhooks/gorush; "+
+			"unset leaves the webhook open but rate limited")
 	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
 		"base URL of the gorush push gateway; without it alarms are stored but never fire")
 
@@ -173,7 +176,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// Hoisted out of the ServerConfig literal so the alarm scheduler below
 	// shares the same obaapi.Client that vehicle search uses, rather than
 	// constructing a second one.
-	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey)
+	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret)
 
 	go pushreg.RunPruneLoop(ctx, store.PushRegs(), pushRegPruneEvery, pushRegMaxAge, time.Now, logger)
 
@@ -212,7 +215,11 @@ func run(stdout, stderr io.Writer, args []string) error {
 // not in httpapi, because cmd/ is the one place in this repo allowed to
 // touch the wall clock directly (design spec §2.3); everywhere else gets it
 // injected.
-func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey string) httpapi.Deps {
+func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, webhookSecret string) httpapi.Deps {
+	if webhookSecret == "" {
+		logger.Warn("no --gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET set; " +
+			"POST /webhooks/gorush is open to anyone (rate limited); restrict it at the proxy")
+	}
 	if obaAPIKey == "" {
 		logger.Warn("no --oba-api-key/SIDECAR_OBA_API_KEY set; " +
 			"vehicle search returns 502 for regions with no key of their own")
@@ -257,6 +264,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey st
 		PushRegs:         store.PushRegs(),
 		Alarms:           store.Alarms(),
 		OBA:              obaClient,
+		FeedbackSecret:   webhookSecret,
 	}
 }
 

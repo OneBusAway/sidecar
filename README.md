@@ -141,6 +141,12 @@ export SIDECAR_PIRATE_WEATHER_KEY=...
 # the alarm scheduler always runs (spec §5.3), but the fire step is skipped
 # when no transport is configured.
 export SIDECAR_GORUSH_URL=...
+
+# Shared secret gorush must send on the feedback webhook, as either
+# `Authorization: Bearer <secret>` or a bare `Authorization: <secret>`.
+# Leave it unset only if your gorush cannot send a header: the webhook then
+# stays open (and rate limited), and should be restricted at the proxy.
+export SIDECAR_GORUSH_WEBHOOK_SECRET=...
 ```
 
 (`--oba-api-key`/`--pirate-weather-key`/`--gorush-url` are the equivalent `sidecar` flags.)
@@ -221,7 +227,17 @@ against the proxy's own address, either merging every client into one
 shared bucket or (worse) rate-limiting all of them together.
 
 gorush's feedback webhook (spec §6.5, terminal APNs failures) should be
-pointed at `POST /webhooks/gorush` on this server.
+pointed at `POST /webhooks/gorush` on this server. That endpoint deletes a
+token's registrations in *every* region on a caller-supplied value, so set
+`SIDECAR_GORUSH_WEBHOOK_SECRET` and configure gorush to send it. An
+authenticated webhook is not rate limited -- gorush reports one failure per
+dead token, and a mass uninstall arrives as a burst that a throttle would
+turn into lost prune signals.
+
+Without the secret the endpoint still works, but is rate limited per client
+IP as an abuse ceiling and should be restricted to the gorush host at the
+proxy. A dropped prune is not lost data: the token is cleaned up by the
+180-day sweep, or by the next failure gorush reports.
 
 ### Development
 

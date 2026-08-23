@@ -149,59 +149,89 @@ func TestRegister_SandboxIOS(t *testing.T) {
 	}
 }
 
-func TestRegister_StickyOnRePost(t *testing.T) {
+// TestRegister_StickyFieldMerge covers the §4 sticky-field rules. They are
+// one behavior with several cases -- what a second registration does to the
+// row the first one left -- and were six near-identical tests whose request
+// and assertion plumbing was copied per case. Every case now asserts all
+// four merged fields rather than the subset its original test happened to
+// check, so each row states the whole resulting row.
+func TestRegister_StickyFieldMerge(t *testing.T) {
 	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
+	const path = "/api/v2/regions/1/push_registrations"
+	for _, tc := range []struct {
+		name            string
+		first, second   string
+		wantLocale      string
+		wantTestDevice  bool
+		wantDescription string
+		wantSandbox     bool
+	}{
+		{
+			name:   "absent fields keep the stored values",
+			first:  "token=tok1&operating_system=ios&locale=fr-FR&test_device=true&description=Aaron%27s+iPhone&apns_sandbox=true",
+			second: "token=tok1&operating_system=ios",
+			// apns_sandbox is deliberately NOT sticky: an absent one resets.
+			wantLocale: "fr-FR", wantTestDevice: true, wantDescription: "Aaron's iPhone", wantSandbox: false,
+		},
+		{
+			name:       "blank fields count as absent, like omitted ones",
+			first:      "token=tok1&operating_system=ios&locale=fr-FR&test_device=true&description=Aaron%27s+iPhone",
+			second:     "token=tok1&operating_system=ios&locale=&description=&test_device=true",
+			wantLocale: "fr-FR", wantTestDevice: true, wantDescription: "Aaron's iPhone", wantSandbox: false,
+		},
+		{
+			name:       "an explicit false demotes and clears the description",
+			first:      "token=tok1&operating_system=ios&test_device=true&description=Aaron%27s+iPhone",
+			second:     "token=tok1&operating_system=ios&test_device=false",
+			wantLocale: "", wantTestDevice: false, wantDescription: "", wantSandbox: false,
+		},
+		{
+			name: "repeating test_device without the description keeps the stored one",
+			// The invariant is checked against the merged row, so this must
+			// not 422 even though the request carries no description.
+			first:      "token=tok1&operating_system=ios&test_device=true&description=Aaron%27s+iPhone",
+			second:     "token=tok1&operating_system=ios&test_device=true",
+			wantLocale: "", wantTestDevice: true, wantDescription: "Aaron's iPhone", wantSandbox: false,
+		},
+		{
+			name:       "a description alone updates a row that is already a test device",
+			first:      "token=tok1&operating_system=ios&test_device=true&description=Old+name",
+			second:     "token=tok1&operating_system=ios&description=New+name",
+			wantLocale: "", wantTestDevice: true, wantDescription: "New name", wantSandbox: false,
+		},
+		{
+			name:       "a description is ignored for a non-test device",
+			first:      "token=tok1&operating_system=ios",
+			second:     "token=tok1&operating_system=ios&description=X",
+			wantLocale: "", wantTestDevice: false, wantDescription: "", wantSandbox: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, pushRepo, regionRepo := newPushTestServer(t)
+			putRegion(t, regionRepo, 1)
 
-	first := "token=tok1&operating_system=ios&locale=fr-FR&test_device=true&description=Aaron%27s+iPhone&apns_sandbox=true"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
+			if rec := pushRequest(t, h, http.MethodPost, path, formCT, tc.first); rec.Code != http.StatusNoContent {
+				t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+			}
+			if rec := pushRequest(t, h, http.MethodPost, path, formCT, tc.second); rec.Code != http.StatusNoContent {
+				t.Fatalf("re-register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+			}
 
-	second := "token=tok1&operating_system=ios"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("re-register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.Locale != "fr-FR" {
-		t.Errorf("Locale = %q, want fr-FR (sticky)", reg.Locale)
-	}
-	if !reg.TestDevice {
-		t.Errorf("TestDevice = false, want true (sticky)")
-	}
-	if reg.Description != "Aaron's iPhone" {
-		t.Errorf("Description = %q, want %q (sticky)", reg.Description, "Aaron's iPhone")
-	}
-	if reg.APNSSandbox {
-		t.Errorf("APNSSandbox = true, want false (non-sticky, reset absent apns_sandbox)")
-	}
-}
-
-func TestRegister_ExplicitFalseDemotes(t *testing.T) {
-	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
-
-	first := "token=tok1&operating_system=ios&test_device=true&description=Aaron%27s+iPhone"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	second := "token=tok1&operating_system=ios&test_device=false"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("demote: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.TestDevice {
-		t.Errorf("TestDevice = true, want false")
-	}
-	if reg.Description != "" {
-		t.Errorf("Description = %q, want empty (cleared on demotion)", reg.Description)
+			reg := getReg(t, pushRepo, 1, "tok1")
+			if reg.Locale != tc.wantLocale {
+				t.Errorf("Locale = %q, want %q", reg.Locale, tc.wantLocale)
+			}
+			if reg.TestDevice != tc.wantTestDevice {
+				t.Errorf("TestDevice = %v, want %v", reg.TestDevice, tc.wantTestDevice)
+			}
+			if reg.Description != tc.wantDescription {
+				t.Errorf("Description = %q, want %q", reg.Description, tc.wantDescription)
+			}
+			if reg.APNSSandbox != tc.wantSandbox {
+				t.Errorf("APNSSandbox = %v, want %v", reg.APNSSandbox, tc.wantSandbox)
+			}
+		})
 	}
 }
 
@@ -221,81 +251,6 @@ func TestRegister_TestDeviceRequiresDescription(t *testing.T) {
 	want := []string{"Description can't be blank"}
 	if len(eb.Messages) != len(want) || eb.Messages[0] != want[0] {
 		t.Errorf("Messages = %v, want %v", eb.Messages, want)
-	}
-}
-
-func TestRegister_TestDeviceRePostKeepsStoredDescription(t *testing.T) {
-	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
-
-	first := "token=tok1&operating_system=ios&test_device=true&description=Aaron%27s+iPhone"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	// A routine re-POST that repeats test_device=true without repeating the
-	// description must not 422 -- the invariant is checked against the
-	// merged row, and the stored description already satisfies it.
-	second := "token=tok1&operating_system=ios&test_device=true"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("re-register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.Description != "Aaron's iPhone" {
-		t.Errorf("Description = %q, want %q (kept from stored row)", reg.Description, "Aaron's iPhone")
-	}
-	if !reg.TestDevice {
-		t.Errorf("TestDevice = false, want true")
-	}
-}
-
-func TestRegister_DescriptionAloneUpdatesTestDevice(t *testing.T) {
-	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
-
-	first := "token=tok1&operating_system=ios&test_device=true&description=Old+name"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	second := "token=tok1&operating_system=ios&description=New+name"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("update description: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.Description != "New name" {
-		t.Errorf("Description = %q, want %q", reg.Description, "New name")
-	}
-	if !reg.TestDevice {
-		t.Errorf("TestDevice = false, want true (still a test device)")
-	}
-}
-
-func TestRegister_DescriptionIgnoredForNonTestDevice(t *testing.T) {
-	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
-
-	first := "token=tok1&operating_system=ios"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	second := "token=tok1&operating_system=ios&description=X"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.Description != "" {
-		t.Errorf("Description = %q, want empty (ignored for non-test devices)", reg.Description)
 	}
 }
 
@@ -503,40 +458,6 @@ func TestRegister_TokenNeverLogged(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "[token]") {
 		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
-	}
-}
-
-// TestRegister_BlankValuesAreStickyToo covers the half of the §4 sticky-field
-// rule that TestRegister_StickyOnRePost does not: that test omits the keys
-// entirely, so it only exercises the absent branch. A client sending
-// locale= and description= as present-but-empty must be treated the same as
-// one that omitted them -- blank counts as absent, so the stored values
-// survive. Both blank guards could be deleted without failing any other test.
-func TestRegister_BlankValuesAreStickyToo(t *testing.T) {
-	t.Parallel()
-	h, pushRepo, regionRepo := newPushTestServer(t)
-	putRegion(t, regionRepo, 1)
-
-	first := "token=tok1&operating_system=ios&locale=fr-FR&test_device=true&description=Aaron%27s+iPhone"
-	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
-		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	second := "token=tok1&operating_system=ios&locale=&description=&test_device=true"
-	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("re-register with blanks: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
-	}
-
-	reg := getReg(t, pushRepo, 1, "tok1")
-	if reg.Locale != "fr-FR" {
-		t.Errorf("Locale = %q, want fr-FR (blank locale must not overwrite)", reg.Locale)
-	}
-	if reg.Description != "Aaron's iPhone" {
-		t.Errorf("Description = %q, want %q (blank description must not overwrite)", reg.Description, "Aaron's iPhone")
-	}
-	if !reg.TestDevice {
-		t.Errorf("TestDevice = false, want true")
 	}
 }
 
