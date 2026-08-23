@@ -90,11 +90,93 @@ sidecar-admin alert   create --region N --header TEXT --start RFC3339
                                [--severity S] [--test | --no-test]
                        publish ID | unpublish ID | delete ID
                        translate ID --language es [--header TEXT] [--description TEXT]
+sidecar-admin study   create --region N --name S [--description S]
+                       list --region N
+sidecar-admin survey  create --study N --file <path|->
+                       list --region N
+                       show ID
+                       edit ID --file <path|->
+                       delete ID
+                       responses ID        # long-format CSV, one row per answer
 sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
                        delete --username NAME [--force]
 sidecar-admin migrate  up | status
+```
+
+## Surveys
+
+The sidecar serves spec §7: a per-region list of active rider surveys and the
+survey response endpoints the apps submit to.
+
+### Endpoints
+
+- `GET /api/v1/regions/{regionId}/surveys?user_id=<device uuid>` (also
+  `…/surveys.json`, which both shipped apps call) — surveys that are available
+  and inside their window. `user_id` is required.
+- `POST /api/v1/survey_responses` (also with a trailing slash) — creates a
+  response; `responses` is a JSON-array-encoded *string*. Returns
+  `survey_response.id` and `update_path`.
+- `POST|PUT|PATCH /api/v1/survey_responses/{id}` — merges more answers into a
+  response by `question_id`.
+
+The write endpoints share one throttle of 60 requests per minute per source
+address. The throttle keys on the connection's remote address: behind a
+reverse proxy that does not preserve client addresses, every rider shares one
+bucket, so configure the proxy (or raise `surveyWritesPerMinute`) accordingly.
+
+### Authoring surveys with `sidecar-admin`
+
+Surveys belong to a study, and a study belongs to a region:
+
+```sh
+id=$(./bin/sidecar-admin --db ./sidecar.db study create --region 1 \
+  --name "Rider satisfaction" --description "Fall 2026" | awk '{print $3}')
+
+cat > survey.json <<'EOF'
+{
+  "name": "Rider satisfaction",
+  "available": true,
+  "start_date": "2026-09-01T00:00:00-07:00",
+  "end_date": "2026-09-30T23:59:00-07:00",
+  "show_on_map": false,
+  "show_on_stops": true,
+  "always_visible": false,
+  "allows_multiple_responses": false,
+  "visible_stop_list": ["1_570", "1_578"],
+  "visible_route_list": null,
+  "questions": [
+    { "required": true,
+      "content": { "type": "radio", "label_text": "How was your trip?",
+                   "options": ["Great", "Fine", "Bad"] } },
+    { "content": { "type": "text", "label_text": "Anything else?" } }
+  ]
+}
+EOF
+./bin/sidecar-admin --db ./sidecar.db survey create --study "$id" --file survey.json
+```
+
+Question `content.type` is one of `text`, `label`, `radio`, `checkbox`,
+`external_survey` (the last takes `url`, `survey_provider`,
+`embedded_data_fields`, `sdk_configuration_values`). Questions are displayed in
+document order. Dates require an explicit UTC offset. Absent booleans are
+`false`; an absent or empty targeting list means "everywhere".
+
+`survey show <id>` prints the same document (plus `id`, `study`, timestamps),
+so `survey show 3 | sidecar-admin --db ./sidecar.db survey edit 3 --file -` is
+a round trip. Once a survey has responses its questions are frozen — edit only
+the name, dates, flags, and targeting — and it cannot be deleted.
+
+```
+sidecar-admin study   create    --region N --name S [--description S]
+                      list      --region N
+sidecar-admin survey  create    --study N --file <path|->
+                      list      --region N
+                      show      <id>
+                      edit      <id> --file <path|->
+                      delete    <id>
+                      responses <id>        # long-format CSV, one row per answer
 ```
 
 ## Weather and vehicle search

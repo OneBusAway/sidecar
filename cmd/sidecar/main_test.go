@@ -261,6 +261,9 @@ func TestBuildDeps_WiresPushAndAlarms(t *testing.T) {
 	if deps.OBA == nil {
 		t.Error("Deps.OBA = nil, want the obaapi.Client shared with Deps.Vehicles")
 	}
+	if deps.Surveys == nil {
+		t.Error("Deps.Surveys = nil, want store.Surveys()")
+	}
 }
 
 // TestBuildDeps_WiresOBADefaultKeySet pins the one line in buildDeps nothing
