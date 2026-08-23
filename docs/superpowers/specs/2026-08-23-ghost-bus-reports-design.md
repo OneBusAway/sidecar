@@ -72,7 +72,7 @@ Required: `user_identifier`, `trip_identifier`, `service_date`,
   absent/unrecognized → null. It is data, not push routing, so unrecognized values
   need no logging.
 - Identifier-ish fields (`user_identifier`, `trip_identifier`, `route_identifier`,
-  `stop_identifier`, `vehicle_identifier`) share the surveys' length caps; anything
+  `stop_identifier`, `vehicle_identifier`) share the surveys' 255-char `maxIdentifierLen` cap; anything
   over is a validation 422 rather than a truncated store.
 
 Validation failure → `422 {"error": "Unable to save report", "messages": […]}`
