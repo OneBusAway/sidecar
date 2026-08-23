@@ -12,6 +12,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 )
 
 func boolPtr(b bool) *bool        { return &b }
@@ -60,9 +61,23 @@ func ghostBusCol(t *testing.T, row []string, name string) string {
 	return ""
 }
 
-func TestGhostBusExportCSV(t *testing.T) {
-	t.Parallel()
-	dbPath, store := newDB(t)
+// ghostBusExportFixture carries the instants seedGhostBusExportReports
+// derived its rows from, so assertions re-derive expectations from the
+// same values instead of hardcoding renderings.
+type ghostBusExportFixture struct {
+	loc             *time.Location
+	serviceDateTime time.Time
+	createdEarly    time.Time
+}
+
+// seedGhostBusExportReports seeds region 1 plus the three canonical export
+// fixtures: R1 "full" (every optional field, captured snapshot with
+// formula-injection payloads), R2 "bare" (required fields only, pending
+// snapshot, same trip instance as R1 so trip_report_count == 2), and R3
+// "zeroless" (captured snapshot with "position" but no "lastKnownLocation"
+// and no stop coordinates -- the Null Island guard case).
+func seedGhostBusExportReports(t *testing.T, store *sqlite.Store) ghostBusExportFixture {
+	t.Helper()
 	seedGhostBusRegion(t, store.Regions(), 1, "America/Los_Angeles")
 
 	loc, err := time.LoadLocation("America/Los_Angeles")
@@ -71,27 +86,24 @@ func TestGhostBusExportCSV(t *testing.T) {
 	}
 
 	// service_date is an independent epoch-ms field (the rider's service
-	// day), distinct from created_at -- pin its local rendering from the
-	// same zone the CLI resolves through region.Timezone. 03:00 UTC is
+	// day), distinct from created_at -- its local rendering is pinned from
+	// the same zone the CLI resolves through region.Timezone. 03:00 UTC is
 	// 20:00 the PREVIOUS day in America/Los_Angeles (UTC-7 in August), so
 	// the UTC and local calendar dates genuinely disagree here -- unlike a
 	// noon-UTC instant, which lands on the same date in both zones and so
-	// would pass this assertion even if ghostBusRow rendered service_date
+	// would pass that assertion even if ghostBusRow rendered service_date
 	// in UTC instead of the region's local zone.
-	serviceDateTime := time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC)
-	serviceDateMs := serviceDateTime.UnixMilli()
-	wantServiceDate := serviceDateTime.In(loc).Format("2006-01-02")
-
+	fx := ghostBusExportFixture{
+		loc:             loc,
+		serviceDateTime: time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC),
+		createdEarly:    time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+	}
+	serviceDateMs := fx.serviceDateTime.UnixMilli()
 	predictionLastUpdated := time.Date(2026, 8, 10, 11, 0, 0, 0, time.UTC).UnixMilli()
 	scheduledArrival := predictionLastUpdated + 30*60000 // 30 minutes later, in ms
-
-	createdEarly := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
-	createdLate := createdEarly.Add(2 * time.Hour)
-
+	createdLate := fx.createdEarly.Add(2 * time.Hour)
 	ctx := context.Background()
 
-	// R1 "full": every optional field set, captured snapshot with
-	// formula-injection payloads in headsign and comment.
 	r1Snapshot := `{"current_time":1,"status":{"phase":"in_progress","lastKnownLocation":{"lat":47.61,"lon":-122.34}},"display":{"route_short_name":"44","headsign":"=HYPERLINK(evil)","stop_name":"Stop A","stop_lat":47.668,"stop_lon":-122.376,"route_type":3}}`
 	r1, err := store.GhostBus().Create(ctx, ghostbus.NewReport{
 		RegionID:                 1,
@@ -112,16 +124,14 @@ func TestGhostBusExportCSV(t *testing.T) {
 		ScheduledArrivalAt:       int64Ptr(scheduledArrival),
 		PredictedArrivalAt:       int64Ptr(scheduledArrival),
 		PredictionLastUpdatedAt:  int64Ptr(predictionLastUpdated),
-	}, createdEarly)
+	}, fx.createdEarly)
 	if err != nil {
 		t.Fatalf("create R1: %v", err)
 	}
-	if err = store.GhostBus().MarkSnapshotCaptured(ctx, r1.ID, r1Snapshot, createdEarly.Add(time.Minute)); err != nil {
+	if err = store.GhostBus().MarkSnapshotCaptured(ctx, r1.ID, r1Snapshot, fx.createdEarly.Add(time.Minute)); err != nil {
 		t.Fatalf("mark R1 captured: %v", err)
 	}
 
-	// R2 "bare": only required fields, same (trip, service_date) as R1 so
-	// trip_report_count == 2 for both. Snapshot stays pending.
 	if _, err = store.GhostBus().Create(ctx, ghostbus.NewReport{
 		RegionID:            1,
 		PublicID:            "tok_bare_000000000001",
@@ -129,14 +139,10 @@ func TestGhostBusExportCSV(t *testing.T) {
 		TripIdentifier:      "trip-common",
 		ServiceDate:         serviceDateMs,
 		WaitDurationMinutes: 15,
-	}, createdEarly); err != nil {
+	}, fx.createdEarly); err != nil {
 		t.Fatalf("create R2: %v", err)
 	}
 
-	// R3 "zeroless": captured snapshot whose status has "position" but no
-	// "lastKnownLocation", and whose display carries no stop coordinates --
-	// the Null Island guard must blank the distance while still rendering
-	// vehicle_last_lat/lon from position.
 	r3Snapshot := `{"status":{"phase":"scheduled","position":{"lat":47.61,"lon":-122.34}},"display":{"route_short_name":"10","headsign":"Downtown","stop_name":"Stop B"}}`
 	r3, err := store.GhostBus().Create(ctx, ghostbus.NewReport{
 		RegionID:            1,
@@ -152,12 +158,72 @@ func TestGhostBusExportCSV(t *testing.T) {
 	if err = store.GhostBus().MarkSnapshotCaptured(ctx, r3.ID, r3Snapshot, createdLate.Add(time.Minute)); err != nil {
 		t.Fatalf("mark R3 captured: %v", err)
 	}
+	return fx
+}
+
+// requireCell asserts one named CSV cell's exact rendering.
+func requireCell(t *testing.T, row []string, col, want string) {
+	t.Helper()
+	if got := ghostBusCol(t, row, col); got != want {
+		t.Errorf("%s = %q, want %q", col, got, want)
+	}
+}
+
+// assertGhostBusFullRow checks R1: injection guards on both rider- and
+// snapshot-sourced cells, the ms staleness divisor, region-local time
+// renderings, the trip-instance count, and the haversine distance.
+func assertGhostBusFullRow(t *testing.T, row []string, fx ghostBusExportFixture) {
+	t.Helper()
+	requireCell(t, row, "predicted", "true")
+	requireCell(t, row, "comment", "'=1+1")                   // formula-injection guard
+	requireCell(t, row, "headsign", "'=HYPERLINK(evil)")      // guard on snapshot-sourced cells too
+	requireCell(t, row, "prediction_staleness_minutes", "30") // ms divisor regression guard
+	// Local renderings re-derived through the same loc the CLI resolves
+	// via region.Timezone; both differ from the UTC rendering (see the
+	// fixture comment on the 03:00 UTC choice).
+	requireCell(t, row, "reported_at_local", fx.createdEarly.In(fx.loc).Format(time.RFC3339))
+	requireCell(t, row, "service_date", fx.serviceDateTime.In(fx.loc).Format("2006-01-02"))
+	requireCell(t, row, "trip_report_count", "2")
+
+	gotDist, err := strconv.ParseFloat(ghostBusCol(t, row, "vehicle_distance_from_stop_m"), 64)
+	if err != nil {
+		t.Fatalf("R1 vehicle_distance_from_stop_m parse: %v", err)
+	}
+	wantDist := ghostbus.HaversineMeters(47.61, -122.34, 47.668, -122.376)
+	if math.Abs(gotDist-wantDist)/wantDist > 0.2 {
+		t.Errorf("R1 vehicle_distance_from_stop_m = %v, want within 20%% of %v", gotDist, wantDist)
+	}
+}
+
+// assertGhostBusBareRow checks R2: everything optional or snapshot-derived
+// renders blank, while the trip-instance count still pairs it with R1.
+func assertGhostBusBareRow(t *testing.T, row []string) {
+	t.Helper()
+	requireCell(t, row, "predicted", "")
+	requireCell(t, row, "snapshot_status", ghostbus.SnapshotPending)
+	requireCell(t, row, "prediction_staleness_minutes", "")
+	requireCell(t, row, "route_short_name", "") // no snapshot
+	requireCell(t, row, "trip_report_count", "2")
+}
+
+// assertGhostBusZerolessRow checks R3: distance blanks when stop
+// coordinates are absent (Null Island guard) while the position fallback
+// still renders the vehicle columns.
+func assertGhostBusZerolessRow(t *testing.T, row []string) {
+	t.Helper()
+	requireCell(t, row, "vehicle_distance_from_stop_m", "")
+	requireCell(t, row, "vehicle_last_lat", "47.61")
+}
+
+func TestGhostBusExportCSV(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	fx := seedGhostBusExportReports(t, store)
 
 	stdout, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1")
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
-
 	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
 	if err != nil {
 		t.Fatalf("parse csv: %v (stdout=%q)", err, stdout)
@@ -173,79 +239,20 @@ func TestGhostBusExportCSV(t *testing.T) {
 	for _, row := range rows[1:] {
 		byPublicID[row[0]] = row
 	}
-
-	r1Row, ok := byPublicID["tok_full_000000000001"]
-	if !ok {
-		t.Fatalf("R1 row missing; rows=%v", rows)
-	}
-	if got := ghostBusCol(t, r1Row, "predicted"); got != "true" {
-		t.Errorf("R1 predicted = %q, want true", got)
-	}
-	if got := ghostBusCol(t, r1Row, "comment"); got != "'=1+1" {
-		t.Errorf("R1 comment = %q, want '=1+1 (formula-injection guard)", got)
-	}
-	if got := ghostBusCol(t, r1Row, "headsign"); got != "'=HYPERLINK(evil)" {
-		t.Errorf("R1 headsign = %q, want '=HYPERLINK(evil) (injection guard on snapshot-sourced cells too)", got)
-	}
-	if got := ghostBusCol(t, r1Row, "prediction_staleness_minutes"); got != "30" {
-		t.Errorf("R1 prediction_staleness_minutes = %q, want 30 (ms divisor regression guard)", got)
-	}
-	// reported_at_local must render in the region's zone (America/Los_Angeles,
-	// -07:00 in August), not UTC -- computed here via the same loc the CLI
-	// resolves through region.Timezone rather than a hardcoded literal, but
-	// it still differs from the UTC rendering of the same instant.
-	wantReportedAtLocal := createdEarly.In(loc).Format(time.RFC3339)
-	if got := ghostBusCol(t, r1Row, "reported_at_local"); got != wantReportedAtLocal {
-		t.Errorf("R1 reported_at_local = %q, want %q", got, wantReportedAtLocal)
-	}
-	if got := ghostBusCol(t, r1Row, "service_date"); got != wantServiceDate {
-		t.Errorf("R1 service_date = %q, want %q", got, wantServiceDate)
-	}
-	if got := ghostBusCol(t, r1Row, "trip_report_count"); got != "2" {
-		t.Errorf("R1 trip_report_count = %q, want 2", got)
-	}
-	gotDist, err := strconv.ParseFloat(ghostBusCol(t, r1Row, "vehicle_distance_from_stop_m"), 64)
-	if err != nil {
-		t.Fatalf("R1 vehicle_distance_from_stop_m parse: %v", err)
-	}
-	wantDist := ghostbus.HaversineMeters(47.61, -122.34, 47.668, -122.376)
-	if math.Abs(gotDist-wantDist)/wantDist > 0.2 {
-		t.Errorf("R1 vehicle_distance_from_stop_m = %v, want within 20%% of %v", gotDist, wantDist)
-	}
-
-	r2Row, ok := byPublicID["tok_bare_000000000001"]
-	if !ok {
-		t.Fatalf("R2 row missing; rows=%v", rows)
-	}
-	if got := ghostBusCol(t, r2Row, "predicted"); got != "" {
-		t.Errorf("R2 predicted = %q, want blank", got)
-	}
-	if got := ghostBusCol(t, r2Row, "snapshot_status"); got != ghostbus.SnapshotPending {
-		t.Errorf("R2 snapshot_status = %q, want %q", got, ghostbus.SnapshotPending)
-	}
-	if got := ghostBusCol(t, r2Row, "prediction_staleness_minutes"); got != "" {
-		t.Errorf("R2 prediction_staleness_minutes = %q, want blank", got)
-	}
-	if got := ghostBusCol(t, r2Row, "route_short_name"); got != "" {
-		t.Errorf("R2 route_short_name = %q, want blank (no snapshot)", got)
-	}
-	if got := ghostBusCol(t, r2Row, "trip_report_count"); got != "2" {
-		t.Errorf("R2 trip_report_count = %q, want 2", got)
-	}
-
-	r3Row, ok := byPublicID["tok_zero_000000000001"]
-	if !ok {
-		t.Fatalf("R3 row missing; rows=%v", rows)
-	}
-	if got := ghostBusCol(t, r3Row, "vehicle_distance_from_stop_m"); got != "" {
-		t.Errorf("R3 vehicle_distance_from_stop_m = %q, want blank (Null Island guard)", got)
-	}
-	if got := ghostBusCol(t, r3Row, "vehicle_last_lat"); got != "47.61" {
-		t.Errorf("R3 vehicle_last_lat = %q, want 47.61", got)
+	for id, assert := range map[string]func(*testing.T, []string){
+		"tok_full_000000000001": func(t *testing.T, row []string) { assertGhostBusFullRow(t, row, fx) },
+		"tok_bare_000000000001": assertGhostBusBareRow,
+		"tok_zero_000000000001": assertGhostBusZerolessRow,
+	} {
+		row, ok := byPublicID[id]
+		if !ok {
+			t.Fatalf("row %s missing; rows=%v", id, rows)
+		}
+		assert(t, row)
 	}
 
 	// --since between R1/R2's created_at and R3's: only R3 exported.
-	since := createdEarly.Add(time.Hour).Format(time.RFC3339)
+	since := fx.createdEarly.Add(time.Hour).Format(time.RFC3339)
 	stdoutSince, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1", "--since", since)
 	if err != nil {
 		t.Fatalf("export --since: %v", err)
@@ -365,6 +372,12 @@ func TestGhostBusExportMissingRegionFlag(t *testing.T) {
 	}
 	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--since", "2026-09-01T00:00:00Z"); err == nil || err.Error() != wantUsage {
 		t.Errorf("--since with no --region err = %v, want %q", err, wantUsage)
+	}
+	// flag.Parse stops at the first non-flag argument, so without the NArg
+	// guard a trailing positional (a typo, a misplaced flag) would be
+	// silently ignored and the export would run anyway.
+	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1", "unexpected"); err == nil || err.Error() != wantUsage {
+		t.Errorf("trailing argument err = %v, want %q", err, wantUsage)
 	}
 	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "0"); err == nil || err.Error() != wantUsage {
 		t.Errorf("--region 0 err = %v, want %q", err, wantUsage)

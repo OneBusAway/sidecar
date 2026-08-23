@@ -416,47 +416,57 @@ func pruneTripSnapshot(raw []byte, q TripDetailsQuery) (json.RawMessage, error) 
 	return json.Marshal(snap)
 }
 
+// findReference returns the entry in list whose "id" equals id, or nil.
+// An empty id never matches -- absent identifiers stay absent.
+func findReference(list []map[string]any, id string) map[string]any {
+	if id == "" {
+		return nil
+	}
+	for _, m := range list {
+		if m["id"] == id {
+			return m
+		}
+	}
+	return nil
+}
+
+// resolveRouteID prefers the report's own route identifier, falling back
+// to the trip reference's routeId (OBACloud's display_block precedence).
+func resolveRouteID(reported string, trip map[string]any) string {
+	if reported != "" || trip == nil {
+		return reported
+	}
+	v, _ := trip["routeId"].(string)
+	return v
+}
+
+// putDisplay copies src[srcKey] into display under key when it is present
+// and non-empty -- absent stays absent (OBACloud's .compact).
+func putDisplay(display, src map[string]any, key, srcKey string) {
+	if src == nil {
+		return
+	}
+	if v, ok := src[srcKey]; ok && v != nil && v != "" {
+		display[key] = v
+	}
+}
+
 // tripDisplayBlock resolves human-readable names out of the references:
 // best-effort, absent keys simply missing (OBACloud's .compact). The DB
 // stores only raw identifiers; without this the CSV could never show route
 // names, headsigns, or stop coordinates.
 func tripDisplayBlock(trips, routes, stops []map[string]any, q TripDetailsQuery) map[string]any {
-	find := func(list []map[string]any, id string) map[string]any {
-		if id == "" {
-			return nil
-		}
-		for _, m := range list {
-			if m["id"] == id {
-				return m
-			}
-		}
-		return nil
-	}
 	display := map[string]any{}
-	trip := find(trips, q.TripID)
-	routeID := q.RouteID
-	if routeID == "" && trip != nil {
-		if v, ok := trip["routeId"].(string); ok {
-			routeID = v
-		}
-	}
-	put := func(key string, src map[string]any, srcKey string) {
-		if src == nil {
-			return
-		}
-		if v, ok := src[srcKey]; ok && v != nil && v != "" {
-			display[key] = v
-		}
-	}
-	put("headsign", trip, "tripHeadsign")
-	route := find(routes, routeID)
-	put("route_short_name", route, "shortName")
-	put("route_long_name", route, "longName")
-	put("route_type", route, "type")
-	stop := find(stops, q.StopID)
-	put("stop_name", stop, "name")
-	put("stop_lat", stop, "lat")
-	put("stop_lon", stop, "lon")
+	trip := findReference(trips, q.TripID)
+	putDisplay(display, trip, "headsign", "tripHeadsign")
+	route := findReference(routes, resolveRouteID(q.RouteID, trip))
+	putDisplay(display, route, "route_short_name", "shortName")
+	putDisplay(display, route, "route_long_name", "longName")
+	putDisplay(display, route, "route_type", "type")
+	stop := findReference(stops, q.StopID)
+	putDisplay(display, stop, "stop_name", "name")
+	putDisplay(display, stop, "stop_lat", "lat")
+	putDisplay(display, stop, "stop_lon", "lon")
 	return display
 }
 

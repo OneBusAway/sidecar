@@ -34,9 +34,11 @@ var ghostBusHeader = []string{
 // ghostBusCmd dispatches the ghostbus subcommands (export only, this
 // slice). The CSV is the agency-facing read surface -- there is
 // deliberately no rider-facing read API (spec §8).
+const ghostBusExportUsage = "usage: ghostbus export --region N [--since RFC3339]"
+
 func ghostBusCmd(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
 	if len(args) == 0 || args[0] != "export" {
-		return errors.New("usage: ghostbus export --region N [--since RFC3339]")
+		return errors.New(ghostBusExportUsage)
 	}
 	fs := flag.NewFlagSet("ghostbus export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -45,8 +47,14 @@ func ghostBusCmd(ctx context.Context, stdout io.Writer, store *sqlite.Store, arg
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+	// flag.Parse stops at the first non-flag argument, so trailing
+	// positionals would otherwise be silently ignored -- and a typo like a
+	// misspelled flag would export anyway.
+	if fs.NArg() != 0 {
+		return errors.New(ghostBusExportUsage)
+	}
 	if *regionID == 0 {
-		return errors.New("usage: ghostbus export --region N [--since RFC3339]")
+		return errors.New(ghostBusExportUsage)
 	}
 	region, err := store.Regions().Get(ctx, *regionID)
 	if err != nil {
