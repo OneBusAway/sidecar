@@ -79,6 +79,33 @@ func TestParseAnswersCap(t *testing.T) {
 	}
 }
 
+func TestParseAnswersFieldCaps(t *testing.T) {
+	t.Parallel()
+	build := func(field string, n int) string {
+		return fmt.Sprintf(`[{"question_id":1,%q:%q}]`, field, strings.Repeat("x", n))
+	}
+	tests := []struct {
+		name  string
+		field string
+		max   int
+	}{
+		{"answer", "answer", surveys.MaxAnswerBytes},
+		{"question_label", "question_label", surveys.MaxQuestionLabelBytes},
+		{"question_type", "question_type", surveys.MaxQuestionTypeBytes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := surveys.ParseAnswers(build(tt.field, tt.max)); err != nil {
+				t.Fatalf("%s exactly at cap (%d bytes): err = %v, want nil", tt.field, tt.max, err)
+			}
+			if _, err := surveys.ParseAnswers(build(tt.field, tt.max+1)); !errors.Is(err, surveys.ErrAnswerTooLong) {
+				t.Fatalf("%s cap+1 (%d bytes): err = %v, want ErrAnswerTooLong", tt.field, tt.max+1, err)
+			}
+		})
+	}
+}
+
 func TestMergeAnswers(t *testing.T) {
 	t.Parallel()
 	stored := []surveys.Answer{{QuestionID: 1, Answer: "a"}, {QuestionID: 2, Answer: "b"}, {QuestionID: 3, Answer: "c"}}

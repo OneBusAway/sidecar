@@ -12,6 +12,19 @@ import (
 // unauthenticated caller could grow one row without limit (design spec §2.6).
 const MaxAnswers = 500
 
+// MaxAnswerBytes, MaxQuestionLabelBytes, and MaxQuestionTypeBytes cap the
+// three string fields of one answer element, checked in bytes after
+// stringish coercion (design spec §2.5). Combined with MaxAnswers this
+// bounds a stored response row to a few MB, which matters because every
+// amend rewrites the whole row inside one immediate transaction that holds
+// the process-wide write lock (design spec §2.6): an unbounded row would
+// serialize every other survey write behind copying it.
+const (
+	MaxAnswerBytes        = 4096
+	MaxQuestionLabelBytes = 1024
+	MaxQuestionTypeBytes  = 64
+)
+
 // ParseAnswers decodes the responses parameter: a string holding a JSON
 // array of objects (spec §7.2). Structure is strict -- anything that is not
 // an array of objects each carrying an integral question_id is
@@ -19,7 +32,9 @@ const MaxAnswers = 500
 // attribute coercion: answer, question_type and question_label become
 // strings (numbers and booleans stringified, null/absent -> ""), extra keys
 // are dropped, and a repeated question_id keeps its first position with its
-// last value so the caller always sees one answer per question.
+// last value so the caller always sees one answer per question. Each of the
+// three string fields is capped (MaxAnswerBytes, MaxQuestionLabelBytes,
+// MaxQuestionTypeBytes); exceeding any one is ErrAnswerTooLong.
 func ParseAnswers(raw string) ([]Answer, error) {
 	var elems []json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &elems); err != nil || elems == nil {
@@ -41,6 +56,9 @@ func ParseAnswers(raw string) ([]Answer, error) {
 			QuestionType:  stringish(fields["question_type"]),
 			QuestionLabel: stringish(fields["question_label"]),
 			Answer:        stringish(fields["answer"]),
+		}
+		if len(a.Answer) > MaxAnswerBytes || len(a.QuestionLabel) > MaxQuestionLabelBytes || len(a.QuestionType) > MaxQuestionTypeBytes {
+			return nil, ErrAnswerTooLong
 		}
 		if i, seen := index[id]; seen {
 			out[i] = a

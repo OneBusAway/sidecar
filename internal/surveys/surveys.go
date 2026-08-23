@@ -31,6 +31,9 @@ var (
 	ErrMalformedAnswers = errors.New("responses must be a JSON-encoded array of answer objects")
 	// ErrTooManyAnswers is the MaxAnswers cap (design spec §2.5, §2.6).
 	ErrTooManyAnswers = errors.New("responses has too many answers")
+	// ErrAnswerTooLong is the per-field byte cap on one answer element
+	// (design spec §2.5, §2.6).
+	ErrAnswerTooLong = errors.New("responses contains an answer that is too long")
 )
 
 // Study is a questionnaire collection authored by an agency for a region.

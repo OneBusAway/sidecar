@@ -17,6 +17,10 @@ import (
 // spec §2.9). The apps send one create and at most one amend per survey.
 const surveyWritesPerMinute = 60
 
+// maxIdentifierLen caps user_identifier and stop_identifier (surveys design
+// spec §2.5, §2.7), matching the push registration description cap.
+const maxIdentifierLen = 255
+
 type surveysHandler struct{ deps Deps }
 
 // writeErrors writes the spec §2.5 {"errors": [...]} shape the survey
@@ -180,10 +184,16 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	var msgs []string
 	userID, _ := p.str("user_identifier")
-	if userID == "" {
+	switch {
+	case userID == "":
 		msgs = append(msgs, "User identifier can't be blank")
+	case len(userID) > maxIdentifierLen:
+		msgs = append(msgs, fmt.Sprintf("User identifier is too long (maximum is %d characters)", maxIdentifierLen))
 	}
 	stopID, _ := p.str("stop_identifier")
+	if len(stopID) > maxIdentifierLen {
+		msgs = append(msgs, fmt.Sprintf("Stop identifier is too long (maximum is %d characters)", maxIdentifierLen))
+	}
 	lat, latPresent, latValid := coordinate(p, "stop_latitude", 90)
 	lon, lonPresent, lonValid := coordinate(p, "stop_longitude", 180)
 	// Android sends 0.0/0.0 with no identifier on every submission; only an

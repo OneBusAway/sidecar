@@ -167,6 +167,15 @@ Lenient rules, matching the reference's type coercion: `answer`, `question_type`
 `question_label` are strings when present; a JSON number or boolean is stringified; a
 missing or `null` one is stored as `""`. Extra keys on an element are dropped.
 
+Each of those three fields is also capped in bytes, after coercion: `answer` at
+`MaxAnswerBytes` (4096), `question_label` at `MaxQuestionLabelBytes` (1024), and
+`question_type` at `MaxQuestionTypeBytes` (64). Exceeding any one is `ErrAnswerTooLong`,
+a 422 `{"errors": ["responses contains an answer that is too long"]}`. Combined with
+`MaxAnswers` this bounds a stored response row to a few MB, which matters because every
+amend rewrites the whole row inside one immediate transaction that holds the
+process-wide write lock (`BEGIN IMMEDIATE`, §2.6): an unbounded row would serialize
+every other survey write behind copying it.
+
 Duplicate `question_id`s within one request: the last one wins, so the merge below has
 a single answer per question to work with.
 
@@ -221,12 +230,18 @@ in this order, and fails with 422 `{"errors": [...]}` if any apply:
 | Condition | Message |
 |---|---|
 | `user_identifier` blank | `User identifier can't be blank` |
-| `stop_identifier` present and `stop_latitude` absent/unparseable | `Stop latitude can't be blank` |
-| `stop_identifier` present and `stop_longitude` absent/unparseable | `Stop longitude can't be blank` |
-| `stop_latitude` outside ±90 | `Stop latitude is invalid` |
-| `stop_longitude` outside ±180 | `Stop longitude is invalid` |
+| `user_identifier` over 255 characters | `User identifier is too long (maximum is 255 characters)` |
+| `stop_identifier` over 255 characters | `Stop identifier is too long (maximum is 255 characters)` |
+| `stop_identifier` present and `stop_latitude` absent | `Stop latitude can't be blank` |
+| `stop_identifier` present and `stop_longitude` absent | `Stop longitude can't be blank` |
+| `stop_latitude` present but unparseable, or outside ±90 | `Stop latitude is invalid` |
+| `stop_longitude` present but unparseable, or outside ±180 | `Stop longitude is invalid` |
 | `responses` malformed (§2.5) | `responses must be a JSON-encoded array of answer objects` |
 | `responses` over the cap (§2.5) | `responses has too many answers` |
+| `responses` contains an over-long field (§2.5) | `responses contains an answer that is too long` |
+
+A present-but-unparseable coordinate is always "invalid", regardless of whether
+`stop_identifier` is present -- "blank" is reserved for an absent coordinate.
 
 `ParseAnswers` runs as part of this collection, not after it, so a request with a
 blank identifier *and* malformed answers reports both.
