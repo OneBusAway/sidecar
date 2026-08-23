@@ -323,3 +323,68 @@ func TestSurveyResponsesCSV(t *testing.T) {
 		t.Error("unknown survey accepted")
 	}
 }
+
+// TestSurveyResponsesCSV_NeutralizesFormulas pins finding 3: a rider-sourced
+// cell that opens with a formula-trigger character (=, +, -, @, tab, CR)
+// must not be handed to a spreadsheet as a live formula on open. A plain
+// cell must pass through unchanged.
+func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	st := createStudy(t, dbPath)
+	id := createSurvey(t, dbPath, st, surveyDoc)
+	s, _ := store.Surveys().GetSurvey(context.Background(), id)
+	ctx := context.Background()
+	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{
+		SurveyID: id, PublicID: "formula-row", UserIdentifier: "@evil",
+		Answers: []surveys.Answer{
+			{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "How was your trip?", Answer: "=1+1"},
+		},
+	}, s.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := cli(t, dbPath, "survey", "responses", itoa(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("not CSV: %v\n%s", err, stdout)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d (%v), want header + 1 answer", len(rows), rows)
+	}
+	if got := rows[1][1]; got != "'@evil" {
+		t.Errorf("user_identifier cell = %q, want the apostrophe-guarded value", got)
+	}
+	if got := rows[1][10]; got != "'=1+1" {
+		t.Errorf("answer cell = %q, want the apostrophe-guarded value", got)
+	}
+	// A plain answer (no formula-trigger prefix) must survive untouched.
+	if _, err := store.Surveys().AmendResponse(ctx, "formula-row", []surveys.Answer{
+		{QuestionID: 999, QuestionType: "text", QuestionLabel: "Plain", Answer: "just text"},
+	}, s.CreatedAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err = cli(t, dbPath, "survey", "responses", itoa(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = csv.NewReader(strings.NewReader(stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("not CSV: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, row := range rows[1:] {
+		if row[7] == "999" {
+			found = true
+			if row[10] != "just text" {
+				t.Errorf("plain answer cell = %q, want unchanged", row[10])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("amended answer row not found")
+	}
+}

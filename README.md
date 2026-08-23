@@ -179,6 +179,11 @@ sidecar-admin survey  create    --study N --file <path|->
                       responses <id>        # long-format CSV, one row per answer
 ```
 
+`survey responses` writes rider-sourced cells (identifiers, question type/label,
+answer) with a leading apostrophe when the cell would otherwise open with a
+spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return), so
+opening the export can't execute a formula a rider embedded in their answer.
+
 ## Weather and vehicle search
 
 The sidecar also serves two rider-facing lookups that proxy and cache an upstream

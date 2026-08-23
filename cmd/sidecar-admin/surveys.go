@@ -408,6 +408,26 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 	return nil
 }
 
+// csvCell guards a rider-sourced cell against spreadsheet formula injection:
+// Excel, Numbers, and Sheets all evaluate a cell that opens with =, +, -, @,
+// a tab, or a carriage return as a formula on open, which turns an agency's
+// export of untrusted rider text into arbitrary-formula execution in their
+// spreadsheet tool. Prefixing a single apostrophe forces the cell to be
+// read as literal text in every one of those tools while leaving the
+// visible value (and a re-import through this same reader) unchanged for
+// every other cell.
+func csvCell(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	default:
+		return s
+	}
+}
+
 // surveyResponses writes long-format CSV: one row per answer, so no answer
 // to a since-deleted question is lost and the sheet pivots cleanly; a
 // response with no answers still gets a row so abandoned submissions are
@@ -436,7 +456,7 @@ func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store,
 		return strconv.FormatFloat(*v, 'f', -1, 64)
 	}
 	for _, r := range list {
-		prefix := []string{r.PublicID, r.UserIdentifier, r.StopIdentifier, floatCell(r.StopLatitude), floatCell(r.StopLongitude),
+		prefix := []string{r.PublicID, csvCell(r.UserIdentifier), csvCell(r.StopIdentifier), floatCell(r.StopLatitude), floatCell(r.StopLongitude),
 			surveys.FormatTime(r.CreatedAt), surveys.FormatTime(r.UpdatedAt)}
 		if len(r.Answers) == 0 {
 			if err := w.Write(append(prefix, "", "", "", "")); err != nil {
@@ -445,7 +465,7 @@ func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store,
 			continue
 		}
 		for _, a := range r.Answers {
-			row := append(append([]string{}, prefix...), strconv.FormatInt(a.QuestionID, 10), a.QuestionType, a.QuestionLabel, a.Answer)
+			row := append(append([]string{}, prefix...), strconv.FormatInt(a.QuestionID, 10), csvCell(a.QuestionType), csvCell(a.QuestionLabel), csvCell(a.Answer))
 			if err := w.Write(row); err != nil {
 				return err
 			}
