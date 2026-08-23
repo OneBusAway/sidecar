@@ -15,6 +15,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 
 	_ "modernc.org/sqlite"
 )
@@ -110,6 +111,10 @@ func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
 		"sessions":           {"created_at", "expires_at"},
 		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
 		"alarms":             {"service_date", "created_at", "updated_at"},
+		"studies":            {"created_at", "updated_at"},
+		"surveys":            {"start_time", "end_time", "created_at", "updated_at"},
+		"survey_questions":   {"created_at", "updated_at"},
+		"survey_responses":   {"created_at", "updated_at"},
 	}
 	for table, columns := range wantIntegerColumns {
 		types, err := columnTypes(ctx, db, table)
@@ -377,5 +382,17 @@ func TestAlarmConformance(t *testing.T) {
 	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.Alarms(), s.Regions()
+	})
+}
+
+// TestSurveyConformance runs the shared survey conformance suite against
+// the SQLite adapter through the production Open, so the _txlock=immediate
+// DSN the concurrency subtest depends on is the one production uses.
+func TestSurveyConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunSurveyRepository(t, func(t *testing.T) (surveys.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.Surveys(), s.Regions()
 	})
 }

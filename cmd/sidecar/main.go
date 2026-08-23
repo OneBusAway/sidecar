@@ -265,6 +265,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, w
 		Alarms:           store.Alarms(),
 		OBA:              obaClient,
 		FeedbackSecret:   webhookSecret,
+		Surveys:          store.Surveys(),
 	}
 }
 

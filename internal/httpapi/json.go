@@ -64,7 +64,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 		// instead.
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return errors.New("request body too large")
+			return errBodyTooLarge
 		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}

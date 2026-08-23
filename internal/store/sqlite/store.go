@@ -25,6 +25,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // gooseConfigureOnce guards goose.SetBaseFS/goose.SetDialect, which mutate
@@ -63,8 +64,14 @@ type Store struct {
 //	_pragma=foreign_keys(ON)    SQLite disables FK enforcement by default,
 //	                            without which ON DELETE CASCADE silently
 //	                            does nothing
+//	_txlock=immediate           every write transaction takes the lock at
+//	                            BEGIN, so two read-modify-writes wait on
+//	                            busy_timeout instead of the second failing
+//	                            with SQLITE_BUSY_SNAPSHOT on its first write
+//	                            (design spec surveys 2.6); ReadOnly
+//	                            transactions are unaffected (modernc tx.go)
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
@@ -146,6 +153,11 @@ func (s *Store) PushRegs() pushreg.Repository {
 // Alarms returns the alarms.Repository backed by this store.
 func (s *Store) Alarms() alarms.Repository {
 	return &alarmRepo{q: s.q}
+}
+
+// Surveys returns the surveys.Repository backed by this store.
+func (s *Store) Surveys() surveys.Repository {
+	return &surveyRepo{db: s.db, q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
