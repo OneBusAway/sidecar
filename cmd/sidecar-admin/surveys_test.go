@@ -365,7 +365,7 @@ func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
 		t.Errorf("answer cell = %q, want the apostrophe-guarded value", got)
 	}
 	// A plain answer (no formula-trigger prefix) must survive untouched.
-	if _, err := store.Surveys().AmendResponse(ctx, "formula-row", []surveys.Answer{
+	if _, err = store.Surveys().AmendResponse(ctx, "formula-row", []surveys.Answer{
 		{QuestionID: 999, QuestionType: "text", QuestionLabel: "Plain", Answer: "just text"},
 	}, s.CreatedAt.Add(time.Minute)); err != nil {
 		t.Fatal(err)
