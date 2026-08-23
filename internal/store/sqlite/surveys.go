@@ -442,15 +442,26 @@ func responseFromRow(r gen.SurveyResponse) (surveys.Response, error) {
 	}, nil
 }
 
+// CreateResponse checks survey existence and inserts the response in one
+// transaction: without it, the insert's foreign key would be the only
+// thing stopping a response from attaching to a survey deleted between the
+// check and the insert, and that failure is a raw driver error, not
+// surveys.ErrNotFound -- sharing a transaction keeps the interface's
+// ErrNotFound contract true without string-matching an FK violation.
 func (r *surveyRepo) CreateResponse(ctx context.Context, in surveys.NewResponse, now time.Time) (surveys.Response, error) {
 	answers, err := encodeAnswers(in.Answers)
 	if err != nil {
 		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, err)
 	}
-	// The survey existence check and the insert do not need a transaction:
-	// a survey deleted in between fails the insert's foreign key, which is
-	// the same ErrNotFound answer.
-	if _, err = r.q.GetSurvey(ctx, in.SurveyID); err != nil {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: begin tx: %w", in.SurveyID, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	if _, err = q.GetSurvey(ctx, in.SurveyID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: %w", in.SurveyID, surveys.ErrNotFound)
 		}
@@ -460,7 +471,7 @@ func (r *surveyRepo) CreateResponse(ctx context.Context, in surveys.NewResponse,
 	if in.StopIdentifier != "" {
 		stop = sql.NullString{String: in.StopIdentifier, Valid: true}
 	}
-	row, err := r.q.CreateResponse(ctx, gen.CreateResponseParams{
+	row, err := q.CreateResponse(ctx, gen.CreateResponseParams{
 		SurveyID: in.SurveyID, PublicID: in.PublicID, UserIdentifier: in.UserIdentifier,
 		StopIdentifier: stop, StopLatitude: floatToNull(in.StopLatitude), StopLongitude: floatToNull(in.StopLongitude),
 		Answers: answers, Now: now.Unix(),
@@ -471,6 +482,9 @@ func (r *surveyRepo) CreateResponse(ctx context.Context, in surveys.NewResponse,
 	out, err := responseFromRow(row)
 	if err != nil {
 		return surveys.Response{}, fmt.Errorf("sqlite: create response: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: create response for survey %d: commit: %w", in.SurveyID, err)
 	}
 	return out, nil
 }
