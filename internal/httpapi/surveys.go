@@ -135,13 +135,20 @@ func (h *surveysHandler) parseSurveyParams(w http.ResponseWriter, r *http.Reques
 }
 
 // coordinate parses an optional stop coordinate: (value, present, valid).
+// Present means the key arrived with a non-blank value of any JSON type; a
+// value str cannot coerce (an array or object) is present and invalid, not
+// absent, so "blank" stays reserved for a missing coordinate (surveys
+// design spec §2.7).
 func coordinate(p params, key string, limit float64) (v *float64, present, valid bool) {
+	if _, exists := p.m[key]; !exists {
+		return nil, false, true
+	}
 	s, ok := p.str(key)
-	if !ok || s == "" {
+	if ok && s == "" {
 		return nil, false, true
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	if !ok || err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 		return nil, true, false
 	}
 	if math.Abs(f) > limit {
@@ -275,7 +282,7 @@ func (h *surveysHandler) amend(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, surveys.ErrNotFound):
 			writeJSONError(w, h.deps.Logger, http.StatusNotFound, responseNotFoundBody)
 		case errors.Is(err, surveys.ErrTooManyAnswers):
-			h.deps.Logger.Info("httpapi: rejected survey response amend", "reason", "answer cap")
+			h.deps.Logger.Info("httpapi: rejected survey response amend", "reason", "answer cap", "err", err)
 			writeErrors(w, h.deps.Logger, []string{surveys.ErrTooManyAnswers.Error()})
 		default:
 			// Same rationale as create: the adapter's error text is safe

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -322,6 +323,9 @@ func TestSurveyResponsesCSV(t *testing.T) {
 	if !strings.HasSuffix(rows[1][5], "Z") || len(rows[1][5]) != len("2026-01-01T00:00:00.000Z") {
 		t.Errorf("created_at = %q, want wire format", rows[1][5])
 	}
+	if _, _, err := cli(t, dbPath, "survey", "show", "999"); err == nil || err.Error() != "survey show 999: survey not found" || !errors.Is(err, surveys.ErrNotFound) {
+		t.Fatalf("survey show 999: err = %v; want the framed not-found message wrapping surveys.ErrNotFound", err)
+	}
 	if _, _, err := cli(t, dbPath, "survey", "responses", "999"); err == nil {
 		t.Error("unknown survey accepted")
 	}
@@ -340,7 +344,7 @@ func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
 	s, _ := store.Surveys().GetSurvey(context.Background(), id)
 	ctx := context.Background()
 	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{
-		SurveyID: id, PublicID: "formula-row", UserIdentifier: "@evil",
+		SurveyID: id, PublicID: "-formula-row", UserIdentifier: "@evil",
 		Answers: []surveys.Answer{
 			{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "How was your trip?", Answer: "=1+1"},
 		},
@@ -358,6 +362,10 @@ func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d (%v), want header + 1 answer", len(rows), rows)
 	}
+	// securetoken's URL-safe alphabet includes '-', so ids need the guard too.
+	if got := rows[1][0]; got != "'-formula-row" {
+		t.Errorf("response_id cell = %q, want the apostrophe-guarded value", got)
+	}
 	if got := rows[1][1]; got != "'@evil" {
 		t.Errorf("user_identifier cell = %q, want the apostrophe-guarded value", got)
 	}
@@ -365,7 +373,7 @@ func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
 		t.Errorf("answer cell = %q, want the apostrophe-guarded value", got)
 	}
 	// A plain answer (no formula-trigger prefix) must survive untouched.
-	if _, err = store.Surveys().AmendResponse(ctx, "formula-row", []surveys.Answer{
+	if _, err = store.Surveys().AmendResponse(ctx, "-formula-row", []surveys.Answer{
 		{QuestionID: 999, QuestionType: "text", QuestionLabel: "Plain", Answer: "just text"},
 	}, s.CreatedAt.Add(time.Minute)); err != nil {
 		t.Fatal(err)

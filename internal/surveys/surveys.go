@@ -158,16 +158,21 @@ type Repository interface {
 	ListResponses(ctx context.Context, surveyID int64) ([]Response, error)
 }
 
-// compactJSON is the one place json.RawMessage values are normalized, so
+// canonicalJSON is the one place json.RawMessage values are normalized, so
 // equality comparisons (QuestionsEqual) and stored bytes never depend on
-// the author's whitespace. Empty in, nil out.
-func compactJSON(raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 {
+// the author's whitespace or escaping. It produces exactly the bytes
+// encoding/json will emit for the value when the row is stored (compact,
+// with <, >, & HTML-escaped), which is what a later read hands back to
+// ContentEqual. Empty or a JSON null in, nil out: "sdk_configuration_values":
+// null is how a document spells "unset", the same as the targeting lists.
+func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return nil, nil
 	}
-	var b bytes.Buffer
-	if err := json.Compact(&b, raw); err != nil {
+	b, err := json.Marshal(raw)
+	if err != nil {
 		return nil, err
 	}
-	return json.RawMessage(b.Bytes()), nil
+	return b, nil
 }

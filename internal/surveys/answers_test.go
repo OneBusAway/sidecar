@@ -31,6 +31,10 @@ func TestParseAnswers(t *testing.T) {
 		{"bool answer stringified", `[{"question_id":1,"answer":true}]`, []surveys.Answer{{QuestionID: 1, Answer: "true"}}, nil},
 		{"missing answer is empty", `[{"question_id":1}]`, []surveys.Answer{{QuestionID: 1}}, nil},
 		{"null answer is empty", `[{"question_id":1,"answer":null}]`, []surveys.Answer{{QuestionID: 1}}, nil},
+		// A native array or object answer is kept as its JSON text, never
+		// silently dropped to "".
+		{"array answer kept as json", `[{"question_id":3,"answer":[ "Bus", "Train" ]}]`, []surveys.Answer{{QuestionID: 3, Answer: `["Bus","Train"]`}}, nil},
+		{"object answer kept as json", `[{"question_id":3,"answer":{"k": 1}}]`, []surveys.Answer{{QuestionID: 3, Answer: `{"k":1}`}}, nil},
 		{"integral float id", `[{"question_id":21.0,"answer":"x"}]`, []surveys.Answer{{QuestionID: 21, Answer: "x"}}, nil},
 		{"numeric string id", `[{"question_id":"21","answer":"x"}]`, []surveys.Answer{{QuestionID: 21, Answer: "x"}}, nil},
 		{"extra keys dropped", `[{"question_id":1,"answer":"x","extra":"y"}]`, []surveys.Answer{{QuestionID: 1, Answer: "x"}}, nil},

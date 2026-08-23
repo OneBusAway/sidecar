@@ -131,34 +131,46 @@ func parseInstant(s string, region regions.Region) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// parseAlertIDArg extracts and parses the alert id positional argument
-// shared by every `alert` subcommand that operates on a single existing
-// alert (show, edit, publish/unpublish, delete, translate). op names the
-// subcommand for the error message, e.g. "alert show".
-func parseAlertIDArg(op string, args []string) (int64, error) {
+// parseIDArg extracts and parses the positional id argument shared by every
+// subcommand that operates on a single existing record (alert show, survey
+// edit, ...). op names the subcommand for the error message, e.g. "alert
+// show"; noun is what the id identifies, e.g. "alert".
+func parseIDArg(op, noun string, args []string) (int64, error) {
 	if len(args) == 0 {
-		return 0, fmt.Errorf("%s requires an alert id", op)
+		article := "a"
+		if strings.ContainsRune("aeiou", rune(noun[0])) {
+			article = "an"
+		}
+		return 0, fmt.Errorf("%s requires %s %s id", op, article, noun)
 	}
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid alert id %q: %w", op, args[0], err)
+		return 0, fmt.Errorf("%s: invalid %s id %q: %w", op, noun, args[0], err)
 	}
 	return id, nil
 }
 
-// wrapAlertErr frames a store-layer error about an existing alert in terms of
-// the subcommand and id the user supplied (e.g. "alert publish 1: alert not
-// found"), rather than a second copy of the store's own operation name or the
-// storage layer's internal wrapping (e.g. "sqlite: set published for alert
-// 1"). errors.Is(result, alerts.ErrNotFound) still succeeds, since the
-// sentinel is re-wrapped unchanged; any other error keeps the store's full
-// detail, since that detail -- not a restatement of "op id" -- is what's
-// needed to diagnose something unexpected.
-func wrapAlertErr(op string, id int64, err error) error {
-	if errors.Is(err, alerts.ErrNotFound) {
-		return fmt.Errorf("%s %d: %w", op, id, alerts.ErrNotFound)
+func parseAlertIDArg(op string, args []string) (int64, error) { return parseIDArg(op, "alert", args) }
+
+// wrapNotFound frames a store-layer error about an existing record in terms
+// of the subcommand and id the user supplied (e.g. "alert publish 1: alert
+// not found"), rather than a second copy of the store's own operation name
+// or the storage layer's internal wrapping (e.g. "sqlite: set published for
+// alert 1"). errors.Is(result, notFound) still succeeds, since the sentinel
+// is re-wrapped unchanged; any other error keeps the store's full detail,
+// since that detail -- not a restatement of "op id" -- is what's needed to
+// diagnose something unexpected. noun prefixes a sentinel whose own text
+// lacks one (surveys.ErrNotFound reads just "not found"); "" for one that
+// already names it (alerts.ErrNotFound reads "alert not found").
+func wrapNotFound(op string, id int64, err, notFound error, noun string) error {
+	if errors.Is(err, notFound) {
+		return fmt.Errorf("%s %d: %s%w", op, id, noun, notFound)
 	}
 	return fmt.Errorf("%s %d: %w", op, id, err)
+}
+
+func wrapAlertErr(op string, id int64, err error) error {
+	return wrapNotFound(op, id, err, alerts.ErrNotFound, "")
 }
 
 // formatInZone renders t in tz alongside UTC, so `alert list`/`alert show`

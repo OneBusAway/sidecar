@@ -476,11 +476,11 @@ func encodeAnswers(in []surveys.Answer) (string, error) {
 }
 
 func responseFromRow(r gen.SurveyResponse) (surveys.Response, error) {
-	answers := []surveys.Answer{}
+	var answers []surveys.Answer
 	if err := json.Unmarshal([]byte(r.Answers), &answers); err != nil {
 		return surveys.Response{}, fmt.Errorf("response %d: answers: %w", r.ID, err)
 	}
-	if answers == nil {
+	if answers == nil { // the column is never NULL, but "null" or "[]" both mean none
 		answers = []surveys.Answer{}
 	}
 	return surveys.Response{
@@ -580,7 +580,10 @@ func (r *surveyRepo) AmendResponse(ctx context.Context, publicID string, incomin
 	}
 	merged := surveys.MergeAnswers(stored.Answers, incoming)
 	if len(merged) > surveys.MaxAnswers {
-		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: %w", stored.ID, surveys.ErrTooManyAnswers)
+		// The survey id rides in the error text so the handler's log line
+		// can name which survey is being pushed past the cap (design spec
+		// 4.5) without a second read.
+		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d for survey %d: %w", stored.ID, stored.SurveyID, surveys.ErrTooManyAnswers)
 	}
 	encoded, err := encodeAnswers(merged)
 	if err != nil {

@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // TestOpenUsesImmediateWriteTransactions pins the DSN's _txlock=immediate
@@ -121,5 +125,51 @@ func TestListToNull(t *testing.T) {
 	}
 	if out, err := nullToList(sql.NullString{String: `["a"]`, Valid: true}); err != nil || !reflect.DeepEqual(out, []string{"a"}) {
 		t.Errorf(`nullToList(["a"]) = %#v, %v, want []string{"a"}, nil`, out, err)
+	}
+}
+
+// TestGetSurveyCorruptContentFails pins the read-side guard in
+// questionFromRow (design spec surveys 2.12, 10): a question row whose
+// content column does not parse must fail the read outright rather than
+// emit a half-decoded question that would make iOS drop the whole region's
+// survey list. The conformance suite cannot write a corrupt row through
+// the Repository, so this test reaches into the database directly.
+func TestGetSurveyCorruptContentFails(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err = store.Migrate(); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err = store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 1, Name: "Region", OBABaseURL: "https://example.org/", Active: true,
+	}}, now); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+	repo := store.Surveys()
+	st, err := repo.CreateStudy(ctx, 1, "Study", "", now)
+	if err != nil {
+		t.Fatalf("CreateStudy: %v", err)
+	}
+	def := surveys.Definition{Name: "S", Available: true, Questions: []surveys.QuestionDefinition{
+		{Content: surveys.Content{Type: surveys.TypeText, LabelText: "Why?"}},
+	}}
+	s, err := repo.CreateSurvey(ctx, st.ID, def, now)
+	if err != nil {
+		t.Fatalf("CreateSurvey: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE survey_questions SET content = 'not json' WHERE survey_id = ?`, s.ID); err != nil {
+		t.Fatalf("corrupt content: %v", err)
+	}
+
+	if _, err := repo.GetSurvey(ctx, s.ID); err == nil || !strings.Contains(err.Error(), "content") {
+		t.Fatalf("GetSurvey with corrupt content: err = %v, want a content parse error", err)
+	}
+	if _, err := repo.ListActiveSurveys(ctx, 1, now); err == nil {
+		t.Fatal("ListActiveSurveys with corrupt content: err = nil, want a content parse error")
 	}
 }

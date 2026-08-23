@@ -169,15 +169,12 @@ func definitionFromDocument(doc surveys.Document, region regions.Region) (survey
 	return def, nil
 }
 
-func parseSurveyIDArg(op string, args []string) (int64, error) {
-	if len(args) == 0 {
-		return 0, fmt.Errorf("%s requires a survey id", op)
-	}
-	id, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s: invalid survey id %q: %w", op, args[0], err)
-	}
-	return id, nil
+func parseSurveyIDArg(op string, args []string) (int64, error) { return parseIDArg(op, "survey", args) }
+
+// wrapSurveyErr is wrapAlertErr for surveys: "survey show 7: survey not
+// found" rather than "survey show 7: sqlite: get survey 7: not found".
+func wrapSurveyErr(op string, id int64, err error) error {
+	return wrapNotFound(op, id, err, surveys.ErrNotFound, "survey ")
 }
 
 // regionForStudy resolves the region a study belongs to, for parseInstant's
@@ -267,7 +264,7 @@ func surveyShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 	}
 	s, err := store.Surveys().GetSurvey(ctx, id)
 	if err != nil {
-		return fmt.Errorf("survey show %d: %w", id, err)
+		return wrapSurveyErr("survey show", id, err)
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -295,7 +292,7 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 	}
 	current, err := store.Surveys().GetSurvey(ctx, id)
 	if err != nil {
-		return fmt.Errorf("survey edit %d: %w", id, err)
+		return wrapSurveyErr("survey edit", id, err)
 	}
 	reg, err := regionForStudy(ctx, store, current.StudyID)
 	if err != nil {
@@ -314,7 +311,7 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 			return fmt.Errorf("survey edit %d: survey has %s; its questions are frozen (edit only name, dates, flags, and targeting)",
 				id, responseCountPhrase(ctx, store, id))
 		}
-		return fmt.Errorf("survey edit %d: %w", id, err)
+		return wrapSurveyErr("survey edit", id, err)
 	}
 	return nil
 }
@@ -341,7 +338,7 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 			return fmt.Errorf("survey delete %d: survey has %s; responses are retained indefinitely, so the survey cannot be deleted",
 				id, responseCountPhrase(ctx, store, id))
 		}
-		return fmt.Errorf("survey delete %d: %w", id, err)
+		return wrapSurveyErr("survey delete", id, err)
 	}
 	return nil
 }
@@ -376,7 +373,7 @@ func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store,
 		return err
 	}
 	if _, err = store.Surveys().GetSurvey(ctx, id); err != nil {
-		return fmt.Errorf("survey responses %d: %w", id, err)
+		return wrapSurveyErr("survey responses", id, err)
 	}
 	list, err := store.Surveys().ListResponses(ctx, id)
 	if err != nil {
@@ -394,7 +391,9 @@ func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store,
 		return strconv.FormatFloat(*v, 'f', -1, 64)
 	}
 	for _, r := range list {
-		prefix := []string{r.PublicID, csvCell(r.UserIdentifier), csvCell(r.StopIdentifier), floatCell(r.StopLatitude), floatCell(r.StopLongitude),
+		// The public id is server-minted, but its URL-safe base64 alphabet
+		// includes '-', so about one id in 64 opens with a formula trigger.
+		prefix := []string{csvCell(r.PublicID), csvCell(r.UserIdentifier), csvCell(r.StopIdentifier), floatCell(r.StopLatitude), floatCell(r.StopLongitude),
 			surveys.FormatTime(r.CreatedAt), surveys.FormatTime(r.UpdatedAt)}
 		if len(r.Answers) == 0 {
 			if err := w.Write(append(prefix, "", "", "", "")); err != nil {

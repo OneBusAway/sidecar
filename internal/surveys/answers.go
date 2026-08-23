@@ -1,6 +1,7 @@
 package surveys
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"strconv"
@@ -30,8 +31,8 @@ const (
 // an array of objects each carrying an integral question_id is
 // ErrMalformedAnswers. Values are lenient, matching the reference's
 // attribute coercion: answer, question_type and question_label become
-// strings (numbers and booleans stringified, null/absent -> ""), extra keys
-// are dropped, and a repeated question_id keeps its first position with its
+// strings (numbers and booleans stringified, null/absent -> "", arrays and
+// objects kept as compact JSON text), extra keys are dropped, and a repeated question_id keeps its first position with its
 // last value so the caller always sees one answer per question. Each of the
 // three string fields is capped (MaxAnswerBytes, MaxQuestionLabelBytes,
 // MaxQuestionTypeBytes); exceeding any one is ErrAnswerTooLong.
@@ -100,8 +101,12 @@ func questionID(raw json.RawMessage) (int64, bool) {
 	return n, true
 }
 
-// stringish coerces a scalar JSON value to its string form; null, absent,
-// and non-scalars become "".
+// stringish coerces a JSON value to its string form: strings as-is,
+// numbers and booleans formatted, null and absent "". An array or object
+// (a client sending a native checkbox list rather than the string form
+// both shipped apps use) is kept as its compact JSON text: the server never
+// interprets answers, and an answer that vanishes with a 201 is the one
+// outcome an agency cannot detect.
 func stringish(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -117,8 +122,14 @@ func stringish(raw json.RawMessage) string {
 		return strconv.FormatFloat(t, 'f', -1, 64)
 	case bool:
 		return strconv.FormatBool(t)
-	default:
+	case nil:
 		return ""
+	default:
+		var b bytes.Buffer
+		if err := json.Compact(&b, raw); err != nil {
+			return ""
+		}
+		return b.String()
 	}
 }
 

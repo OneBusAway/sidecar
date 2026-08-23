@@ -165,6 +165,12 @@ func TestSurveyResponse_CreateErrors(t *testing.T) {
 			`{"errors":["Stop latitude is invalid"]}`},
 		{"junk coordinate with stop", formCT, "survey_id=" + id + "&user_identifier=u&stop_identifier=1_570&stop_latitude=abc&stop_longitude=-122.3&responses=[]", 422,
 			`{"errors":["Stop latitude is invalid"]}`},
+		// A coordinate that arrived as a JSON array or object is present
+		// and invalid, never "blank" -- with or without a stop identifier.
+		{"non-scalar coordinate with stop", jsonCT, `{"survey_id":` + id + `,"user_identifier":"u","stop_identifier":"1_570","stop_latitude":[47.6],"stop_longitude":{"v":-122.3},"responses":"[]"}`, 422,
+			`{"errors":["Stop latitude is invalid","Stop longitude is invalid"]}`},
+		{"non-scalar coordinate without stop", jsonCT, `{"survey_id":` + id + `,"user_identifier":"u","stop_latitude":[47.6],"stop_longitude":-122.3,"responses":"[]"}`, 422,
+			`{"errors":["Stop latitude is invalid"]}`},
 		{"every message in order", formCT, "survey_id=" + id + "&user_identifier=&stop_identifier=1_570&responses=nope", 422,
 			`{"errors":["User identifier can't be blank","Stop latitude can't be blank","Stop longitude can't be blank","responses must be a JSON-encoded array of answer objects"]}`},
 		{"invalid json body", jsonCT, `{not json`, 422, `{"errors":["request body is invalid"]}`},

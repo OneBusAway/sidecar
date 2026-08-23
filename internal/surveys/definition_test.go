@@ -58,6 +58,57 @@ func TestDefinitionValidate(t *testing.T) {
 			t.Errorf("sdk values = %s, want compacted", got)
 		}
 	})
+	t.Run("sdk values match stored escaping", func(t *testing.T) {
+		t.Parallel()
+		// encoding/json HTML-escapes <, > and & when the row is stored;
+		// the document must canonicalize the same way or an unchanged
+		// question reads as changed on the next edit.
+		c := surveys.Content{Type: "external_survey", LabelText: "Go", URL: "https://e.org",
+			SDKConfigurationValues: json.RawMessage(`{"ref":"a&b<c>"}`)}
+		stored, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back surveys.Content
+		if err := json.Unmarshal(stored, &back); err != nil {
+			t.Fatal(err)
+		}
+		d := validDefinition()
+		d.Questions = []surveys.QuestionDefinition{{Content: c}}
+		if err := d.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if !surveys.QuestionsEqual([]surveys.Question{{Content: back}}, d.Questions) {
+			t.Errorf("document %s != stored %s", d.Questions[0].Content.SDKConfigurationValues, back.SDKConfigurationValues)
+		}
+	})
+	t.Run("sdk values null is absent", func(t *testing.T) {
+		t.Parallel()
+		for _, typ := range []string{"text", "external_survey"} {
+			d := validDefinition()
+			d.Questions = []surveys.QuestionDefinition{{Content: surveys.Content{Type: typ, LabelText: "Go",
+				URL: "https://e.org", SDKConfigurationValues: json.RawMessage(" null ")}}}
+			if typ == "text" {
+				d.Questions[0].Content.URL = ""
+			}
+			if err := d.Validate(); err != nil {
+				t.Fatalf("%s: Validate: %v", typ, err)
+			}
+			if d.Questions[0].Content.SDKConfigurationValues != nil {
+				t.Errorf("%s: sdk values = %q, want nil", typ, d.Questions[0].Content.SDKConfigurationValues)
+			}
+		}
+	})
+	t.Run("sdk values invalid json", func(t *testing.T) {
+		t.Parallel()
+		d := validDefinition()
+		d.Questions = []surveys.QuestionDefinition{{Content: surveys.Content{Type: "external_survey", LabelText: "Go",
+			URL: "https://e.org", SDKConfigurationValues: json.RawMessage(`{"a":`)}}}
+		err := d.Validate()
+		if err == nil || !strings.Contains(err.Error(), "question 1: sdk_configuration_values") {
+			t.Fatalf("Validate() = %v, want sdk_configuration_values parse error", err)
+		}
+	})
 	tests := []struct {
 		name    string
 		mutate  func(*surveys.Definition)

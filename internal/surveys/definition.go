@@ -44,7 +44,7 @@ func NormalizeList(in []string) []string {
 
 // Validate checks the whole document before anything is stored, and
 // normalizes it in place: lists per NormalizeList, sdk_configuration_values
-// compacted, and Required forced false on label/external_survey questions
+// per canonicalJSON, and Required forced false on label/external_survey questions
 // (the reference's set_required_param; design spec §2.3).
 func (d *Definition) Validate() error {
 	if strings.TrimSpace(d.Name) == "" {
@@ -57,14 +57,17 @@ func (d *Definition) Validate() error {
 	d.VisibleRouteList = NormalizeList(d.VisibleRouteList)
 	for i := range d.Questions {
 		q := &d.Questions[i]
-		if err := q.Content.Validate(); err != nil {
-			return fmt.Errorf("question %d: %w", i+1, err)
-		}
-		compact, err := compactJSON(q.Content.SDKConfigurationValues)
+		// Canonicalize before the per-type checks so a spelled-out null
+		// reads as absent and the stored bytes match what ContentEqual
+		// will compare against on a later edit.
+		canonical, err := canonicalJSON(q.Content.SDKConfigurationValues)
 		if err != nil {
 			return fmt.Errorf("question %d: sdk_configuration_values: %w", i+1, err)
 		}
-		q.Content.SDKConfigurationValues = compact
+		q.Content.SDKConfigurationValues = canonical
+		if err := q.Content.Validate(); err != nil {
+			return fmt.Errorf("question %d: %w", i+1, err)
+		}
 		if q.Content.Type == TypeLabel || q.Content.Type == TypeExternalSurvey {
 			q.Required = false
 		}
@@ -73,8 +76,8 @@ func (d *Definition) Validate() error {
 }
 
 // ContentEqual compares two contents field by field. SDK values are
-// compared as compacted bytes, which Validate guarantees for documents and
-// the adapter guarantees for stored rows.
+// compared as canonical bytes (canonicalJSON), which Validate guarantees for
+// documents and encoding/json guarantees for stored rows.
 func ContentEqual(a, b Content) bool {
 	return a.Type == b.Type && a.LabelText == b.LabelText &&
 		slices.Equal(a.Options, b.Options) && a.URL == b.URL &&
