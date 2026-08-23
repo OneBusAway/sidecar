@@ -57,6 +57,34 @@ type AlertTranslation struct {
 	UpdatedAt    int64
 }
 
+type GhostBusReport struct {
+	ID                       int64
+	RegionID                 int64
+	PublicIdentifier         string
+	UserIdentifier           string
+	TripIdentifier           string
+	ServiceDate              int64
+	RouteIdentifier          string
+	StopIdentifier           string
+	VehicleIdentifier        string
+	StopSequence             sql.NullInt64
+	Predicted                sql.NullInt64
+	ScheduleDeviationMinutes sql.NullInt64
+	WaitDurationMinutes      int64
+	Comment                  string
+	UserLatitude             sql.NullFloat64
+	UserLongitude            sql.NullFloat64
+	ScheduledArrivalAt       sql.NullInt64
+	PredictedArrivalAt       sql.NullInt64
+	PredictionLastUpdatedAt  sql.NullInt64
+	SnapshotStatus           string
+	SnapshotJson             string
+	SnapshotCapturedAt       sql.NullInt64
+	SnapshotAttempts         int64
+	CreatedAt                int64
+	UpdatedAt                int64
+}
+
 type PushRegistration struct {
 	ID              int64
 	RegionID        int64
