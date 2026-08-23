@@ -229,9 +229,11 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, h.deps.Logger, http.StatusNotFound, surveyNotFoundBody)
 			return
 		}
-		// The store's error may echo rider data; log only a fixed cause
-		// (surveys design spec §4.5).
-		writeServerError(w, h.deps.Logger, 0, "create survey response", fmt.Errorf("survey %d: store write failed", survey.ID))
+		// The sqlite adapter's error strings never embed rider data
+		// (internal/store/sqlite/surveys.go), so the real cause is safe
+		// to log and worth keeping for diagnosability (surveys design
+		// spec §4.5).
+		writeServerError(w, h.deps.Logger, 0, "create survey response", fmt.Errorf("survey %d: %w", survey.ID, err))
 		return
 	}
 	writeJSON(w, h.deps.Logger, http.StatusCreated, responseBody(resp))
@@ -266,7 +268,9 @@ func (h *surveysHandler) amend(w http.ResponseWriter, r *http.Request) {
 			h.deps.Logger.Info("httpapi: rejected survey response amend", "reason", "answer cap")
 			writeErrors(w, h.deps.Logger, []string{surveys.ErrTooManyAnswers.Error()})
 		default:
-			writeServerError(w, h.deps.Logger, 0, "amend survey response", errors.New("store write failed"))
+			// Same rationale as create: the adapter's error text is safe
+			// to log verbatim.
+			writeServerError(w, h.deps.Logger, 0, "amend survey response", fmt.Errorf("response %s: %w", publicID, err))
 		}
 		return
 	}

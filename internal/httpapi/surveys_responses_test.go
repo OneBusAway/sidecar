@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -308,17 +309,20 @@ func TestSurveyResponse_SharedThrottle(t *testing.T) {
 	}
 }
 
-// erroringSurveysRepo fails every write with an error echoing rider data,
-// the worst case a driver could produce; the handler's log line must not
-// carry it.
+// erroringSurveysRepo fails every write with an error shaped like the real
+// sqlite adapter's (internal/store/sqlite/surveys.go documents that its
+// error strings never embed rider data): the cause is diagnosable but
+// carries no user_identifier, stop identifier, or answer text. The handler
+// is expected to log this cause verbatim while never logging the request's
+// rider data itself, which the handler never even reads for this purpose.
 type erroringSurveysRepo struct{ surveys.Repository }
 
-func (r erroringSurveysRepo) CreateResponse(_ context.Context, in surveys.NewResponse, _ time.Time) (surveys.Response, error) {
-	return surveys.Response{}, fmt.Errorf("disk full while storing user=%s stop=%s answer=%s", in.UserIdentifier, in.StopIdentifier, in.Answers[0].Answer)
+func (r erroringSurveysRepo) CreateResponse(_ context.Context, _ surveys.NewResponse, _ time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errors.New("disk I/O error")
 }
 
-func (r erroringSurveysRepo) AmendResponse(_ context.Context, publicID string, incoming []surveys.Answer, _ time.Time) (surveys.Response, error) {
-	return surveys.Response{}, fmt.Errorf("disk full while amending id=%s answer=%s", publicID, incoming[0].Answer)
+func (r erroringSurveysRepo) AmendResponse(_ context.Context, _ string, _ []surveys.Answer, _ time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errors.New("disk I/O error")
 }
 
 func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
@@ -355,6 +359,11 @@ func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
 	}
 	if !strings.Contains(logs, "amend survey response") {
 		t.Fatalf("expected an error log line for the amend store failure; got: %s", logs)
+	}
+	// Diagnosability: the real store error text must reach the log, not a
+	// generic placeholder (finding 1).
+	if strings.Count(logs, "disk I/O error") != 2 {
+		t.Fatalf("expected the real store error to appear once per 500 (create and amend); got: %s", logs)
 	}
 	for _, secret := range []string{secretUser, secretStop, secretAnswer, secretAmendAnswer} {
 		if strings.Contains(logs, secret) {
