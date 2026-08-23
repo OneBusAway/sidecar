@@ -1,7 +1,8 @@
 // Package sqlite is the SQLite adapter for the alerts, regions, auth,
-// alarms, and push registration repositories. It maps generated sqlc rows
-// to the domain types defined in internal/alerts, internal/regions,
-// internal/auth, internal/alarms, and internal/pushreg — nothing outside
+// alarms, push registration, surveys, and ghost bus report repositories. It
+// maps generated sqlc rows to the domain types defined in internal/alerts,
+// internal/regions, internal/auth, internal/alarms, internal/pushreg,
+// internal/surveys, and internal/ghostbus — nothing outside
 // this package ever sees a gen.* struct, which is what lets a Postgres
 // adapter satisfy the same interfaces later without touching any other
 // package.
@@ -21,6 +22,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
@@ -158,6 +160,11 @@ func (s *Store) Alarms() alarms.Repository {
 // Surveys returns the surveys.Repository backed by this store.
 func (s *Store) Surveys() surveys.Repository {
 	return &surveyRepo{db: s.db, q: s.q}
+}
+
+// GhostBus returns the ghostbus.Repository backed by this store (spec §8).
+func (s *Store) GhostBus() ghostbus.Repository {
+	return &ghostBusRepo{q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
