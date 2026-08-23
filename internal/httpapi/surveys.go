@@ -188,18 +188,18 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 	lon, lonPresent, lonValid := coordinate(p, "stop_longitude", 180)
 	// Android sends 0.0/0.0 with no identifier on every submission; only an
 	// identifier without coordinates is an error (surveys design spec §2.7).
-	if stopID != "" {
-		if !latPresent || (lat == nil && !latValid) {
-			msgs = append(msgs, "Stop latitude can't be blank")
-		}
-		if !lonPresent || (lon == nil && !lonValid) {
-			msgs = append(msgs, "Stop longitude can't be blank")
-		}
+	// A present-but-unparseable coordinate is always "invalid", whether or
+	// not stop_identifier is present -- "blank" is reserved for absent.
+	if stopID != "" && !latPresent {
+		msgs = append(msgs, "Stop latitude can't be blank")
 	}
-	if lat != nil && !latValid {
+	if stopID != "" && !lonPresent {
+		msgs = append(msgs, "Stop longitude can't be blank")
+	}
+	if latPresent && !latValid {
 		msgs = append(msgs, "Stop latitude is invalid")
 	}
-	if lon != nil && !lonValid {
+	if lonPresent && !lonValid {
 		msgs = append(msgs, "Stop longitude is invalid")
 	}
 	raw, hasRaw := p.m["responses"].(string)
@@ -213,9 +213,6 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 		h.deps.Logger.Info("httpapi: rejected survey response", "survey_id", survey.ID, "messages", len(msgs))
 		writeErrors(w, h.deps.Logger, msgs)
 		return
-	}
-	if !latValid || !lonValid {
-		lat, lon = nil, nil
 	}
 
 	publicID, err := securetoken.New()

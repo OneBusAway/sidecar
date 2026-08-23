@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -155,6 +154,10 @@ func TestSurveyResponse_CreateErrors(t *testing.T) {
 			`{"errors":["Stop latitude can't be blank","Stop longitude can't be blank"]}`},
 		{"stop coords out of range", formCT, "survey_id=" + id + "&user_identifier=u&stop_identifier=1_570&stop_latitude=91&stop_longitude=-181&responses=[]", 422,
 			`{"errors":["Stop latitude is invalid","Stop longitude is invalid"]}`},
+		{"junk coordinate without stop", formCT, "survey_id=" + id + "&user_identifier=u&stop_latitude=abc&stop_longitude=-122.3&responses=[]", 422,
+			`{"errors":["Stop latitude is invalid"]}`},
+		{"junk coordinate with stop", formCT, "survey_id=" + id + "&user_identifier=u&stop_identifier=1_570&stop_latitude=abc&stop_longitude=-122.3&responses=[]", 422,
+			`{"errors":["Stop latitude is invalid"]}`},
 		{"every message in order", formCT, "survey_id=" + id + "&user_identifier=&stop_identifier=1_570&responses=nope", 422,
 			`{"errors":["User identifier can't be blank","Stop latitude can't be blank","Stop longitude can't be blank","responses must be a JSON-encoded array of answer objects"]}`},
 		{"invalid json body", jsonCT, `{not json`, 422, `{"errors":["request body is invalid"]}`},
@@ -300,7 +303,7 @@ func TestSurveyResponse_SharedThrottle(t *testing.T) {
 	if rec := send(t, h, http.MethodPut, "/api/v1/survey_responses/"+id, jsonCT, `{"responses":"[]"}`); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("4th write status = %d, want 429", rec.Code)
 	}
-	if rec := get(t, h, "/api/v1/regions/1/surveys?user_id=u"); rec.Code != http.StatusOK {
+	if rec := send(t, h, http.MethodGet, "/api/v1/regions/1/surveys?user_id=u", "", ""); rec.Code != http.StatusOK {
 		t.Fatalf("list throttled: %d", rec.Code)
 	}
 }
@@ -312,6 +315,10 @@ type erroringSurveysRepo struct{ surveys.Repository }
 
 func (r erroringSurveysRepo) CreateResponse(_ context.Context, in surveys.NewResponse, _ time.Time) (surveys.Response, error) {
 	return surveys.Response{}, fmt.Errorf("disk full while storing user=%s stop=%s answer=%s", in.UserIdentifier, in.StopIdentifier, in.Answers[0].Answer)
+}
+
+func (r erroringSurveysRepo) AmendResponse(_ context.Context, publicID string, incoming []surveys.Answer, _ time.Time) (surveys.Response, error) {
+	return surveys.Response{}, fmt.Errorf("disk full while amending id=%s answer=%s", publicID, incoming[0].Answer)
 }
 
 func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
@@ -326,7 +333,7 @@ func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
 	h := httpapi.NewRouter(deps)
 	s := seedSurvey(t, store.Surveys(), store.Regions(), 1, fullDefinition())
 
-	const secretUser, secretStop, secretAnswer = "rider-uuid-SECRET", "stop-SECRET", "answer-SECRET"
+	const secretUser, secretStop, secretAnswer, secretAmendAnswer = "rider-uuid-SECRET", "stop-SECRET", "answer-SECRET", "amend-answer-SECRET"
 	body := fmt.Sprintf(`{"user_identifier":%q,"survey_id":%d,"stop_identifier":%q,"stop_latitude":1,"stop_longitude":2,"responses":"[{\"question_id\":1,\"answer\":\"%s\"}]"}`,
 		secretUser, s.ID, secretStop, secretAnswer)
 	if rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", jsonCT, body); rec.Code != http.StatusInternalServerError || rec.Body.Len() != 0 {
@@ -335,6 +342,10 @@ func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
 	if rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", jsonCT, fmt.Sprintf(`{"survey_id":%d,"user_identifier":%q,"responses":"nope-%s"}`, s.ID, secretUser, secretAnswer)); rec.Code != 422 {
 		t.Fatalf("validation: %d", rec.Code)
 	}
+	amendBody := fmt.Sprintf(`{"responses":"[{\"question_id\":1,\"answer\":\"%s\"}]"}`, secretAmendAnswer)
+	if rec := send(t, h, http.MethodPut, "/api/v1/survey_responses/any-id", jsonCT, amendBody); rec.Code != http.StatusInternalServerError || rec.Body.Len() != 0 {
+		t.Fatalf("amend store error: status = %d body = %q, want bodyless 500", rec.Code, rec.Body.String())
+	}
 	logs := buf.String()
 	if !strings.Contains(logs, "create survey response") {
 		t.Fatalf("expected an error log line for the store failure; got: %s", logs)
@@ -342,23 +353,39 @@ func TestSurveyResponse_LogsNeverCarryRiderData(t *testing.T) {
 	if !strings.Contains(logs, "rejected survey response") {
 		t.Fatalf("expected an info log line for the 422; got: %s", logs)
 	}
-	for _, secret := range []string{secretUser, secretStop, secretAnswer} {
+	if !strings.Contains(logs, "amend survey response") {
+		t.Fatalf("expected an error log line for the amend store failure; got: %s", logs)
+	}
+	for _, secret := range []string{secretUser, secretStop, secretAnswer, secretAmendAnswer} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("log carries rider data %q: %s", secret, logs)
 		}
 	}
 }
 
+// fatalOnWriteRepo fails the test outright if CreateResponse is ever called;
+// used to prove an unknown survey_id short-circuits before any store write.
+type fatalOnWriteRepo struct {
+	surveys.Repository
+	t *testing.T
+}
+
+func (r fatalOnWriteRepo) CreateResponse(_ context.Context, _ surveys.NewResponse, _ time.Time) (surveys.Response, error) {
+	r.t.Fatal("CreateResponse called for an unknown survey")
+	return surveys.Response{}, nil
+}
+
 func TestSurveyResponse_UnknownSurveyNoStoreWrite(t *testing.T) {
 	t.Parallel()
-	h, repo, regs := surveyDeps(t, nil, nil)
-	s := seedSurvey(t, repo, regs, 1, fullDefinition())
-	_ = s
+	store := sqlitetest.Open(t)
+	deps := httpapi.Deps{
+		Surveys: fatalOnWriteRepo{Repository: store.Surveys(), t: t}, Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler),
+	}
+	h := httpapi.NewRouter(deps)
+	seedSurvey(t, store.Surveys(), store.Regions(), 1, fullDefinition())
 	rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", formCT, "survey_id=424242&user_identifier=u&responses=[]")
 	if rec.Code != 404 {
 		t.Fatalf("%d", rec.Code)
-	}
-	if _, err := repo.GetResponse(context.Background(), "anything"); !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatal(err)
 	}
 }
