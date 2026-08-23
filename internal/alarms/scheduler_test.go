@@ -492,6 +492,99 @@ func TestMissingRegionCountsAsFailure(t *testing.T) {
 	}
 }
 
+// erroringRegions fails every Get with a transient store error -- never
+// regions.ErrNotFound. Embedding fakeRegions supplies the rest of the
+// interface; only Get is overridden.
+type erroringRegions struct{ fakeRegions }
+
+func (erroringRegions) Get(context.Context, int64) (regions.Region, error) {
+	return regions.Region{}, errors.New("database is locked")
+}
+
+// TestRegionStoreErrorDoesNotCount is the companion to
+// TestMissingRegionCountsAsFailure: a region that is *gone* dooms its
+// alarms, but a region store that is briefly unavailable says nothing about
+// them. Counting the latter would let one bad minute of SQLite reap every
+// pending alarm in the deployment three cycles later.
+func TestRegionStoreErrorDoesNotCount(t *testing.T) {
+	t.Parallel()
+	alarm := testAlarm(1, 600)
+	alarm.FailureCount = 2 // one more failure would reap it
+	repo := newFakeAlarmRepo(alarm)
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		t.Fatal("OBA lookup should not run when the region store fails")
+		return obaapi.Departure{}, nil
+	}}
+	s := newScheduler(repo, oba, &fakeSender{})
+	s.Regions = erroringRegions{}
+
+	s.CheckAll(context.Background())
+
+	got, ok := repo.get(1)
+	if !ok {
+		t.Fatal("alarm reaped on a transient region store error; a database hiccup must never delete a rider's alarm")
+	}
+	if got.FailureCount != 2 {
+		t.Errorf("FailureCount = %d; want unchanged at 2 (store errors don't count)", got.FailureCount)
+	}
+}
+
+// TestMissingTripIdentityIsReaped pins the other half of the reaper's job.
+// The create endpoints deliberately do not validate stop_id/trip_id (spec
+// §5.2 makes them a client obligation), so an alarm can reach the scheduler
+// with neither. No lookup can ever resolve it -- the SDK rejects an empty
+// stop id locally, before any request, so the failure never carries the 404
+// the reaper counts -- and without a guard the row is immortal: re-checked,
+// and logged, every cycle forever.
+// Both halves of the trip identity are covered: an empty stop id is rejected
+// by the SDK before any request, while an absent trip id comes back as an
+// upstream 4xx that is not the 404 the reaper counts. Either one alone leaves
+// the alarm unresolvable forever, so a check of only one field would leave
+// the other case immortal.
+func TestMissingTripIdentityIsReaped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		stopID, tripID string
+	}{
+		{"no stop id", "", "trip-1"},
+		{"no trip id", "stop-1", ""},
+		{"neither", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			testMissingTripIdentityIsReaped(t, tc.stopID, tc.tripID)
+		})
+	}
+}
+
+func testMissingTripIdentityIsReaped(t *testing.T, stopID, tripID string) {
+	alarm := testAlarm(1, 600)
+	alarm.StopID = stopID
+	alarm.TripID = tripID
+	repo := newFakeAlarmRepo(alarm)
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		t.Fatal("OBA lookup should not run for an alarm with no trip identity")
+		return obaapi.Departure{}, nil
+	}}
+	sender := &fakeSender{}
+	s := newScheduler(repo, oba, sender)
+
+	s.CheckAll(context.Background())
+	if got, ok := repo.get(1); !ok || got.FailureCount != 1 {
+		t.Fatalf("after cycle 1: got=%+v ok=%v; want FailureCount=1, present", got, ok)
+	}
+
+	s.CheckAll(context.Background())
+	s.CheckAll(context.Background())
+	if _, ok := repo.get(1); ok {
+		t.Error("alarm with an incomplete trip identity still present after 3 cycles; want reaped rather than checked forever")
+	}
+	if sender.count() != 0 {
+		t.Errorf("sent = %d; want 0", sender.count())
+	}
+}
+
 func TestAndroidPlatform(t *testing.T) {
 	t.Parallel()
 	alarm := testAlarm(1, 600)

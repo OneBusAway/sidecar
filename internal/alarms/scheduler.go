@@ -56,10 +56,13 @@ func (s *Scheduler) CheckAll(ctx context.Context) {
 		return
 	}
 
-	// One region fetch per region per cycle, not per alarm.
-	regionCache := make(map[int64]*regions.Region)
+	// One region fetch per region per cycle, not per alarm. The failure is
+	// cached alongside the region: check has to tell "this region is gone"
+	// (reap the alarm) apart from "the store hiccuped" (leave it alone), so
+	// a nil region on its own is not enough information.
+	regionCache := make(map[int64]regionLookup)
 	var mu sync.Mutex
-	regionFor := func(id int64) *regions.Region {
+	regionFor := func(id int64) regionLookup {
 		mu.Lock()
 		r, ok := regionCache[id]
 		mu.Unlock()
@@ -73,9 +76,9 @@ func (s *Scheduler) CheckAll(ctx context.Context) {
 		// region can now fetch twice, which is far cheaper than serializing
 		// every miss -- and both writers store the same value.
 		region, err := s.Regions.Get(ctx, id)
-		var resolved *regions.Region
+		resolved := regionLookup{err: err}
 		if err == nil {
-			resolved = &region
+			resolved.region = &region
 		}
 		mu.Lock()
 		regionCache[id] = resolved
@@ -98,13 +101,42 @@ func (s *Scheduler) CheckAll(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) check(ctx context.Context, alarm Alarm, region *regions.Region) {
-	if region == nil {
+// regionLookup is one cycle's cached resolution of a region: the region if
+// it resolved, or the error that stopped it. The error is kept because the
+// two failure directions are not the same fact -- a region that is gone
+// dooms its alarms, a store that is briefly unavailable says nothing about
+// them.
+type regionLookup struct {
+	region *regions.Region
+	err    error
+}
+
+func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup) {
+	if lookup.region == nil {
+		if !errors.Is(lookup.err, regions.ErrNotFound) {
+			// A transient store failure is a fact about the database, not
+			// about this alarm. Counting it would let one bad minute of
+			// SQLite reap every pending alarm in the deployment three
+			// cycles later; same rule as the OBA transient branch below.
+			s.Logger.Warn("alarms: resolve region", "region_id", alarm.RegionID, "err", lookup.err)
+			return
+		}
 		// An alarm whose region vanished can never resolve; let the streak
 		// reap it rather than re-checking forever.
 		s.countFailure(ctx, alarm)
 		return
 	}
+	if alarm.StopID == "" || alarm.TripID == "" {
+		// The client never supplied a trip identity -- §5.2 leaves those
+		// fields unvalidated at creation -- so no lookup can ever resolve
+		// this alarm: the SDK rejects an empty stop id locally, before any
+		// request, and an absent trip id is a 4xx from the upstream. Neither
+		// is the 404 the reaper counts, so without this the alarm is
+		// immortal: re-checked, and logged, every cycle forever.
+		s.countFailure(ctx, alarm)
+		return
+	}
+	region := lookup.region
 	dep, err := s.OBA.ArrivalAndDeparture(ctx, *region, obaapi.DepartureQuery{
 		StopID: alarm.StopID, TripID: alarm.TripID, ServiceDate: alarm.ServiceDate,
 		VehicleID: alarm.VehicleID, StopSequence: alarm.StopSequence,
