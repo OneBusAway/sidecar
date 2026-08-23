@@ -1,7 +1,7 @@
 # Surveys and Survey Responses — Design
 
 **Date:** 2026-08-22
-**Status:** Draft
+**Status:** Reviewed
 **Implements:** [specification.md](../../../specification/specification.md) §7, and the
 `listSurveys`, `createSurveyResponse`, `amendSurveyResponse{,Post,Put}` operations in
 [openapi.yaml](../../../specification/openapi.yaml).
@@ -38,11 +38,18 @@ clients. They are called out as **client contract** and each one is pinned by a 
   locally and neither asks the server.
 - **Enforcing `allows_multiple_responses`.** A passthrough flag in the reference too;
   the apps apply it client-side.
+- **Requiring a stop id per survey** (the reference's `require_stop_id_in_response`).
+  The flag is not in the OpenAPI `Survey` schema, no shipped client reads it, and
+  clients display nothing from a 422 — enabling it would make every submission fail
+  invisibly. It has no column and no validation here; if a client ever learns to read
+  it, it is one additive column.
 - **Validating answers against the survey's questions.** The reference stores whatever
   `question_id`s the client sends. Clients can be ahead of or behind the authored
   questions, and the answer carries its own denormalized label for export.
-- **Async enrichment, analytics, dashboards.** Export is a CSV; everything else is
-  agency tooling outside the sidecar.
+- **Editing a survey's questions once it has responses.** See §2.13.
+- **Study edit/delete, survey activate/deactivate commands, `--force` deletes,
+  non-CSV export, async enrichment, analytics, dashboards.** Cut for the first slice;
+  each is additive.
 
 ## 2. Decisions
 
@@ -54,7 +61,7 @@ the returned `update_path`: each rebuilds `/api/v1/survey_responses/{id}` itself
 amends with `PUT` and a JSON body; Android amends with `POST` and a form body. `PATCH`
 is in the OpenAPI and is accepted, but no shipped client sends it.
 
-So the router registers, with Go 1.22 mux patterns:
+So the router registers, with Go 1.22+ mux patterns:
 
 ```
 GET   /api/v1/regions/{regionId}/surveys
@@ -67,9 +74,10 @@ PATCH /api/v1/survey_responses/{responseId}
 ```
 
 `{$}` and `{responseId}` do not conflict: `{$}` matches only the empty trailing segment
-and a wildcard needs a non-empty one. Without the `{$}` registration the Android and
-iOS create call would 404, since `http.ServeMux` does not strip trailing slashes on
-write methods.
+and a wildcard needs a non-empty one (verified on Go 1.26). Without the `{$}`
+registration the Android and iOS create call is a 404, since `http.ServeMux` does not
+strip trailing slashes. A trailing-slash `PUT`/`PATCH` is a `405` from the mux —
+acceptable, since no client sends one; the router-table test pins the seven patterns.
 
 iOS appends `key`, `app_uid`, `app_ver`, and `version=2` query items (inherited from
 its OBA REST config) to every survey request. They are ignored.
@@ -78,7 +86,8 @@ its OBA REST config) to every survey request. They are ignored.
 
 Both clients ignore it, but the spec requires it and a future client might honor it.
 The emitted value is `/api/v1/survey_responses/{publicID}` — the same path the clients
-rebuild, so a client that *does* honor it lands in the same place.
+rebuild, so a client that *does* honor it lands in the same place. A test POSTs to the
+returned value verbatim and asserts it amends that response.
 
 ### 2.3 The list payload is shaped for the strict client, the iOS app
 
@@ -95,9 +104,10 @@ Android is the lenient one (`ignoreUnknownKeys`, `coerceInputValues`) but treats
 
 Therefore:
 
-- Every key in the OpenAPI `Survey` and `SurveyQuestion` schemas is always present.
-  Booleans are always literal `true`/`false`. `visible_stop_list` / `visible_route_list`
-  are an array or literal `null`, never omitted.
+- Every key in the OpenAPI `Survey`, `SurveyQuestion`, and `study` schemas is always
+  present. Booleans are always literal `true`/`false`. `visible_stop_list` /
+  `visible_route_list` / `start_date` / `end_date` are a value or literal `null`,
+  never omitted. `study.description` is `""` when unset, never `null`.
 - `created_at` / `updated_at` / `start_date` / `end_date` are formatted as
   `2006-01-02T15:04:05.000Z` in UTC. Three fractional digits are always emitted, even
   though the stored precision is seconds, because `.000Z` is what the reference emits
@@ -113,6 +123,7 @@ Therefore:
 - `required` is forced to `false` for `label` and `external_survey` questions at
   authoring time (the reference's `set_required_param`). The wire never says a
   display-only question is required.
+- The response `Content-Type` is `application/json`; iOS rejects any other on this GET.
 
 ### 2.4 Server-side window filtering is load-bearing
 
@@ -159,7 +170,11 @@ missing or `null` one is stored as `""`. Extra keys on an element are dropped.
 Duplicate `question_id`s within one request: the last one wins, so the merge below has
 a single answer per question to work with.
 
-### 2.6 Amend merges by `question_id` inside one transaction
+`ParseAnswers` also enforces the cap of §2.6: more than `MaxAnswers` (500) distinct
+`question_id`s in one request is `ErrTooManyAnswers`, so create and amend reject the
+same input the same way.
+
+### 2.6 Amend merges by `question_id` inside one immediate transaction
 
 Merge semantics (spec §7.2, reference `upsert_responses`): an incoming answer replaces
 the stored answer with the same `question_id`; every other stored answer is preserved.
@@ -167,40 +182,58 @@ The stored order is kept, with replaced answers staying in place and new ones ap
 — the reference puts new keys first, which no client observes and which makes the
 export order jump around.
 
-The merge runs inside `BEGIN IMMEDIATE` in the adapter, with the pure `MergeAnswers`
-function from the domain package doing the work between the read and the write. Two
-concurrent amends of one response (a retry racing its original, or the iOS hero PUT
-racing a second PUT) must both land; a read-merge-write outside a transaction loses
-one. The conformance suite pins this with the same concurrent-edit shape used for
-alerts.
+The merge is a read-modify-write: `GetResponseByPublicID`, `MergeAnswers` (pure, in the
+domain package), `UpdateResponseAnswers`, inside one transaction. Two concurrent amends
+of one response (a retry racing its original, or the iOS hero PUT racing a second PUT)
+must both land.
+
+A deferred SQLite transaction does **not** deliver that. The store's existing
+transactions (`regionRepo.UpsertFromDirectory`, `alertRepo.Update`) use
+`db.BeginTx(ctx, nil)`, which issues a plain `BEGIN`; when two such transactions both
+read and then both try to write, the second to write fails immediately with
+`SQLITE_BUSY_SNAPSHOT` — `busy_timeout` does not wait on a deferred-to-write lock
+upgrade. Measured during review: 4–5 of 8 concurrent read-modify-writes fail on the
+current DSN; 0 of 8 fail with `_txlock=immediate`.
+
+So `sqlite.Open` adds `_txlock=immediate` to its DSN. modernc applies it to every
+`BeginTx` that is not `ReadOnly` (`tx.go:23`), so write transactions serialize on the
+lock from `BEGIN` and wait out `busy_timeout` instead of failing, while
+`alertRepo.Feed`'s `ReadOnly` transaction is unaffected. This retroactively fixes
+`alertRepo.Update`, which is subject to the same race today (its test tolerates one
+side failing). This is the repo's first transactional concurrency conformance test;
+the push registration one races a single atomic upsert statement and proves nothing
+about transactions.
+
+The merged result is capped at `MaxAnswers` (500) distinct `question_id`s:
+`AmendResponse` returns `ErrTooManyAnswers` when the merge would exceed it, since
+merges accumulate across requests and the 64 KB body limit only bounds one.
 
 Amend ignores every parameter except `responses`. Android resends `user_identifier`,
-`survey_id`, and the zeroed stop fields on its amend; none of them may change the row.
-
-A response's stored answer count is capped at 500 distinct `question_id`s. The 64 KB
-body limit bounds each request, but merges accumulate across amends and an
-unauthenticated caller could otherwise grow one row without limit. Exceeding the cap
-is a 422 with `"responses has too many answers"`.
+`survey_id`, `stop_latitude=0.0`, and `stop_longitude=0.0` on its amend; none of them
+may change the row.
 
 ### 2.7 Validation messages reproduce the reference's Rails phrasing
 
 Clients display nothing from a 422 body, so these are for the operator reading logs and
-for fidelity with the documented contract. Create fails with 422 `{"errors": [...]}`
-listing, in this order, whichever apply:
+for fidelity with the documented contract. Create collects every applicable message,
+in this order, and fails with 422 `{"errors": [...]}` if any apply:
 
 | Condition | Message |
 |---|---|
 | `user_identifier` blank | `User identifier can't be blank` |
-| survey has `require_stop_id` and `stop_identifier` blank | `Stop identifier can't be blank` |
 | `stop_identifier` present and `stop_latitude` absent/unparseable | `Stop latitude can't be blank` |
 | `stop_identifier` present and `stop_longitude` absent/unparseable | `Stop longitude can't be blank` |
+| `stop_latitude` outside ±90 | `Stop latitude is invalid` |
+| `stop_longitude` outside ±180 | `Stop longitude is invalid` |
 | `responses` malformed (§2.5) | `responses must be a JSON-encoded array of answer objects` |
+| `responses` over the cap (§2.5) | `responses has too many answers` |
+
+`ParseAnswers` runs as part of this collection, not after it, so a request with a
+blank identifier *and* malformed answers reports both.
 
 **Client contract.** Android sends `stop_latitude=0.0&stop_longitude=0.0` with *no*
 `stop_identifier` on every submission. Coordinates without an identifier are accepted
 and stored as given; only the reverse (identifier without coordinates) is an error.
-Latitude is validated to ±90 and longitude to ±180 when present; out of range is
-`Stop latitude is invalid` / `Stop longitude is invalid`.
 
 `survey_id` absent, non-integer, or unknown is `404 {"error": "Couldn't find Survey"}`
 — the reference's `Survey.find` behavior, and the spec's "unknown survey" shape.
@@ -215,26 +248,37 @@ The reference mints `SecureRandom.hex(10)`. Both clients treat the id as an opaq
 string (iOS rejects an integer; Android tolerates one), so `securetoken.New()` — 22
 URL-safe characters of 128 random bits, already used for alarms — is used unchanged.
 The path segment is URL-safe by construction. Sequential ids never appear on the wire.
+`New` returns an error when the system entropy source fails; that is a 500 like any
+store failure. A `UNIQUE` collision on `public_id` is not handled specially: at 128
+bits it is a plain store error, not a retry path.
 
 ### 2.9 Both write endpoints are rate limited, beyond what the spec requires
 
 Spec §2.6 lists throttles for push registrations and ghost bus reports and none for
 surveys, and the reference has none. But create and amend are unauthenticated writes to
 agency data with indefinite retention; a hostile client can fill the table. A fixed
-window of **60 per minute per IP** across create and amend together (one bucket, like
-the push registration path) is far above any real rider — the apps send one create and
-at most one amend per survey — and bounds the write rate of a single source. `429`
-with an empty body, as the existing `throttleByIP` produces. The list endpoint is
-unthrottled: it is a read, the iOS app already self-limits to one fetch per 300 s, and
-a `429` there would hide surveys from legitimate riders sharing a NAT.
+window of **60 per minute per source address** across create and amend together (one
+bucket, like the push registration path) is far above any real rider — the apps send
+one create and at most one amend per survey — and bounds the write rate of a single
+source. `429` with an empty body, as the existing `throttleByIP` produces. The list
+endpoint is unthrottled: it is a read, the iOS app already self-limits to one fetch per
+300 s, and a `429` there would hide surveys from legitimate riders sharing a NAT.
+
+`throttleByIP` keys on `RemoteAddr` and deliberately ignores `X-Forwarded-For` (a
+spoofable header). Behind a reverse proxy that does not preserve the client address,
+every rider shares one bucket and 60/minute becomes a deployment-wide write cap. That
+is the same property the push registration throttle already has; the README's
+deployment notes state it, and the limit is a constant an operator can raise in one
+place. Proxy-aware addressing is a cross-cutting change for its own slice.
 
 ### 2.10 Surveys belong to a study, and a study belongs to a region
 
 The reference's hierarchy is organization → study → survey; a region maps to an
 organization. Here a study belongs directly to a region. The `study` object on the
 wire is required by iOS (§2.3), so `surveys.study_id` is `NOT NULL` and a study must
-exist before its first survey. The reference auto-creates a survey per study; we do
-not — an empty study is harmless and an unwanted survey is not.
+exist before its first survey. A survey's study is fixed at creation. The reference
+auto-creates a survey per study; we do not — an empty study is harmless and an
+unwanted survey is not.
 
 ### 2.11 Targeting lists are stored as JSON arrays, not CSV
 
@@ -263,9 +307,9 @@ authoring rejects invalid JSON. Neither client reads it.
 
 An alert is eleven flat fields; a survey is a dozen fields plus an ordered list of
 typed questions. `--option` flags repeated per question do not express that. So
-`survey create` and `survey edit` take `--file <path>` (or `-` for stdin) holding a
-**survey document** — the wire `Survey` shape minus the server-owned keys
-(`id`, `created_at`, `updated_at`, `study`) plus `available` and `require_stop_id`:
+`survey create` and `survey edit` take `--file <path|->` holding a **survey document**
+— the wire `Survey` shape minus the server-owned keys (`id`, `created_at`,
+`updated_at`, `study`, question `id`s and `position`s) plus `available`:
 
 ```json
 {
@@ -277,7 +321,6 @@ typed questions. `--option` flags repeated per question do not express that. So
   "show_on_stops": true,
   "always_visible": false,
   "allows_multiple_responses": false,
-  "require_stop_id": false,
   "visible_stop_list": ["1_570", "1_578"],
   "visible_route_list": null,
   "questions": [
@@ -290,20 +333,24 @@ typed questions. `--option` flags repeated per question do not express that. So
 ```
 
 `position` is the array index plus one; the document's order is the display order.
-`survey show <id>` prints the same document with the server-owned keys added, so
-`show | edit --file -` is a round trip. Dates follow the `alert create` rule: RFC 3339
-with an explicit offset, or rejected.
+Absent booleans are `false`; absent lists are `null`; absent `available` is `true`.
+`survey show <id>` prints the same document with the server-owned keys added
+(`show` output fed to `edit` ignores them), so `show | edit --file -` is a round trip.
+Dates follow the `alert create` rule: RFC 3339 with an explicit offset, or rejected.
 
-On `edit`, questions are reconciled by `id`: a question carrying an `id` that belongs
-to this survey is updated in place and keeps its id; one without an `id` is inserted;
-a stored question absent from the document is deleted. Ids are what riders' stored
-answers reference and what iOS uses to dedupe locally, so an edit that only fixes a
-typo must not renumber the survey. An `id` that belongs to another survey or does not
-exist is an error.
+On `edit`, the survey's scalar fields are always rewritten from the document. The
+question set is **replaced wholesale** — delete all, insert in document order — but
+only while the survey has no responses. Once a response exists, question ids are what
+riders' stored answers reference and what iOS uses to dedupe locally, so renumbering
+would corrupt both; an edit whose questions differ from the stored set is refused with
+`survey N has M responses; its questions are frozen`. An edit whose questions are
+identical to the stored set (same order, same `required`, same content) is accepted
+and touches only the scalars. Id-preserving reconciliation is a follow-up if anyone
+needs to fix a typo in a live survey.
 
-### 2.14 Export is long format
+### 2.14 Export is long-format CSV
 
-`survey responses <id> --csv` emits one row per **answer**, not per response:
+`survey responses <id>` emits one row per **answer**, not per response:
 
 ```
 response_id,user_identifier,stop_identifier,stop_latitude,stop_longitude,created_at,updated_at,question_id,question_type,question_label,answer
@@ -313,19 +360,32 @@ A wide format (one column per question) has to choose between the survey's curre
 questions and the answers' denormalized labels, and loses answers to questions that
 were since deleted. Long format loses nothing and pivots in any spreadsheet. A response
 with zero answers still emits one row with the answer columns empty, so abandoned
-submissions are visible. Timestamps are the §2.3 format. Without `--csv` the command
-prints one JSON object per line (the `Response` shape), for scripting.
+submissions are visible. Timestamps are the §2.3 format; absent stop fields are empty
+cells.
 
-### 2.15 Existing rules apply unchanged
+### 2.15 Retention
+
+Spec §13 marks survey responses as indefinite agency data. Every delete path is
+therefore guarded:
+
+- Regions are never deleted (alerts design §2.1), so `regions → studies` cascade is
+  unreachable.
+- `survey delete` refuses while the survey has any responses. There is no `--force`.
+- There is no `study delete`.
+- `surveys → survey_questions` and `surveys → survey_responses` cascade only behind
+  the refusal above, so the cascade only ever removes questions.
+
+### 2.16 Existing rules apply unchanged
 
 `time.Now`/`time.Local` are banned outside `cmd/`; the handlers use `Deps.Now` and the
 repository takes `now` as an argument. Timestamps are epoch-second `INTEGER` columns
 (never `DATETIME` — modernc writes `time.Time.String()` into those and `ORDER BY`
-sorts text). sqlc queries use named arguments only, never mixed with bare `?`.
-Nothing outside `internal/store/sqlite` sees a `gen.*` type. Portable SQL only. Every
-POST accepts form, query, and JSON parameters through the existing `params` bag. No
-rider-supplied value is logged except counts and ids: `user_identifier` is a device
-identifier and answers are agency data.
+sorts text). sqlc queries use named arguments only, never mixed with bare `?` — which
+rules out `sqlc.slice`, whose expansion is a bare `?` that silently renumbers any named
+argument beside it (verified on sqlc 1.31.1). Nothing outside `internal/store/sqlite`
+sees a `gen.*` type. Portable SQL only. Every POST accepts form, query, and JSON
+parameters through the existing `params` bag. No rider-supplied value is logged except
+counts and ids: `user_identifier` is a device identifier and answers are agency data.
 
 ## 3. Data model
 
@@ -354,7 +414,6 @@ CREATE TABLE surveys (
   show_on_stops             BOOLEAN NOT NULL DEFAULT FALSE,
   always_visible            BOOLEAN NOT NULL DEFAULT FALSE,
   allows_multiple_responses BOOLEAN NOT NULL DEFAULT FALSE,
-  require_stop_id           BOOLEAN NOT NULL DEFAULT FALSE,
   -- NULL = everywhere; otherwise a JSON array of ids (design spec 2.11).
   visible_stop_list         TEXT,
   visible_route_list        TEXT,
@@ -396,9 +455,8 @@ CREATE INDEX survey_responses_survey_idx ON survey_responses (survey_id);
 CREATE INDEX survey_responses_user_idx   ON survey_responses (user_identifier);
 ```
 
-The `UNIQUE (survey_id, position)` constraint means an edit that reorders questions
-must write positions in two passes (negate, then assign) or delete-and-reinsert the
-moved ones; the adapter does the former inside the edit transaction. `stop_latitude` /
+`UNIQUE (survey_id, position)` is safe with wholesale replacement (§2.13): the edit
+transaction deletes every question before inserting. `stop_latitude` /
 `stop_longitude` are `REAL` (Postgres: `DOUBLE PRECISION`) because the client sends
 doubles and the values are only ever echoed to an export.
 
@@ -406,29 +464,33 @@ doubles and the values are only ever echoed to an export.
 added to it (`studies`, `surveys` with `start_time`/`end_time`, `survey_questions`,
 `survey_responses`).
 
-### 3.2 Queries (`queries/surveys.sql`)
+### 3.2 Store DSN
 
-Studies: `CreateStudy`, `GetStudy`, `ListStudiesByRegion`, `UpdateStudy`, `DeleteStudy`,
-`CountSurveysInStudy`.
+`sqlite.Open` appends `&_txlock=immediate` (§2.6). `sqlitetest.Open` must route
+through the production `Open` so the conformance suite exercises the same connection
+production does; the concurrency test's named mutation is removing the flag and
+watching it fail with `SQLITE_BUSY`.
 
-Surveys: `CreateSurvey`, `GetSurvey`, `GetSurveyRegion` (joins study → region, for the
-response path), `ListSurveysByRegion` (all, for the CLI), `ListActiveSurveysByRegion`
-(§2.4 predicate, `@now`), `UpdateSurvey`, `SetSurveyAvailable`, `DeleteSurvey`,
-`CountResponsesForSurvey`.
+### 3.3 Queries (`queries/surveys.sql`)
 
-Questions: `ListQuestionsBySurvey` (`ORDER BY position ASC, id ASC`),
-`ListQuestionsBySurveyIDs` (one query for the list endpoint, `WHERE survey_id IN
-(sqlc.slice('ids'))`), `InsertQuestion`, `UpdateQuestion`, `DeleteQuestion`,
-`ShiftQuestionPositionsNegative`.
+Studies: `CreateStudy`, `GetStudy`, `ListStudiesByRegion` (`ORDER BY id ASC`).
+
+Surveys: `CreateSurvey`, `GetSurvey`, `ListSurveysByRegion` (all, for the CLI, `ORDER
+BY id ASC`), `ListActiveSurveysByRegion` (§2.4 predicate, `@now`), `UpdateSurvey`,
+`DeleteSurvey`, `CountResponsesForSurvey`.
+
+Questions: `ListQuestionsBySurvey` (`ORDER BY position ASC, id ASC`), `InsertQuestion`,
+`DeleteQuestionsForSurvey`.
 
 Responses: `CreateResponse`, `GetResponseByPublicID`, `UpdateResponseAnswers`,
 `ListResponsesBySurvey` (`ORDER BY created_at ASC, id ASC`).
 
-`sqlc.slice` expands to `IN (?, ?, …)` on SQLite and MySQL only; a Postgres adapter
-writes the same query as `= ANY(@ids)`. That is the one query that differs per engine,
-and it lives in the engine's own `queries/` directory by design (alerts spec §2.7).
+No batched `IN (…)` query: the list endpoint runs `ListQuestionsBySurvey` once per
+active survey inside one `ReadOnly` transaction (the `alertRepo.Feed` pattern). A
+region has a handful of active surveys, and per-survey queries keep every statement on
+named arguments (§2.16).
 
-### 3.3 Domain types (`internal/surveys`)
+### 3.4 Domain types (`internal/surveys`)
 
 ```go
 type Study struct {
@@ -445,7 +507,6 @@ type Survey struct {
     ShowOnMap, ShowOnStops  bool
     AlwaysVisible           bool
     AllowsMultipleResponses bool
-    RequireStopID           bool
     VisibleStopList         []string     // nil = everywhere; never empty
     VisibleRouteList        []string
     Questions               []Question   // position order
@@ -485,6 +546,19 @@ type Response struct {
     Answers                      []Answer
     CreatedAt, UpdatedAt         time.Time
 }
+
+// Definition is the authoring document of design spec 2.13.
+type Definition struct {
+    Name                    string
+    Available               bool
+    StartTime, EndTime      *time.Time
+    ShowOnMap, ShowOnStops  bool
+    AlwaysVisible           bool
+    AllowsMultipleResponses bool
+    VisibleStopList         []string
+    VisibleRouteList        []string
+    Questions               []QuestionDefinition // {Required bool; Content Content}
+}
 ```
 
 Pure functions, all unit-tested without a store:
@@ -496,29 +570,33 @@ Pure functions, all unit-tested without a store:
   external survey URL without scheme and host at open time — validating here means
   the author finds out, not the rider.)
 - `(Content) MarshalJSON` — the per-type key emission of §2.3.
+- `(Definition) Validate() error` — name non-blank, `ValidateWindow`, every question's
+  `Content.Validate()`, at least zero questions (an empty survey is legal; iOS skips
+  it client-side). Normalizes lists and forces `Required = false` on `label` /
+  `external_survey`.
 - `ValidateWindow(start, end *time.Time) error` — both or neither; `end > start`.
 - `NormalizeList([]string) []string` — trims, drops blanks, returns nil for empty.
-- `ParseAnswers(raw string) ([]Answer, error)` — §2.5, returning `ErrMalformedAnswers`.
+- `ParseAnswers(raw string) ([]Answer, error)` — §2.5; `ErrMalformedAnswers` or
+  `ErrTooManyAnswers`.
 - `MergeAnswers(stored, incoming []Answer) []Answer` — §2.6.
+- `QuestionsEqual(a, b []Question) bool` — the frozen-questions check of §2.13,
+  comparing order, `Required`, and `Content`.
 - `FormatTime(time.Time) string` — the `.000Z` wire format.
 
 The repository:
 
 ```go
 type Repository interface {
-    CreateStudy(ctx, NewStudy, now) (Study, error)
+    CreateStudy(ctx, regionID int64, name, description string, now) (Study, error)
     GetStudy(ctx, id) (Study, error)                          // ErrNotFound
     ListStudies(ctx, regionID) ([]Study, error)
-    UpdateStudy(ctx, id, StudyPatch, now) (Study, error)
-    DeleteStudy(ctx, id) error                                // ErrNotFound; ErrStudyNotEmpty
 
-    CreateSurvey(ctx, studyID, SurveyDefinition, now) (Survey, error)
+    CreateSurvey(ctx, studyID, Definition, now) (Survey, error) // ErrNotFound for study
     GetSurvey(ctx, id) (Survey, error)                        // with Questions and Study
     ListSurveys(ctx, regionID) ([]Survey, error)              // authoring; every survey
     ListActiveSurveys(ctx, regionID, now) ([]Survey, error)   // rider list; spec 7.1
-    UpdateSurvey(ctx, id, SurveyDefinition, now) (Survey, error) // question reconcile, 2.13
-    SetSurveyAvailable(ctx, id, available bool, now) error
-    DeleteSurvey(ctx, id) error
+    UpdateSurvey(ctx, id, Definition, now) (Survey, error)    // ErrQuestionsFrozen, 2.13
+    DeleteSurvey(ctx, id) error                               // ErrNotFound; ErrHasResponses
     CountResponses(ctx, surveyID) (int64, error)
 
     CreateResponse(ctx, NewResponse, now) (Response, error)   // ErrNotFound for survey
@@ -528,11 +606,9 @@ type Repository interface {
 }
 ```
 
-`SurveyDefinition` is the authoring document of §2.13 as a Go struct (questions carry
-an optional `ID`). `CreateSurvey`, `UpdateSurvey`, and `AmendResponse` each run in one
-`BEGIN IMMEDIATE` transaction in the SQLite adapter. `GetSurvey` / list calls populate
-`Study` and `Questions` with at most three queries per call (surveys, questions by
-survey ids, studies), never one per survey.
+`CreateSurvey`, `UpdateSurvey`, `DeleteSurvey`, and `AmendResponse` each run in one
+write transaction (immediate, per §3.2). `GetSurvey` and the list calls run in one
+`ReadOnly` transaction and populate `Study` and `Questions`.
 
 ## 4. HTTP
 
@@ -542,57 +618,64 @@ survey ids, studies), never one per survey.
 // Surveys backs the survey list and survey response endpoints (spec §7).
 // Nil means those routes are not registered.
 Surveys surveys.Repository
-// SurveyLimiter is the per-IP throttle on survey response writes (design
-// spec 2.9). NewRouter defaults it (60/minute); tests inject tighter ones.
+// SurveyLimiter is the per-source throttle on survey response writes
+// (design spec 2.9). NewRouter defaults it (60/minute); tests inject
+// tighter ones.
 SurveyLimiter *ratelimit.Limiter
 ```
 
 When `Surveys` is set, `Regions` and `Now` are required, checked at boot with the
 `missingDeps` panic the other blocks use. The seven routes of §2.1 are registered; the
-five write routes are wrapped in `throttleByIP(deps.SurveyLimiter, …)`.
+five write routes are wrapped in `throttleByIP(deps.SurveyLimiter, …)` sharing one
+limiter.
 
 ### 4.2 `GET …/surveys[.json]`
 
 1. `resolveRegion` — 404 `{"error": "Couldn't find Region"}` on an unknown or malformed
    segment.
 2. `user_id` from the query string, trimmed; blank → 422 `{"errors": ["user_id is required"]}`.
-3. `ListActiveSurveys(region.ID, deps.Now())`; a store error is the standard 500.
+3. `ListActiveSurveys(region.ID, deps.Now())`.
 4. Emit `{"surveys": [...], "region": {"id": region.ID, "name": region.Name}}`, with
    each survey rendered per §2.3. `surveys` is `[]`, never `null`, when empty.
 
-Response `Content-Type` is `application/json` — iOS rejects any other on this GET.
-
 ### 4.3 `POST /api/v1/survey_responses[/]`
 
-1. `parseRequestParams` with `requestBodyLimit`; a body error is 422 `{"errors": [msg]}`.
+1. `parseRequestParams` with `requestBodyLimit`. A size error is 422
+   `{"errors": ["request body too large"]}`; any other parse error is 422
+   `{"errors": ["request body is invalid"]}` — the parser's own text (which embeds
+   `encoding/json` internals) goes to the log, not the wire.
 2. `survey_id` via `params.int64`; absent or unparseable → 404 `Couldn't find Survey`
    without a store read. Otherwise `GetSurvey`; `ErrNotFound` → the same 404.
-3. Validate per §2.7, collecting every message; any → 422.
-4. `ParseAnswers`; error → 422.
-5. `securetoken.New()`; `CreateResponse`. → 201 `{"survey_response": {"id", "user_identifier", "update_path"}}`.
+3. Validate per §2.7 — including `ParseAnswers` — collecting every message; any → 422.
+4. `securetoken.New()`; error → 500.
+5. `CreateResponse`. → 201 `{"survey_response": {"id", "user_identifier", "update_path"}}`.
 
 ### 4.4 `POST|PUT|PATCH /api/v1/survey_responses/{responseId}`
 
-One handler for all three methods. Parse params; `responses` per §2.5 → 422 on error;
-`AmendResponse(publicID, answers, now)`; `ErrNotFound` → 404 `Couldn't find
-SurveyResponse`; `ErrTooManyAnswers` → 422; otherwise 200 with the same body shape as
-create. An empty `responses` array is a valid no-op amend that still returns 200 and
+One handler for all three methods. Parse params as in §4.3 step 1; `ParseAnswers` →
+422 on error; `AmendResponse(publicID, answers, now)`; `ErrNotFound` → 404 `Couldn't
+find SurveyResponse`; `ErrTooManyAnswers` → 422; otherwise 200 with the same body shape
+as create. An empty `responses` array is a valid no-op amend that still returns 200 and
 bumps `updated_at`.
 
-### 4.5 Error handling summary
+### 4.5 Error handling and logging
 
-| Condition | Status | Body |
-|---|---|---|
-| Unknown region on list | 404 | `{"error": "Couldn't find Region"}` |
-| Blank `user_id` | 422 | `{"errors": ["user_id is required"]}` |
-| Unknown/absent `survey_id` | 404 | `{"error": "Couldn't find Survey"}` |
-| Create validation | 422 | `{"errors": [...]}` per §2.7 |
-| Malformed `responses` | 422 | `{"errors": ["responses must be a JSON-encoded array of answer objects"]}` |
-| Answer cap exceeded | 422 | `{"errors": ["responses has too many answers"]}` |
-| Unknown `{responseId}` | 404 | `{"error": "Couldn't find SurveyResponse"}` |
-| Over the write throttle | 429 | empty |
-| Body over 64 KB | 422 | `{"errors": ["request body too large"]}` |
-| Store failure | 500 | `{"error": "internal server error"}` (existing helper) |
+| Condition | Status | Body | Log |
+|---|---|---|---|
+| Unknown region on list | 404 | `{"error": "Couldn't find Region"}` | none |
+| Blank `user_id` | 422 | `{"errors": ["user_id is required"]}` | none |
+| Unknown/absent `survey_id` | 404 | `{"error": "Couldn't find Survey"}` | none |
+| Create validation | 422 | `{"errors": [...]}` per §2.7 | `Info`, survey id + message count |
+| Malformed / oversized body | 422 | `{"errors": ["request body is invalid"]}` / `["request body too large"]` | `Info` with the parser's cause |
+| Answer cap exceeded | 422 | `{"errors": ["responses has too many answers"]}` | `Info`, survey id |
+| Unknown `{responseId}` | 404 | `{"error": "Couldn't find SurveyResponse"}` | none |
+| Over the write throttle | 429 | empty | none (existing behavior) |
+| Token generation or store failure | 500 | empty | `Error`, op name, region/survey id, wrapped cause (`writeServerError`) |
+
+Rider-facing 500s are bodyless through the existing `writeServerError`, like alerts,
+weather, push registrations, and alarms; `serverErrorJSON` is the admin contract and
+is not used here. No log line on any path includes `user_identifier`, a stop
+identifier, or an answer — only ids and counts.
 
 Writes use a new `writeErrors(w, logger, msgs)` helper for the `{"errors": [...]}`
 shape; `errorWithMessages` stays for the `{"error", "messages"}` shape.
@@ -604,23 +687,19 @@ New command families, dispatched beside `region`, `alert`, `migrate`, and `user`
 ```
 study  create    --region N --name S [--description S]      → "created study <id>"
 study  list      --region N
-study  edit      <id> [--name S] [--description S]
-study  delete    <id>                                        → refuses while surveys exist
 
 survey create    --study N --file <path|->                   → "created survey <id>"
 survey list      --region N                                   → id, study, name, available, window, responses
 survey show      <id>                                         → the document of 2.13, with id/timestamps/study
-survey edit      <id> --file <path|->                         → reconcile per 2.13
-survey activate  <id>  /  survey deactivate <id>
-survey delete    <id> [--force]                               → refuses while responses exist unless --force
-survey responses <id> [--csv]                                 → 2.14
+survey edit      <id> --file <path|->                         → 2.13; refuses question changes once responses exist
+survey delete    <id>                                         → refuses while responses exist
+survey responses <id>                                         → CSV, 2.14
 ```
 
 The document's `start_date` / `end_date` go through `parseInstant` with the study's
 region, so the naive-datetime rejection and the helpful timezone message carry over.
-`survey create`/`edit` validate the entire document — window, every question's
-`Content.Validate()`, `visible_*` normalization — before the first repository call, so a
-rejected document leaves nothing behind (the `alertCreate` rule).
+`survey create`/`edit` run `Definition.Validate()` before the first repository call, so
+a rejected document leaves nothing behind (the `alertCreate` rule).
 
 `survey list` prints `responses` as a count, which is the one number an agency asks
 for daily.
@@ -629,8 +708,8 @@ for daily.
 
 None. The limiter default is a constant; the routes register whenever the store is
 open, which is always in `cmd/sidecar`. `README.md` gets a "Surveys" section
-documenting the endpoints, the document format, and the CLI, mirroring the service
-alerts section.
+documenting the endpoints, the document format, the CLI, and the §2.9 proxy caveat,
+mirroring the service alerts section.
 
 ## 7. Packages
 
@@ -638,15 +717,16 @@ alerts section.
 |---|---|
 | `internal/surveys/surveys.go` | Domain types, `Repository`, errors |
 | `internal/surveys/content.go` | `Content` validation and wire marshalling |
-| `internal/surveys/answers.go` | `ParseAnswers`, `MergeAnswers`, the answer cap |
-| `internal/surveys/window.go` | `ValidateWindow`, `NormalizeList`, `FormatTime` |
+| `internal/surveys/answers.go` | `ParseAnswers`, `MergeAnswers`, `MaxAnswers` |
+| `internal/surveys/definition.go` | `Definition.Validate`, `ValidateWindow`, `NormalizeList`, `QuestionsEqual`, `FormatTime` |
+| `internal/store/sqlite/store.go` | `_txlock=immediate` in the DSN; `Surveys()` accessor |
 | `internal/store/sqlite/migrations/00006_surveys.sql` | Schema |
 | `internal/store/sqlite/queries/surveys.sql` | sqlc queries |
-| `internal/store/sqlite/surveys.go` | Adapter; transactions for create/edit/amend |
+| `internal/store/sqlite/surveys.go` | Adapter; transactions for create/edit/delete/amend |
 | `internal/store/storetest/surveytest.go` | Conformance suite |
 | `internal/httpapi/surveys.go` | List, create, amend handlers; `writeErrors` |
 | `internal/httpapi/router.go` | Deps and routes |
-| `cmd/sidecar-admin/studies.go`, `surveys.go` | CLI command families |
+| `cmd/sidecar-admin/surveys.go` | `study` and `survey` command families |
 | `cmd/sidecar/main.go` | `Deps.Surveys = store.Surveys()` |
 
 ## 8. Dependencies
@@ -656,7 +736,7 @@ None new. `encoding/csv` from the standard library for export.
 ## 9. Build order
 
 1. `internal/surveys` — pure functions and types, fully tested without a store.
-2. Migration, queries, `make generate`, adapter, conformance suite.
+2. DSN change, migration, queries, `make generate`, adapter, conformance suite.
 3. HTTP handlers and router wiring.
 4. CLI command families.
 5. `cmd/sidecar` wiring, README.
@@ -670,53 +750,63 @@ watch it fail on the intended assertion.
 **1 — Domain.** `Content.Validate` table: each type's required and forbidden keys, the
 blank-option case, the schemeless URL, the non-object `sdk_configuration_values`.
 `Content.MarshalJSON` table: the exact key set per type, compared as decoded
-`map[string]any` (never a golden string — `encoding/json` key order is stable but the
-point is the key set, not the bytes). `ParseAnswers`: the Android checkbox string
+`map[string]any` (never a golden string). `ParseAnswers`: the Android checkbox string
 `"[Bus, Train]"` and the iOS one both survive verbatim; numeric `answer` stringified;
 missing `answer` becomes `""`; non-integral `question_id` rejected; a native JSON array
-(not a string) rejected; duplicate ids last-wins. `MergeAnswers`: replace in place,
-append new, preserve order, stored unchanged when incoming is empty. `ValidateWindow`:
-half-set rejected, `end <= start` rejected. `NormalizeList`: blanks dropped, empty →
-nil. `FormatTime`: `.000Z` with a non-UTC input.
+(not a string) rejected; duplicate ids last-wins; 501 distinct ids →
+`ErrTooManyAnswers`. `MergeAnswers`: replace in place, append new, preserve order,
+stored unchanged when incoming is empty. `Definition.Validate`: half-set window,
+`end <= start`, blank name, `required` forced false on `label`. `NormalizeList`: blanks
+dropped, empty → nil. `QuestionsEqual`: order, `Required`, and each `Content` field.
+`FormatTime`: `.000Z` with a non-UTC input.
 
-**2 — Store.** Conformance suite: study/survey/question round trip including every
-boolean and both list columns as nil and populated; active filter at both inclusive
-boundaries, `available = false` excluded, unscheduled always included, other regions
-excluded, ordering by id; `UpdateSurvey` reconciliation — id kept on update, insert
-without id, delete when absent, reorder without a UNIQUE violation, foreign-survey id
-rejected; `DeleteStudy` refuses when non-empty; `CountResponses`; `CreateResponse` on
-an unknown survey → `ErrNotFound`; `AmendResponse` merge and `ErrNotFound`; the cap;
-**two concurrent `AmendResponse` calls on one row both land**; cascade survey → questions
-and responses; `end_time > 2^31` round trip; store content that fails to parse surfaces
-as an error from `GetSurvey`.
+**2 — Store.** Conformance suite, through the production `Open`: study/survey/question
+round trip including every boolean and both list columns as nil and populated;
+`study.description` default; active filter at both inclusive boundaries,
+`available = false` excluded, unscheduled always included, other regions excluded,
+ordering by id; `UpdateSurvey` replaces questions when no responses exist, refuses
+with `ErrQuestionsFrozen` when one does and the questions differ, accepts a
+scalar-only edit when they are identical; `DeleteSurvey` refuses with `ErrHasResponses`
+and cascades questions otherwise; `CountResponses`; `CreateResponse` on an unknown
+survey → `ErrNotFound`; `AmendResponse` merge, `ErrNotFound`, and the cap; **two
+concurrent `AmendResponse` calls on one row both succeed and both land** (mutation:
+remove `_txlock=immediate`); `end_time > 2^31` round trip; stored content that fails
+to parse surfaces as an error from `GetSurvey`.
 
 **3 — HTTP.** `httptest` against a real store. Every **client contract** line has a
 test named for it:
 
-- `.json` suffix and bare path both 200; trailing-slash and bare create both 201.
+- A router-table test asserting the seven patterns of §2.1 are registered (mutation:
+  remove `{$}`, watch the trailing-slash create 404).
+- `.json` suffix and bare path both 200 with `Content-Type: application/json`;
+  trailing-slash and bare create both 201.
 - Create via form body (the Android shape, including `stop_latitude=0.0` with no
   identifier) and via JSON body (the iOS shape, `responses` as a string).
-- Amend via `PUT`+JSON, `POST`+form, and `PATCH`; the amend ignores `user_identifier`
-  and `survey_id`.
+- The returned `update_path` is POSTed verbatim and amends that same response.
+- Amend via `PUT`+JSON, `POST`+form, and `PATCH`; an amend carrying `user_identifier`,
+  `survey_id`, and `stop_latitude=0.0&stop_longitude=0.0` changes none of them.
 - The list payload decodes into a struct that mirrors iOS's required-key set, with
   every required key asserted present and every boolean asserted literal; `study`
-  present; `visible_*` literal `null` when unset; dates match
-  `^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$`.
+  present with `description` as `""`; `visible_*` and `start_date`/`end_date` literal
+  `null` when unset; dates match `^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$`.
 - The per-type content key sets on the wire.
-- Every row of the §4.5 table, including region-404-before-user_id ordering.
-- The throttle: `429` after the injected limit; the list endpoint never throttled.
-- The iOS fixture `surveys_missing_optional_fields.json`'s *shape* is reproduced by
-  authoring an equivalent survey — the assertion is that our output decodes the same
-  way the fixture does, not byte equality.
-- No log line contains `user_identifier` or an answer (the alarms branch's
-  token-leak test pattern).
+- Every row of the §4.5 table, including region-404-before-user_id ordering, and one
+  create with a blank `user_identifier`, an identifier without coordinates, and
+  malformed `responses` asserting the full ordered `errors` array.
+- The throttle: exhaust the bucket with creates, then assert the **amend** route is
+  429 (one shared bucket); the list endpoint is never throttled.
+- Logging: force a store error (closed database) and a 422 on the create path,
+  assert the expected lines exist, then assert none contains the `user_identifier`,
+  stop identifier, or any answer text used in the request.
+- Authoring a survey equivalent to the iOS fixture `surveys_missing_optional_fields.json`
+  produces output that decodes into the same mirror struct the fixture does.
 
 **4 — CLI.** Temporary database through the `run` seam: study create → survey create
-from a document → appears in the rider list; `show | edit --file -` round trip keeps
-question ids; a document with a half-set window, a blank option, and a schemeless URL
-each rejected with nothing persisted; `delete` refusal and `--force`; `responses --csv`
-emits one row per answer with the header above and a response with no answers still
-emits a row; `study delete` refusal.
+from a document → appears in the rider list; `show | edit --file -` round trip; a
+document with a half-set window, a blank option, and a schemeless URL each rejected
+with nothing persisted; `edit` with changed questions refused once a response exists;
+`delete` refusal; `responses` emits one row per answer with the header above and a
+response with no answers still emits a row; a document with no `questions` key.
 
 **5 — Wiring.** `cmd/sidecar` boot test extends to assert the survey routes are
 registered (the existing router panic-guard test covers the missing-deps case).
