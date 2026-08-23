@@ -51,7 +51,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing command; expected region, alert, migrate, or user")
+		return errors.New("missing command; expected region, alert, study, survey, migrate, or user")
 	}
 
 	store, err := sqlite.Open(*dbPath)
@@ -86,12 +86,16 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 		return runRegion(ctx, stdout, store, *regionsURL, now, cmdArgs)
 	case "alert":
 		return runAlert(ctx, stdout, store, now, cmdArgs)
+	case "study":
+		return runStudy(ctx, stdout, store, now, cmdArgs)
+	case "survey":
+		return runSurvey(ctx, stdin, stdout, store, now, cmdArgs)
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
 	case "user":
 		return runUser(ctx, stdin, stdout, stderr, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown command %q; expected region, alert, migrate, or user", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, study, survey, migrate, or user", cmd)
 	}
 }
 
