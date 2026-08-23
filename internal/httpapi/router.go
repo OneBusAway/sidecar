@@ -12,11 +12,16 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/obaapi"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
+	"github.com/OneBusAway/sidecar/internal/ratelimit"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
 	"github.com/OneBusAway/sidecar/internal/weather"
@@ -44,6 +49,31 @@ type Deps struct {
 	// Weather backs the forecast endpoint. Nil means the route is not
 	// registered.
 	Weather *weather.Service
+
+	// PushRegs backs the push registration endpoints and the V2 alarm
+	// side-effect upsert. Nil means those routes are not registered.
+	PushRegs pushreg.Repository
+	// PushLimiter is the §2.6 throttle for the push_registrations path.
+	// NewRouter defaults it (30/minute per IP); tests inject tighter ones.
+	PushLimiter *ratelimit.Limiter
+
+	// FeedbackSecret, when non-empty, is the bearer token /webhooks/gorush
+	// requires. Empty keeps the endpoint open, because a deployment whose
+	// gorush cannot send a header must not lose its prune signal entirely --
+	// but an open endpoint is throttled instead (see below), since it deletes
+	// registrations across every region on a caller-supplied token.
+	FeedbackSecret string
+	// FeedbackLimiter bounds an unauthenticated /webhooks/gorush. NewRouter
+	// defaults it; it is unused when FeedbackSecret is set.
+	FeedbackLimiter *ratelimit.Limiter
+
+	// Alarms backs the alarm create/delete endpoints (spec §5.1-§5.2). Nil
+	// means those routes are not registered.
+	Alarms alarms.Repository
+	// OBA resolves the arrival/departure an alarm's creation-time message is
+	// composed from. Nil (or any lookup failure) degrades every alarm to the
+	// generic message rather than failing the create.
+	OBA obaapi.Client
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -126,6 +156,62 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
 	}
 
+	if deps.PushRegs != nil {
+		// The handlers deref Regions (resolveRegion) and Now on the first
+		// request; fail at boot, naming everything missing so the fix is one
+		// edit rather than three restarts, matching the Auth block below.
+		if missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.PushRegs is set")
+		}
+		if deps.PushLimiter == nil {
+			deps.PushLimiter = ratelimit.New(30, time.Minute)
+		}
+		ph := &pushRegsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/push_registrations",
+			throttleByIP(deps.PushLimiter, deps, ph.register))
+		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/push_registrations",
+			throttleByIP(deps.PushLimiter, deps, ph.unregister))
+		// gorush is our own infrastructure and throttling it would drop prune
+		// signals during a mass bounce -- but that argument only holds for a
+		// caller we can actually identify. With a shared secret configured
+		// the webhook runs unthrottled as intended; without one it is an
+		// unauthenticated endpoint that deletes a token's registrations in
+		// every region, so it gets a bucket of its own. That bucket is far
+		// looser than the push_registrations one: dropping a prune signal
+		// only delays a dead token to the 180-day sweep, so the limit exists
+		// to bound abuse, not to police normal volume.
+		fh := &feedbackHandler{deps: deps}
+		feedback := fh.receive
+		if deps.FeedbackSecret == "" {
+			if deps.FeedbackLimiter == nil {
+				deps.FeedbackLimiter = ratelimit.New(feedbackLimitPerMinute, time.Minute)
+			}
+			feedback = throttleByIP(deps.FeedbackLimiter, deps, feedback)
+		}
+		mux.HandleFunc("POST /webhooks/gorush", feedback)
+	}
+
+	if deps.Alarms != nil {
+		// The V2 side-effect upsert (spec §5.2) needs the registry, and the
+		// handlers deref Regions and Now; failing at boot beats a nil deref
+		// on the first alarm. Checked independently of the PushRegs block
+		// above rather than leaning on its guard: these are this block's own
+		// requirements, and the panic should say which one is missing.
+		if missing := missingDeps(map[string]bool{
+			"Deps.PushRegs": deps.PushRegs == nil, "Deps.Now": deps.Now == nil,
+			"Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Alarms is set")
+		}
+		ah := &alarmsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
+		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
+		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
+	}
+
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served
 	// unauthenticated (the login page is part of it) and must never pass
@@ -146,16 +232,10 @@ func NewRouter(deps Deps) http.Handler {
 	// there is still a stack trace worth reading, naming everything missing so
 	// the fix is one edit rather than three restarts.
 	if deps.Auth != nil {
-		var missing []string
-		if deps.Now == nil {
-			missing = append(missing, "Deps.Now")
-		}
-		if deps.Alerts == nil {
-			missing = append(missing, "Deps.Alerts")
-		}
-		if deps.Regions == nil {
-			missing = append(missing, "Deps.Regions")
-		}
+		missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Alerts": deps.Alerts == nil,
+			"Deps.Regions": deps.Regions == nil,
+		})
 		if len(missing) > 0 {
 			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
 		}
@@ -239,4 +319,17 @@ func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 		}
 		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
+}
+
+// missingDeps returns the names of the absent dependencies, sorted so the
+// panic message is stable across runs (Go map iteration order is not).
+func missingDeps(absent map[string]bool) []string {
+	var missing []string
+	for name, isAbsent := range absent {
+		if isAbsent {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }

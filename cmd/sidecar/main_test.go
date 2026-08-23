@@ -192,7 +192,7 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
 
 	if deps.FailDelay != 500*time.Millisecond {
 		t.Errorf("Deps.FailDelay = %v, want 500ms", deps.FailDelay)
@@ -215,7 +215,7 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
 
 	if deps.Auth == nil {
 		t.Error("Deps.Auth = nil, want store.Auth()")
@@ -234,6 +234,35 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	}
 }
 
+// TestBuildDeps_WiresPushAndAlarms covers the fields Task 14 adds.
+// httpapi.NewRouter's loud-panic contract (see router.go) requires
+// Deps.Now and Deps.Regions whenever Deps.PushRegs is set, and additionally
+// Deps.PushRegs whenever Deps.Alarms is set -- so a binary that wired
+// PushRegs or Alarms without the other, or without Now/Regions, would not
+// fail quietly; it would panic at router construction. Deps.OBA carries no
+// such guard: a nil OBA passes router construction silently and only shows
+// up per-request, in alarms.go's composeMessage degrading every alarm's
+// creation-time message to the generic copy -- no boot-time signal at all.
+// That gap is exactly why this test pins OBA as non-nil itself: nothing
+// else in this file checks that buildDeps shares the same obaapi.Client the
+// alarm scheduler in run() reads back off deps.OBA.
+func TestBuildDeps_WiresPushAndAlarms(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
+
+	if deps.PushRegs == nil {
+		t.Error("Deps.PushRegs = nil, want store.PushRegs()")
+	}
+	if deps.Alarms == nil {
+		t.Error("Deps.Alarms = nil, want store.Alarms()")
+	}
+	if deps.OBA == nil {
+		t.Error("Deps.OBA = nil, want the obaapi.Client shared with Deps.Vehicles")
+	}
+}
+
 // TestBuildDeps_WiresOBADefaultKeySet pins the one line in buildDeps nothing
 // else exercises: httpapi's own tests inject OBADefaultKeySet directly on
 // Deps, so a binary that deleted this assignment (or hard-coded it to
@@ -246,7 +275,7 @@ func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
 	t.Run("set when a key is configured", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "")
 		if !deps.OBADefaultKeySet {
 			t.Error("Deps.OBADefaultKeySet = false, want true when --oba-api-key is non-empty")
 		}
@@ -255,7 +284,7 @@ func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
 	t.Run("unset when no key is configured", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
 		if deps.OBADefaultKeySet {
 			t.Error("Deps.OBADefaultKeySet = true, want false when --oba-api-key is empty")
 		}
@@ -274,7 +303,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 	t.Run("Vehicles is always wired", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "")
 		if deps.Vehicles == nil {
 			t.Fatal("Deps.Vehicles = nil, want a *vehicles.Service")
 		}
@@ -284,7 +313,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "", "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "", "", "")
 		if !strings.Contains(buf.String(), "oba-api-key") {
 			t.Errorf("log output = %q, want a warning mentioning oba-api-key", buf.String())
 		}
@@ -294,9 +323,10 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		// A real pirate key too, so the weather warning this task adds can't
-		// contaminate an assertion scoped to the OBA-key warning.
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key", "a-real-pirate-key")
+		// Every optional setting supplied, so a warning about one of the
+		// others cannot contaminate an assertion scoped to the OBA-key one:
+		// this asserts a fully configured deployment is silent.
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key", "a-real-pirate-key", "a-real-secret")
 		if buf.Len() != 0 {
 			t.Errorf("log output = %q, want nothing logged when a key is configured", buf.String())
 		}
@@ -316,7 +346,7 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 	t.Run("Weather is always wired", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "some-pirate-key")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "some-pirate-key", "")
 		if deps.Weather == nil {
 			t.Fatal("Deps.Weather = nil, want a *weather.Service")
 		}
@@ -326,7 +356,7 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "", "")
 		if !strings.Contains(buf.String(), "pirate-weather-key") {
 			t.Errorf("log output = %q, want a warning mentioning pirate-weather-key", buf.String())
 		}
@@ -336,7 +366,7 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "a-real-pirate-key")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "a-real-pirate-key", "")
 		if strings.Contains(buf.String(), "pirate-weather-key") {
 			t.Errorf("log output = %q, want no pirate-weather-key warning when a key is configured", buf.String())
 		}

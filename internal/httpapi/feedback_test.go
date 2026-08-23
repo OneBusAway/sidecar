@@ -1,0 +1,459 @@
+package httpapi_test
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/OneBusAway/sidecar/internal/httpapi"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
+	"github.com/OneBusAway/sidecar/internal/ratelimit"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
+)
+
+// fakePushRepo wraps a real pushreg.Repository but allows test control over
+// the DeleteByToken method (to verify it was called and with what token).
+type fakePushRepo struct {
+	real                pushreg.Repository
+	deleteByTokenCalled bool
+	deleteByTokenToken  string
+	deleteByTokenErr    error
+}
+
+func (f *fakePushRepo) Get(ctx context.Context, regionID int64, token string) (pushreg.Registration, error) {
+	return f.real.Get(ctx, regionID, token)
+}
+
+func (f *fakePushRepo) Upsert(ctx context.Context, in pushreg.Upsert, now time.Time) error {
+	return f.real.Upsert(ctx, in, now)
+}
+
+func (f *fakePushRepo) Delete(ctx context.Context, regionID int64, token string) error {
+	return f.real.Delete(ctx, regionID, token)
+}
+
+func (f *fakePushRepo) DeleteByToken(ctx context.Context, token string) (int64, error) {
+	f.deleteByTokenCalled = true
+	f.deleteByTokenToken = token
+	if f.deleteByTokenErr != nil {
+		return 0, f.deleteByTokenErr
+	}
+	return f.real.DeleteByToken(ctx, token)
+}
+
+func (f *fakePushRepo) Prune(ctx context.Context, cutoff time.Time) (int64, error) {
+	return f.real.Prune(ctx, cutoff)
+}
+
+// feedbackRequest issues a POST to /webhooks/gorush with a JSON body.
+func feedbackRequest(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestFeedbackTerminalDeletesRegistration(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	realRegions := store.Regions()
+	realRepo := store.PushRegs()
+	fakeRepo := &fakePushRepo{real: realRepo}
+
+	// Seed regions
+	putRegion(t, realRegions, 1)
+	putRegion(t, realRegions, 2)
+
+	// Create router with fake repo
+	deps := httpapi.Deps{
+		PushRegs: fakeRepo,
+		Regions:  realRegions,
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// Seed registrations in multiple regions
+	if err := realRepo.Upsert(context.Background(), pushreg.Upsert{
+		RegionID:        1,
+		Token:           "tok1",
+		OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatalf("upsert to region 1: %v", err)
+	}
+	if err := realRepo.Upsert(context.Background(), pushreg.Upsert{
+		RegionID:        2,
+		Token:           "tok1",
+		OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatalf("upsert to region 2: %v", err)
+	}
+
+	// POST terminal error feedback
+	body := `{"type":"failed-push","platform":"ios","token":"tok1","error":"Unregistered"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify DeleteByToken was called
+	if !fakeRepo.deleteByTokenCalled {
+		t.Errorf("DeleteByToken was not called")
+	}
+	if fakeRepo.deleteByTokenToken != "tok1" {
+		t.Errorf("DeleteByToken called with token %q, want tok1", fakeRepo.deleteByTokenToken)
+	}
+
+	// Verify registrations are gone
+	if _, err := realRepo.Get(context.Background(), 1, "tok1"); err == nil {
+		t.Errorf("region 1: Get returned registration, want error")
+	}
+	if _, err := realRepo.Get(context.Background(), 2, "tok1"); err == nil {
+		t.Errorf("region 2: Get returned registration, want error")
+	}
+}
+
+func TestFeedbackTransientKeepsRegistration(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	realRepo := store.PushRegs()
+	fakeRepo := &fakePushRepo{real: realRepo}
+
+	deps := httpapi.Deps{
+		PushRegs: fakeRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// Seed registration
+	if err := realRepo.Upsert(context.Background(), pushreg.Upsert{
+		RegionID:        1,
+		Token:           "tok1",
+		OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// POST transient error feedback (ExpiredProviderToken is transient)
+	body := `{"type":"failed-push","platform":"ios","token":"tok1","error":"ExpiredProviderToken"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify DeleteByToken was NOT called (transient error)
+	if fakeRepo.deleteByTokenCalled {
+		t.Errorf("DeleteByToken was called for transient error")
+	}
+
+	// Verify registration still exists
+	_, err := realRepo.Get(context.Background(), 1, "tok1")
+	if err != nil {
+		t.Errorf("Get returned %v, want registration", err)
+	}
+}
+
+func TestFeedbackUnknownTokenIsOK(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	realRepo := store.PushRegs()
+	fakeRepo := &fakePushRepo{real: realRepo}
+
+	deps := httpapi.Deps{
+		PushRegs: fakeRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// POST terminal error for token that doesn't exist
+	body := `{"type":"failed-push","platform":"ios","token":"nonexistent","error":"Unregistered"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify DeleteByToken was still called (should be idempotent)
+	if !fakeRepo.deleteByTokenCalled {
+		t.Errorf("DeleteByToken was not called")
+	}
+}
+
+func TestFeedbackMalformedBodyIs400(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	fakeRepo := &fakePushRepo{real: store.PushRegs()}
+
+	deps := httpapi.Deps{
+		PushRegs: fakeRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// POST garbage JSON
+	body := `{this is not json`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFeedbackNeverLogsToken(t *testing.T) {
+	t.Parallel()
+	const token = "supersecrettoken-abc123"
+
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+
+	// Use a fake repo that returns an error containing the token
+	fakeRepo := &fakePushRepo{
+		real:             store.PushRegs(),
+		deleteByTokenErr: fmt.Errorf("database constraint failed for token %s", token),
+	}
+
+	var buf bytes.Buffer
+	deps := httpapi.Deps{
+		PushRegs: fakeRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// POST terminal error feedback
+	body := `{"type":"failed-push","platform":"ios","token":"` + token + `","error":"Unregistered"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+
+	logOutput := buf.String()
+	if strings.Contains(logOutput, token) {
+		t.Errorf("log output contains the raw token: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "[token]") {
+		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
+	}
+}
+
+func TestFeedbackSuccessLogNeverLogsToken(t *testing.T) {
+	t.Parallel()
+	const token = "supersecrettoken-abc123"
+
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	realRepo := store.PushRegs()
+
+	// Seed a real registration
+	if err := realRepo.Upsert(context.Background(), pushreg.Upsert{
+		RegionID:        1,
+		Token:           token,
+		OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Create router with logs captured to a buffer
+	var buf bytes.Buffer
+	deps := httpapi.Deps{
+		PushRegs: realRepo,
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	h := httpapi.NewRouter(deps)
+
+	// POST terminal error feedback for the real token
+	body := `{"type":"failed-push","platform":"ios","token":"` + token + `","error":"Unregistered"}`
+	rec := feedbackRequest(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the registration is gone
+	_, err := realRepo.Get(context.Background(), 1, token)
+	if err == nil {
+		t.Errorf("Get returned registration, want error (registration should be deleted)")
+	}
+
+	logOutput := buf.String()
+
+	// Verify the success log fired (contains the key phrase that proves the path was taken)
+	if !strings.Contains(logOutput, "pruned dead push token") {
+		t.Errorf("log output missing success log line: %s", logOutput)
+	}
+
+	// Verify the raw token does NOT appear in the logs
+	if strings.Contains(logOutput, token) {
+		t.Errorf("log output contains the raw token: %s", logOutput)
+	}
+
+	// Verify no attempt to log the token (this would appear as the token itself,
+	// not as [token], since we don't sanitize on the success path intentionally)
+	if strings.Contains(logOutput, "[token]") {
+		t.Errorf("log output should not contain [token] marker on success path, got: %s", logOutput)
+	}
+}
+
+// feedbackServerWithSecret builds a router whose gorush webhook requires the
+// given bearer token, plus the fake repo so a test can prove no delete ran.
+func feedbackServerWithSecret(t *testing.T, secret string) (http.Handler, *fakePushRepo) {
+	t.Helper()
+	store := sqlitetest.Open(t)
+	repo := &fakePushRepo{real: store.PushRegs()}
+	return httpapi.NewRouter(httpapi.Deps{
+		PushRegs:       repo,
+		Regions:        store.Regions(),
+		Now:            func() time.Time { return base },
+		Logger:         slog.New(slog.DiscardHandler),
+		FeedbackSecret: secret,
+	}), repo
+}
+
+// authedFeedbackRequest is feedbackRequest with an Authorization header.
+func authedFeedbackRequest(t *testing.T, h http.Handler, authorization, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestFeedbackSecretRequiredWhenConfigured pins the shared-secret gate. The
+// webhook deletes a token's registrations in every region on a caller-supplied
+// value, so an unauthorized caller must be turned away before the body is even
+// read -- otherwise the response distinguishes a token that exists from one
+// that does not.
+func TestFeedbackSecretRequiredWhenConfigured(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cr3t-value"
+	const body = `{"type":"failed-push","platform":"ios","token":"tok1","error":"Unregistered"}`
+
+	for _, tc := range []struct {
+		name       string
+		authHeader string
+		wantStatus int
+		wantDelete bool
+	}{
+		{"correct secret", "Bearer " + secret, http.StatusOK, true},
+		{"wrong secret", "Bearer nope", http.StatusUnauthorized, false},
+		{"no header at all", "", http.StatusUnauthorized, false},
+		// The prefix is optional on purpose: requiring it would add no
+		// security (the secret still has to match) while breaking a sender
+		// that can only set a raw header value.
+		{"right value, no Bearer prefix", secret, http.StatusOK, true},
+		{"prefix of the real secret", "Bearer s3cr3t", http.StatusUnauthorized, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, repo := feedbackServerWithSecret(t, secret)
+			rec := authedFeedbackRequest(t, h, tc.authHeader, body)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if repo.deleteByTokenCalled != tc.wantDelete {
+				t.Errorf("DeleteByToken called = %v, want %v", repo.deleteByTokenCalled, tc.wantDelete)
+			}
+		})
+	}
+}
+
+// TestFeedbackOpenWebhookIsThrottled pins the other half of the trade: with no
+// secret configured the endpoint stays open so a deployment whose gorush
+// cannot send a header keeps its prune signal, but it is no longer an
+// unmetered path to cross-region deletes.
+func TestFeedbackOpenWebhookIsThrottled(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs: store.PushRegs(),
+		Regions:  store.Regions(),
+		Now:      func() time.Time { return base },
+		Logger:   slog.New(slog.DiscardHandler),
+		// No FeedbackSecret: the open configuration.
+		FeedbackLimiter: ratelimit.New(2, time.Minute),
+	})
+
+	const body = `{"type":"failed-push","platform":"ios","token":"tok1","error":"Timeout"}`
+	post := func(port int) int {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// A fresh source port per request, as real ones have: the bucket
+		// keys on the host, so reusing one address would pass even against
+		// a limiter keyed on host:port.
+		req.RemoteAddr = fmt.Sprintf("1.2.3.4:%d", port)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for i, port := range []int{5001, 5002} {
+		if got := post(port); got != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i+1, got)
+		}
+	}
+	if got := post(5003); got != http.StatusTooManyRequests {
+		t.Errorf("third request: status = %d, want 429", got)
+	}
+	// A different host keeps its own budget.
+	if got := post2(t, h, "9.9.9.9:5001", body); got != http.StatusOK {
+		t.Errorf("other IP: status = %d, want 200", got)
+	}
+}
+
+func post2(t *testing.T, h http.Handler, addr, body string) int {
+	t.Helper()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = addr
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestFeedbackAuthenticatedWebhookIsNotThrottled pins the reason the secret
+// exists. gorush reports one failure per dead token, so a mass uninstall
+// arrives as a burst; throttling a caller we have already authenticated would
+// drop those prune signals for no security gain. The limiter injected here is
+// deliberately tiny, so this asserts the routing decision -- no bucket at all
+// on the authenticated path -- rather than that the default bucket happens to
+// be roomy enough.
+func TestFeedbackAuthenticatedWebhookIsNotThrottled(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cr3t-value"
+	store := sqlitetest.Open(t)
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs:        store.PushRegs(),
+		Regions:         store.Regions(),
+		Now:             func() time.Time { return base },
+		Logger:          slog.New(slog.DiscardHandler),
+		FeedbackSecret:  secret,
+		FeedbackLimiter: ratelimit.New(2, time.Minute),
+	})
+
+	for i := range 5 {
+		body := fmt.Sprintf(`{"type":"failed-push","platform":"ios","token":"tok%d","error":"Unregistered"}`, i)
+		if got := authedFeedbackRequest(t, h, "Bearer "+secret, body).Code; got != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 (an authenticated webhook must never be throttled)", i, got)
+		}
+	}
+}

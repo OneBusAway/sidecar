@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,12 @@ import (
 // key, so no request was attempted.
 var ErrNotConfigured = errors.New("obaapi: region has no API key")
 
+// ErrNotFound means the OBA server answered but knows nothing about this
+// trip/stop/date combination -- the alarm-reaper's "trip aged out" signal,
+// distinct from transient transport failures which must NOT count toward
+// the 3-strike streak (spec §5.3).
+var ErrNotFound = errors.New("obaapi: arrival-and-departure not found")
+
 // Agency is one transit agency with coverage in a region.
 type Agency struct {
 	ID   string
@@ -42,6 +49,24 @@ type Vehicle struct {
 	VehicleID  string
 }
 
+// DepartureQuery keys one arrival-and-departure-for-stop lookup (§5.3).
+type DepartureQuery struct {
+	StopID       string
+	TripID       string
+	ServiceDate  int64  // epoch ms
+	VehicleID    string // "" = omit
+	StopSequence *int64 // nil = omit
+}
+
+// Departure is the slice of the OBA response alarms need.
+type Departure struct {
+	RouteShortName         string
+	TripHeadsign           string
+	ScheduledDepartureTime int64 // epoch ms
+	PredictedDepartureTime int64 // epoch ms; 0 = no realtime
+	Predicted              bool
+}
+
 // Client reads the OBA REST API for one region at a time. Implementations
 // must be safe for concurrent use.
 type Client interface {
@@ -49,6 +74,12 @@ type Client interface {
 	// coverage in the region, in agencies-with-coverage order then each
 	// agency's own response order.
 	Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error)
+
+	// ArrivalAndDeparture looks up one trip's arrival/departure at a stop.
+	// It returns ErrNotFound when the upstream knows nothing about the
+	// trip/stop/date combination, and ErrNotConfigured when the region has
+	// no API key.
+	ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error)
 }
 
 const (
@@ -72,6 +103,18 @@ type client struct {
 	defaultKey string
 	http       *http.Client
 	logger     *slog.Logger
+
+	// sdks memoizes one *oba.Client per (base URL, key) pair. oba.NewClient
+	// builds out the SDK's full set of sub-service structs, and
+	// ArrivalAndDeparture calls sdkFor on every invocation -- once per
+	// pending alarm on the scheduler's 60-second sweep -- so without this a
+	// region with N alarms rebuilds N identical clients every cycle. Fleet
+	// already builds one and shares it across its agency fan-out; this gives
+	// the per-alarm path the same treatment. The key is part of the cache
+	// key, so a rotated API key lands on a fresh entry instead of serving a
+	// stale client.
+	sdkMu sync.Mutex
+	sdks  map[string]*oba.Client // cacheKey -> client
 }
 
 // New builds a Client. defaultKey is the process-wide fallback used for any
@@ -82,16 +125,33 @@ func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client
 	}
 	// The key travels in the query string, so a followed redirect would leak
 	// it to the redirect target via Referer; see httpx.NoRedirectClient.
-	return &client{defaultKey: defaultKey, http: httpx.NoRedirectClient(httpClient), logger: logger}
+	return &client{
+		defaultKey: defaultKey,
+		http:       httpx.NoRedirectClient(httpClient),
+		logger:     logger,
+		sdks:       make(map[string]*oba.Client),
+	}
 }
 
-func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {
+// sdkFor resolves the region's API key (falling back to the process-wide
+// default) and builds an SDK client for its OBA server. ErrNotConfigured
+// when neither source supplies a key; no request is attempted.
+func (c *client) sdkFor(region regions.Region) (*oba.Client, error) {
 	key := region.OBAAPIKey
 	if key == "" {
 		key = c.defaultKey
 	}
 	if key == "" {
 		return nil, ErrNotConfigured
+	}
+	// NUL separates the fields so no base URL and key pair can collide with
+	// a different pair by concatenation.
+	cacheKey := region.OBABaseURL + "\x00" + key
+	c.sdkMu.Lock()
+	cached, ok := c.sdks[cacheKey]
+	c.sdkMu.Unlock()
+	if ok {
+		return cached, nil
 	}
 
 	sdk := oba.NewClient(
@@ -101,6 +161,24 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 		option.WithRequestTimeout(perRequestTimeout),
 		option.WithMaxRetries(maxRetries),
 	)
+
+	c.sdkMu.Lock()
+	defer c.sdkMu.Unlock()
+	// Re-check under the lock: two goroutines racing the same first lookup
+	// must end up sharing one client, so the loser adopts the winner's
+	// rather than overwriting it.
+	if existing, ok := c.sdks[cacheKey]; ok {
+		return existing, nil
+	}
+	c.sdks[cacheKey] = sdk
+	return sdk, nil
+}
+
+func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return nil, err
+	}
 
 	agencies, err := c.agencies(ctx, sdk)
 	if err != nil {
@@ -136,6 +214,12 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 				}
 				return fmt.Errorf("obaapi: vehicles for agency %s in region %d: %w",
 					agency.ID, region.ID, redact(err))
+			}
+			// The 200-null-body shape guarded in ArrivalAndDeparture (a
+			// nil response with a nil error) would panic here too; treat
+			// it as an empty feed for this agency.
+			if list == nil {
+				return nil
 			}
 			out := make([]Vehicle, 0, len(list.Data.List))
 			for _, v := range list.Data.List {
@@ -177,6 +261,68 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	return fleet, nil
 }
 
+func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return Departure{}, err
+	}
+
+	params := oba.ArrivalAndDepartureGetParams{
+		TripID:      oba.F(q.TripID),
+		ServiceDate: oba.F(q.ServiceDate),
+	}
+	if q.VehicleID != "" {
+		params.VehicleID = oba.F(q.VehicleID)
+	}
+	if q.StopSequence != nil {
+		params.StopSequence = oba.F(*q.StopSequence)
+	}
+
+	resp, err := sdk.ArrivalAndDeparture.Get(ctx, q.StopID, params)
+	if err != nil {
+		// A 404 is the upstream's "no such trip at this stop/date" -- the
+		// signal §5.3's reaper counts. Everything else stays a redacted
+		// transient error the caller must not count.
+		if statusOf(err) == http.StatusNotFound {
+			return Departure{}, ErrNotFound
+		}
+		return Departure{}, fmt.Errorf("obaapi: arrival-and-departure in region %d: %w", region.ID, redact(err))
+	}
+
+	// The live Puget Sound server answers an unknown trip/service-date with
+	// HTTP 200 and the literal body `null`; encoding/json unmarshals that
+	// into a nil response pointer with a nil error, so this check must come
+	// before any field access or the lookup panics.
+	if resp == nil {
+		return Departure{}, ErrNotFound
+	}
+	entry := resp.Data.Entry
+	if entry.TripID == "" {
+		// A 200 with an empty entry is the same "nothing here" as a 404.
+		return Departure{}, ErrNotFound
+	}
+
+	shortName := entry.RouteShortName
+	if shortName == "" {
+		for _, route := range resp.Data.References.Routes {
+			if route.ID == entry.RouteID {
+				shortName = route.ShortName
+				if shortName == "" {
+					shortName = route.LongName
+				}
+				break
+			}
+		}
+	}
+	return Departure{
+		RouteShortName:         shortName,
+		TripHeadsign:           entry.TripHeadsign,
+		ScheduledDepartureTime: entry.ScheduledDepartureTime,
+		PredictedDepartureTime: entry.PredictedDepartureTime,
+		Predicted:              entry.Predicted,
+	}, nil
+}
+
 // agencies fetches the region's agencies. Names live in the response's
 // references block rather than on the list entries (which carry only ids and
 // bounding boxes), so one call yields both.
@@ -184,6 +330,11 @@ func (c *client) agencies(ctx context.Context, sdk *oba.Client) ([]Agency, error
 	resp, err := sdk.AgenciesWithCoverage.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("obaapi: agencies with coverage: %w", redact(err))
+	}
+	// See ArrivalAndDeparture: a 200 with a literal null body decodes to a
+	// nil response with a nil error. No agencies is the honest reading.
+	if resp == nil {
+		return nil, nil
 	}
 
 	names := make(map[string]string, len(resp.Data.References.Agencies))

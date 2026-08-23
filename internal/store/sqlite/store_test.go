@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
@@ -72,17 +74,42 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
 		}
 	}
+}
 
-	// Every timestamp is epoch seconds in an INTEGER column, never DATETIME or
-	// TEXT. Nothing else in the suite can hold this: SQLite's dynamic typing
-	// round-trips an int64 unchanged through a TEXT- or DATETIME-declared
-	// column, so the storetest conformance suite stays green against a
-	// mis-declared schema and cannot be the check. Reading the declared types
-	// back out of the catalog is the only assertion that bites, and it is
-	// engine-specific, which is why it lives here rather than in storetest.
+// TestMigrateDeclaresTimeColumnsAsInteger pins the declared type of every
+// column the migrations use to hold a time value -- epoch seconds everywhere
+// except alarms.service_date, which is epoch milliseconds. All of them are
+// INTEGER, never DATETIME or TEXT.
+//
+// Nothing else in the suite can hold this: SQLite's dynamic typing round-trips
+// an int64 unchanged through a TEXT- or DATETIME-declared column, so every
+// storetest conformance suite stays green against a mis-declared schema and
+// cannot be the check. Reading the declared types back out of the catalog is
+// the only assertion that bites, and it is engine-specific, which is why it
+// lives here rather than in storetest.
+//
+// Every table in the schema is listed. A new table with a time column and no
+// entry here is unpinned, so add it when you add the migration.
+func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
+	t.Parallel()
+
+	path, _ := sqlitetest.OpenAt(t)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
 	wantIntegerColumns := map[string][]string{
-		"users":    {"created_at", "updated_at"},
-		"sessions": {"created_at", "expires_at"},
+		"regions":            {"synced_at", "created_at", "updated_at"},
+		"alerts":             {"start_time", "end_time", "created_at", "updated_at"},
+		"alert_translations": {"created_at", "updated_at"},
+		"users":              {"created_at", "updated_at"},
+		"sessions":           {"created_at", "expires_at"},
+		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
+		"alarms":             {"service_date", "created_at", "updated_at"},
 	}
 	for table, columns := range wantIntegerColumns {
 		types, err := columnTypes(ctx, db, table)
@@ -96,7 +123,7 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 				continue
 			}
 			if got != "INTEGER" {
-				t.Errorf("%s.%s declared type = %q, want INTEGER (epoch seconds, never DATETIME/TEXT)", table, column, got)
+				t.Errorf("%s.%s declared type = %q, want INTEGER (never DATETIME/TEXT)", table, column, got)
 			}
 		}
 	}
@@ -326,5 +353,29 @@ func TestAuthRepositoryConformance(t *testing.T) {
 	storetest.RunAuthRepository(t, func(t *testing.T) auth.Repository {
 		t.Helper()
 		return sqlitetest.Open(t).Auth()
+	})
+}
+
+// TestPushRegistrationConformance runs the shared push registration
+// conformance suite against the SQLite adapter. When a Postgres adapter is
+// added, it runs the same suite unchanged to prove behavioral equivalence.
+func TestPushRegistrationConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunPushRegistrationRepository(t, func(t *testing.T) (pushreg.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.PushRegs(), s.Regions()
+	})
+}
+
+// TestAlarmConformance runs the shared alarm conformance suite against the
+// SQLite adapter. When a Postgres adapter is added, it runs the same suite
+// unchanged to prove behavioral equivalence.
+func TestAlarmConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
+		s := sqlitetest.Open(t)
+		return s.Alarms(), s.Regions()
 	})
 }

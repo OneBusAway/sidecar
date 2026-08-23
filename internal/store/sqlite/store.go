@@ -1,8 +1,10 @@
-// Package sqlite is the SQLite adapter for the alerts, regions, and auth
-// repositories. It maps generated sqlc rows to the domain types defined in
-// internal/alerts, internal/regions, and internal/auth — nothing outside this
-// package ever sees a gen.* struct, which is what lets a Postgres adapter
-// satisfy the same interfaces later without touching any other package.
+// Package sqlite is the SQLite adapter for the alerts, regions, auth,
+// alarms, and push registration repositories. It maps generated sqlc rows
+// to the domain types defined in internal/alerts, internal/regions,
+// internal/auth, internal/alarms, and internal/pushreg — nothing outside
+// this package ever sees a gen.* struct, which is what lets a Postgres
+// adapter satisfy the same interfaces later without touching any other
+// package.
 package sqlite
 
 import (
@@ -16,8 +18,10 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
@@ -44,8 +48,9 @@ func configureGoose() error {
 	return gooseConfigureErr
 }
 
-// Store owns the database connection pool and hands out the three
-// repositories: alerts, regions, and auth. It is safe for concurrent use.
+// Store owns the database connection pool and hands out the five
+// repositories: alerts, regions, auth, alarms, and push registrations. It
+// is safe for concurrent use.
 type Store struct {
 	db *sql.DB
 	q  *gen.Queries
@@ -131,6 +136,16 @@ func (s *Store) Regions() regions.Repository {
 // Auth returns the auth.Repository backed by this store.
 func (s *Store) Auth() auth.Repository {
 	return &authRepo{db: s.db, q: s.q}
+}
+
+// PushRegs returns the pushreg.Repository backed by this store.
+func (s *Store) PushRegs() pushreg.Repository {
+	return &pushRegRepo{db: s.db, q: s.q}
+}
+
+// Alarms returns the alarms.Repository backed by this store.
+func (s *Store) Alarms() alarms.Repository {
+	return &alarmRepo{q: s.q}
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in
