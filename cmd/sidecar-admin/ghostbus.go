@@ -159,12 +159,12 @@ func ghostBusRow(r ghostbus.Report, loc *time.Location, tripCounts map[[2]any]in
 		ghostBusInt64Cell(r.ScheduleDeviationMinutes),
 		ghostBusMsToUTC(r.PredictionLastUpdatedAt),
 		ghostBusStalenessCell(r.ScheduledArrivalAt, r.PredictionLastUpdatedAt),
-		ghostBusFloatCell(r.UserLatitude),
-		ghostBusFloatCell(r.UserLongitude),
+		floatCell(r.UserLatitude),
+		floatCell(r.UserLongitude),
 		csvCell(r.SnapshotStatus),
 		ghostBusTimeCell(r.SnapshotCapturedAt),
-		ghostBusFloatCell(vehLat),
-		ghostBusFloatCell(vehLon),
+		floatCell(vehLat),
+		floatCell(vehLon),
 		distance,
 		csvCell(snap.Status.Phase),
 		csvCell(r.SnapshotJSON),
@@ -190,13 +190,6 @@ func ghostBusInt64Cell(v *int64) string {
 		return ""
 	}
 	return strconv.FormatInt(*v, 10)
-}
-
-func ghostBusFloatCell(v *float64) string {
-	if v == nil {
-		return ""
-	}
-	return strconv.FormatFloat(*v, 'f', -1, 64)
 }
 
 func ghostBusBoolCell(v *bool) string {

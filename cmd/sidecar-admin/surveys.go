@@ -363,6 +363,17 @@ func csvCell(s string) string {
 	}
 }
 
+// floatCell renders an optional float64 CSV cell: blank when absent, else
+// the shortest decimal that round-trips exactly. Shared by every CSV export
+// with a nullable coordinate or measurement column (survey responses, ghost
+// bus reports).
+func floatCell(v *float64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*v, 'f', -1, 64)
+}
+
 // surveyResponses writes long-format CSV: one row per answer, so no answer
 // to a since-deleted question is lost and the sheet pivots cleanly; a
 // response with no answers still gets a row so abandoned submissions are
@@ -383,12 +394,6 @@ func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store,
 	if err := w.Write([]string{"response_id", "user_identifier", "stop_identifier", "stop_latitude", "stop_longitude",
 		"created_at", "updated_at", "question_id", "question_type", "question_label", "answer"}); err != nil {
 		return err
-	}
-	floatCell := func(v *float64) string {
-		if v == nil {
-			return ""
-		}
-		return strconv.FormatFloat(*v, 'f', -1, 64)
 	}
 	for _, r := range list {
 		// The public id is server-minted, but its URL-safe base64 alphabet
