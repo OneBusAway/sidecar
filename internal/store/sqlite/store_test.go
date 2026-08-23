@@ -110,6 +110,10 @@ func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
 		"sessions":           {"created_at", "expires_at"},
 		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
 		"alarms":             {"service_date", "created_at", "updated_at"},
+		"studies":            {"created_at", "updated_at"},
+		"surveys":            {"start_time", "end_time", "created_at", "updated_at"},
+		"survey_questions":   {"created_at", "updated_at"},
+		"survey_responses":   {"created_at", "updated_at"},
 	}
 	for table, columns := range wantIntegerColumns {
 		types, err := columnTypes(ctx, db, table)

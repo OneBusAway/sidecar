@@ -95,6 +95,56 @@ type Session struct {
 	ExpiresAt int64
 }
 
+type Study struct {
+	ID          int64
+	RegionID    int64
+	Name        string
+	Description string
+	CreatedAt   int64
+	UpdatedAt   int64
+}
+
+type Survey struct {
+	ID                      int64
+	StudyID                 int64
+	Name                    string
+	Available               bool
+	StartTime               sql.NullInt64
+	EndTime                 sql.NullInt64
+	ShowOnMap               bool
+	ShowOnStops             bool
+	AlwaysVisible           bool
+	AllowsMultipleResponses bool
+	VisibleStopList         sql.NullString
+	VisibleRouteList        sql.NullString
+	CreatedAt               int64
+	UpdatedAt               int64
+}
+
+type SurveyQuestion struct {
+	ID           int64
+	SurveyID     int64
+	Position     int64
+	Required     bool
+	QuestionType string
+	Content      string
+	CreatedAt    int64
+	UpdatedAt    int64
+}
+
+type SurveyResponse struct {
+	ID             int64
+	SurveyID       int64
+	PublicID       string
+	UserIdentifier string
+	StopIdentifier sql.NullString
+	StopLatitude   sql.NullFloat64
+	StopLongitude  sql.NullFloat64
+	Answers        string
+	CreatedAt      int64
+	UpdatedAt      int64
+}
+
 type User struct {
 	ID           int64
 	Username     string

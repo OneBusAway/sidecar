@@ -63,8 +63,14 @@ type Store struct {
 //	_pragma=foreign_keys(ON)    SQLite disables FK enforcement by default,
 //	                            without which ON DELETE CASCADE silently
 //	                            does nothing
+//	_txlock=immediate           every write transaction takes the lock at
+//	                            BEGIN, so two read-modify-writes wait on
+//	                            busy_timeout instead of the second failing
+//	                            with SQLITE_BUSY_SNAPSHOT on its first write
+//	                            (design spec surveys 2.6); ReadOnly
+//	                            transactions are unaffected (modernc tx.go)
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
