@@ -189,58 +189,19 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var msgs []string
-	userID, _ := p.str("user_identifier")
-	switch {
-	case userID == "":
-		msgs = append(msgs, "User identifier can't be blank")
-	case len(userID) > maxIdentifierLen:
-		msgs = append(msgs, fmt.Sprintf("User identifier is too long (maximum is %d characters)", maxIdentifierLen))
-	}
-	stopID, _ := p.str("stop_identifier")
-	if len(stopID) > maxIdentifierLen {
-		msgs = append(msgs, fmt.Sprintf("Stop identifier is too long (maximum is %d characters)", maxIdentifierLen))
-	}
-	lat, latPresent, latValid := coordinate(p, "stop_latitude", 90)
-	lon, lonPresent, lonValid := coordinate(p, "stop_longitude", 180)
-	// Android sends 0.0/0.0 with no identifier on every submission; only an
-	// identifier without coordinates is an error (surveys design spec §2.7).
-	// A present-but-unparseable coordinate is always "invalid", whether or
-	// not stop_identifier is present -- "blank" is reserved for absent.
-	if stopID != "" && !latPresent {
-		msgs = append(msgs, "Stop latitude can't be blank")
-	}
-	if stopID != "" && !lonPresent {
-		msgs = append(msgs, "Stop longitude can't be blank")
-	}
-	if latPresent && !latValid {
-		msgs = append(msgs, "Stop latitude is invalid")
-	}
-	if lonPresent && !lonValid {
-		msgs = append(msgs, "Stop longitude is invalid")
-	}
-	raw, hasRaw := p.rawString("responses")
-	var answers []surveys.Answer
-	if !hasRaw {
-		msgs = append(msgs, surveys.ErrMalformedAnswers.Error())
-	} else if answers, err = surveys.ParseAnswers(raw); err != nil {
-		msgs = append(msgs, err.Error())
-	}
+	in, msgs := validateResponseParams(p)
 	if len(msgs) > 0 {
 		h.deps.Logger.Info("httpapi: rejected survey response", "survey_id", survey.ID, "messages", len(msgs))
 		writeErrors(w, h.deps.Logger, msgs)
 		return
 	}
 
-	publicID, err := securetoken.New()
-	if err != nil {
+	in.SurveyID = survey.ID
+	if in.PublicID, err = securetoken.New(); err != nil {
 		writeServerError(w, h.deps.Logger, 0, "mint survey response id", err)
 		return
 	}
-	resp, err := h.deps.Surveys.CreateResponse(r.Context(), surveys.NewResponse{
-		SurveyID: survey.ID, PublicID: publicID, UserIdentifier: userID,
-		StopIdentifier: stopID, StopLatitude: lat, StopLongitude: lon, Answers: answers,
-	}, h.deps.Now())
+	resp, err := h.deps.Surveys.CreateResponse(r.Context(), in, h.deps.Now())
 	if err != nil {
 		if errors.Is(err, surveys.ErrNotFound) {
 			writeJSONError(w, h.deps.Logger, http.StatusNotFound, surveyNotFoundBody)
@@ -254,6 +215,52 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, h.deps.Logger, http.StatusCreated, responseBody(resp))
+}
+
+// validateResponseParams reads the rider-supplied fields of a new response
+// and collects every validation message in the spec's order. SurveyID and
+// PublicID are left for the caller.
+func validateResponseParams(p params) (in surveys.NewResponse, msgs []string) {
+	in.UserIdentifier, _ = p.str("user_identifier")
+	switch {
+	case in.UserIdentifier == "":
+		msgs = append(msgs, "User identifier can't be blank")
+	case len(in.UserIdentifier) > maxIdentifierLen:
+		msgs = append(msgs, fmt.Sprintf("User identifier is too long (maximum is %d characters)", maxIdentifierLen))
+	}
+	in.StopIdentifier, _ = p.str("stop_identifier")
+	if len(in.StopIdentifier) > maxIdentifierLen {
+		msgs = append(msgs, fmt.Sprintf("Stop identifier is too long (maximum is %d characters)", maxIdentifierLen))
+	}
+	var latPresent, latValid, lonPresent, lonValid bool
+	in.StopLatitude, latPresent, latValid = coordinate(p, "stop_latitude", 90)
+	in.StopLongitude, lonPresent, lonValid = coordinate(p, "stop_longitude", 180)
+	// Android sends 0.0/0.0 with no identifier on every submission; only an
+	// identifier without coordinates is an error (surveys design spec §2.7).
+	// A present-but-unparseable coordinate is always "invalid", whether or
+	// not stop_identifier is present -- "blank" is reserved for absent.
+	if in.StopIdentifier != "" && !latPresent {
+		msgs = append(msgs, "Stop latitude can't be blank")
+	}
+	if in.StopIdentifier != "" && !lonPresent {
+		msgs = append(msgs, "Stop longitude can't be blank")
+	}
+	if latPresent && !latValid {
+		msgs = append(msgs, "Stop latitude is invalid")
+	}
+	if lonPresent && !lonValid {
+		msgs = append(msgs, "Stop longitude is invalid")
+	}
+	raw, hasRaw := p.rawString("responses")
+	if !hasRaw {
+		msgs = append(msgs, surveys.ErrMalformedAnswers.Error())
+		return in, msgs
+	}
+	var err error
+	if in.Answers, err = surveys.ParseAnswers(raw); err != nil {
+		msgs = append(msgs, err.Error())
+	}
+	return in, msgs
 }
 
 // amend serves POST|PUT|PATCH /api/v1/survey_responses/{responseId}: the

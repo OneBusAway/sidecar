@@ -48,33 +48,49 @@ func (c Content) Validate() error {
 	if strings.TrimSpace(c.LabelText) == "" {
 		return errors.New("question label_text cannot be blank")
 	}
-	if isSelectable(c.Type) {
-		if len(c.Options) == 0 {
-			return fmt.Errorf("%s question needs at least one option", c.Type)
-		}
-		for _, o := range c.Options {
-			if strings.TrimSpace(o) == "" {
-				return fmt.Errorf("%s question has a blank option", c.Type)
-			}
-		}
-	} else if len(c.Options) > 0 {
-		return fmt.Errorf("%s question cannot have options", c.Type)
+	if err := c.validateOptions(); err != nil {
+		return err
 	}
 	if c.Type == TypeExternalSurvey {
-		u, err := url.Parse(c.URL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return errors.New("external_survey url must be an absolute http(s) URL")
-		}
-		if len(c.SDKConfigurationValues) > 0 {
-			trimmed := bytes.TrimSpace(c.SDKConfigurationValues)
-			if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
-				return errors.New("external_survey sdk_configuration_values must be a JSON object")
-			}
-		}
-		return nil
+		return c.validateExternalSurvey()
 	}
 	if c.URL != "" || c.SurveyProvider != "" || len(c.EmbeddedDataFields) > 0 || len(c.SDKConfigurationValues) > 0 {
 		return fmt.Errorf("%s question cannot have url, survey_provider, embedded_data_fields, or sdk_configuration_values", c.Type)
+	}
+	return nil
+}
+
+// validateOptions requires options on radio/checkbox and forbids them on
+// every other type.
+func (c Content) validateOptions() error {
+	if !isSelectable(c.Type) {
+		if len(c.Options) > 0 {
+			return fmt.Errorf("%s question cannot have options", c.Type)
+		}
+		return nil
+	}
+	if len(c.Options) == 0 {
+		return fmt.Errorf("%s question needs at least one option", c.Type)
+	}
+	for _, o := range c.Options {
+		if strings.TrimSpace(o) == "" {
+			return fmt.Errorf("%s question has a blank option", c.Type)
+		}
+	}
+	return nil
+}
+
+// validateExternalSurvey checks the fields only external_survey carries.
+func (c Content) validateExternalSurvey() error {
+	u, err := url.Parse(c.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("external_survey url must be an absolute http(s) URL")
+	}
+	if len(c.SDKConfigurationValues) > 0 {
+		trimmed := bytes.TrimSpace(c.SDKConfigurationValues)
+		if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
+			return errors.New("external_survey sdk_configuration_values must be a JSON object")
+		}
 	}
 	return nil
 }

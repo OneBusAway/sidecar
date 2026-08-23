@@ -14,6 +14,13 @@ import (
 
 type newSurveyStoreFunc func(*testing.T) (surveys.Repository, regions.Repository)
 
+const (
+	deviceID        = "device-1"
+	responseID      = "resp-1"
+	errWantNotFound = "err = %v, want ErrNotFound"
+	timestampsFmt   = "timestamps = %v / %v"
+)
+
 // RunSurveyRepository exercises a surveys.Repository against the behavioral
 // contract both engines must satisfy. Each subtest gets a fresh store.
 func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
@@ -110,7 +117,7 @@ func testStudyCreateGetList(t *testing.T, newStore newSurveyStoreFunc) {
 		t.Fatalf("ListStudies(1) = %+v, want [A, B] by id", list)
 	}
 	if _, err := repo.GetStudy(ctx, 999); !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("GetStudy(999) err = %v, want ErrNotFound", err)
+		t.Fatalf("GetStudy(999) "+errWantNotFound, err)
 	}
 }
 
@@ -129,6 +136,17 @@ func testSurveyRoundTrip(t *testing.T, newStore newSurveyStoreFunc) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertSurveyScalars(t, got, st, start, end)
+	assertSurveyQuestions(t, got, def)
+	if _, err := repo.GetSurvey(context.Background(), 999); !errors.Is(err, surveys.ErrNotFound) {
+		t.Fatalf("GetSurvey(999) "+errWantNotFound, err)
+	}
+}
+
+// assertSurveyScalars checks the non-question fields of a survey created
+// from surveyDef with a window and every flag set.
+func assertSurveyScalars(t *testing.T, got surveys.Survey, st surveys.Study, start, end time.Time) {
+	t.Helper()
 	if got.Name != "Rider satisfaction" || !got.Available || !got.ShowOnMap || !got.ShowOnStops ||
 		!got.AlwaysVisible || !got.AllowsMultipleResponses {
 		t.Errorf("scalars = %+v", got)
@@ -142,6 +160,15 @@ func testSurveyRoundTrip(t *testing.T, newStore newSurveyStoreFunc) {
 	if got.Study.ID != st.ID || got.Study.Name != "Study" || got.Study.Description != "desc" {
 		t.Errorf("Study = %+v, want the seeded study", got.Study)
 	}
+	if !got.CreatedAt.Equal(base) || got.CreatedAt.Location() != time.UTC {
+		t.Errorf("CreatedAt = %v (%v)", got.CreatedAt, got.CreatedAt.Location())
+	}
+}
+
+// assertSurveyQuestions checks that the stored questions match def's in
+// order, content, and the per-type Required rule, with distinct ids.
+func assertSurveyQuestions(t *testing.T, got surveys.Survey, def surveys.Definition) {
+	t.Helper()
 	if len(got.Questions) != 2 {
 		t.Fatalf("Questions = %+v, want 2", got.Questions)
 	}
@@ -154,12 +181,6 @@ func testSurveyRoundTrip(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 	if q0.ID == 0 || q1.ID == 0 || q0.ID == q1.ID {
 		t.Errorf("question ids = %d, %d", q0.ID, q1.ID)
-	}
-	if !got.CreatedAt.Equal(base) || got.CreatedAt.Location() != time.UTC {
-		t.Errorf("CreatedAt = %v (%v)", got.CreatedAt, got.CreatedAt.Location())
-	}
-	if _, err := repo.GetSurvey(context.Background(), 999); !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("GetSurvey(999) err = %v", err)
 	}
 }
 
@@ -192,7 +213,7 @@ func testCreateSurveyUnknownStudy(t *testing.T, newStore newSurveyStoreFunc) {
 		t.Fatal(err)
 	}
 	if _, err := repo.CreateSurvey(context.Background(), 999, def, base); !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+		t.Fatalf(errWantNotFound, err)
 	}
 }
 
@@ -311,7 +332,7 @@ func testUpdateReplacesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
 		t.Errorf("Questions = %+v, want the one replacement question", got.Questions)
 	}
 	if !got.UpdatedAt.Equal(base.Add(time.Hour)) || !got.CreatedAt.Equal(base) {
-		t.Errorf("timestamps = %v / %v", got.CreatedAt, got.UpdatedAt)
+		t.Errorf(timestampsFmt, got.CreatedAt, got.UpdatedAt)
 	}
 	if _, err := repo.UpdateSurvey(context.Background(), 999, def, base); !errors.Is(err, surveys.ErrNotFound) {
 		t.Fatalf("UpdateSurvey(999) err = %v", err)
@@ -357,7 +378,7 @@ func answerFor(id int64, text string) surveys.Answer {
 func mustCreateResponse(t *testing.T, repo surveys.Repository, surveyID int64, publicID string, answers ...surveys.Answer) surveys.Response {
 	t.Helper()
 	r, err := repo.CreateResponse(context.Background(), surveys.NewResponse{
-		SurveyID: surveyID, PublicID: publicID, UserIdentifier: "device-1", Answers: answers,
+		SurveyID: surveyID, PublicID: publicID, UserIdentifier: deviceID, Answers: answers,
 	}, base)
 	if err != nil {
 		t.Fatalf("CreateResponse: %v", err)
@@ -370,7 +391,7 @@ func testUpdateFreezesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
 	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
-	mustCreateResponse(t, repo, s.ID, "resp-1", answerFor(s.Questions[0].ID, "Good"))
+	mustCreateResponse(t, repo, s.ID, responseID, answerFor(s.Questions[0].ID, "Good"))
 	def := surveyDef("v1")
 	def.Questions[0].Content.Options = []string{"Good", "Meh"}
 	if err := def.Validate(); err != nil {
@@ -394,7 +415,7 @@ func testUpdateScalarsOnFrozen(t *testing.T, newStore newSurveyStoreFunc) {
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
 	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
-	mustCreateResponse(t, repo, s.ID, "resp-1", answerFor(s.Questions[0].ID, "Good"))
+	mustCreateResponse(t, repo, s.ID, responseID, answerFor(s.Questions[0].ID, "Good"))
 	def := surveyDef("renamed")
 	def.Available = false
 	if err := def.Validate(); err != nil {
@@ -417,7 +438,7 @@ func testDeleteRefusesWithResponses(t *testing.T, newStore newSurveyStoreFunc) {
 	repo, regs := newStore(t)
 	st := seedStudy(t, repo, regs, 1)
 	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
-	mustCreateResponse(t, repo, s.ID, "resp-1")
+	mustCreateResponse(t, repo, s.ID, responseID)
 	if err := repo.DeleteSurvey(context.Background(), s.ID); !errors.Is(err, surveys.ErrHasResponses) {
 		t.Fatalf("err = %v, want ErrHasResponses", err)
 	}
@@ -470,7 +491,7 @@ func testResponseCreateGet(t *testing.T, newStore newSurveyStoreFunc) {
 	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
 	lat, lon := 47.6, -122.3
 	in := surveys.NewResponse{
-		SurveyID: s.ID, PublicID: "pub-1", UserIdentifier: "device-1",
+		SurveyID: s.ID, PublicID: "pub-1", UserIdentifier: deviceID,
 		StopIdentifier: "1_570", StopLatitude: &lat, StopLongitude: &lon,
 		Answers: []surveys.Answer{{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "Trip?", Answer: "[Bus, Train]"}},
 	}
@@ -482,7 +503,7 @@ func testResponseCreateGet(t *testing.T, newStore newSurveyStoreFunc) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != created.ID || got.SurveyID != s.ID || got.PublicID != "pub-1" || got.UserIdentifier != "device-1" ||
+	if got.ID != created.ID || got.SurveyID != s.ID || got.PublicID != "pub-1" || got.UserIdentifier != deviceID ||
 		got.StopIdentifier != "1_570" || got.StopLatitude == nil || *got.StopLatitude != lat ||
 		got.StopLongitude == nil || *got.StopLongitude != lon {
 		t.Errorf("GetResponse = %+v", got)
@@ -491,7 +512,7 @@ func testResponseCreateGet(t *testing.T, newStore newSurveyStoreFunc) {
 		t.Errorf("Answers = %+v, want %+v stored verbatim", got.Answers, in.Answers)
 	}
 	if !got.CreatedAt.Equal(base) || !got.UpdatedAt.Equal(base) {
-		t.Errorf("timestamps = %v / %v", got.CreatedAt, got.UpdatedAt)
+		t.Errorf(timestampsFmt, got.CreatedAt, got.UpdatedAt)
 	}
 	// Absent stop fields round-trip as absent, not zero (Android sends
 	// 0.0 coordinates *with no identifier*; the two cases must stay apart).
@@ -516,7 +537,7 @@ func testResponseCreateUnknownSurvey(t *testing.T, newStore newSurveyStoreFunc) 
 	repo, _ := newStore(t)
 	_, err := repo.CreateResponse(context.Background(), surveys.NewResponse{SurveyID: 999, PublicID: "p", UserIdentifier: "d"}, base)
 	if !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+		t.Fatalf(errWantNotFound, err)
 	}
 }
 
@@ -535,7 +556,7 @@ func testAmendMerges(t *testing.T, newStore newSurveyStoreFunc) {
 		t.Fatalf("Answers = %+v, want %+v", got.Answers, want)
 	}
 	if !got.UpdatedAt.Equal(base.Add(time.Minute)) || !got.CreatedAt.Equal(base) {
-		t.Errorf("timestamps = %v / %v", got.CreatedAt, got.UpdatedAt)
+		t.Errorf(timestampsFmt, got.CreatedAt, got.UpdatedAt)
 	}
 	// An empty amend is a no-op that still bumps updated_at (design spec 4.4).
 	again, err := repo.AmendResponse(context.Background(), "pub-1", nil, base.Add(2*time.Minute))
@@ -553,7 +574,7 @@ func testAmendNotFoundAndCap(t *testing.T, newStore newSurveyStoreFunc) {
 	st := seedStudy(t, repo, regs, 1)
 	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
 	if _, err := repo.AmendResponse(context.Background(), "nope", []surveys.Answer{answerFor(1, "a")}, base); !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+		t.Fatalf(errWantNotFound, err)
 	}
 	stored := make([]surveys.Answer, surveys.MaxAnswers)
 	for i := range stored {

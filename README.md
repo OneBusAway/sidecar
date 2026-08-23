@@ -161,14 +161,15 @@ Question `content.type` is one of `text`, `label`, `radio`, `checkbox`,
 `external_survey` (the last takes `url`, `survey_provider`,
 `embedded_data_fields`, `sdk_configuration_values`). Questions are displayed in
 document order. Dates require an explicit UTC offset. Absent booleans are
-`false`; an absent or empty targeting list means "everywhere".
+`false`, except `available`, which defaults to `true`; an absent or empty
+targeting list means "everywhere".
 
 `survey show <id>` prints the same document (plus `id`, `study`, timestamps),
 so `survey show 3 | sidecar-admin --db ./sidecar.db survey edit 3 --file -` is
 a round trip. Once a survey has responses its questions are frozen — edit only
 the name, dates, flags, and targeting — and it cannot be deleted.
 
-```
+```text
 sidecar-admin study   create    --region N --name S [--description S]
                       list      --region N
 sidecar-admin survey  create    --study N --file <path|->

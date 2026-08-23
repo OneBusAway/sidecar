@@ -46,6 +46,52 @@ func TestDefinitionValidate(t *testing.T) {
 			t.Error("label question still Required; Validate must force false")
 		}
 	})
+	tests := []struct {
+		name    string
+		mutate  func(*surveys.Definition)
+		wantErr string
+	}{
+		{"blank name", func(d *surveys.Definition) { d.Name = " " }, "name cannot be blank"},
+		{"start only", func(d *surveys.Definition) { d.StartTime = &t0 }, "both start_date and end_date"},
+		{"end only", func(d *surveys.Definition) { d.EndTime = &t1 }, "both start_date and end_date"},
+		{"end before start", func(d *surveys.Definition) { d.StartTime = &t1; d.EndTime = &t0 }, "end_date must be after"},
+		{"end equals start", func(d *surveys.Definition) { d.StartTime = &t0; d.EndTime = &t0 }, "end_date must be after"},
+		{"bad question", func(d *surveys.Definition) { d.Questions[0].Content.Options = nil }, "question 1: radio question needs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := validDefinition()
+			tt.mutate(&d)
+			err := d.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+	t.Run("no questions is valid", func(t *testing.T) {
+		t.Parallel()
+		d := validDefinition()
+		d.Questions = nil
+		if err := d.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("window ok", func(t *testing.T) {
+		t.Parallel()
+		d := validDefinition()
+		d.StartTime, d.EndTime = &t0, &t1
+		if err := d.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestDefinitionValidateSDKValues covers how Validate canonicalizes
+// sdk_configuration_values so a stored question compares equal to its
+// unchanged document form.
+func TestDefinitionValidateSDKValues(t *testing.T) {
+	t.Parallel()
 	t.Run("sdk values compacted", func(t *testing.T) {
 		t.Parallel()
 		d := validDefinition()
@@ -107,45 +153,6 @@ func TestDefinitionValidate(t *testing.T) {
 		err := d.Validate()
 		if err == nil || !strings.Contains(err.Error(), "question 1: sdk_configuration_values") {
 			t.Fatalf("Validate() = %v, want sdk_configuration_values parse error", err)
-		}
-	})
-	tests := []struct {
-		name    string
-		mutate  func(*surveys.Definition)
-		wantErr string
-	}{
-		{"blank name", func(d *surveys.Definition) { d.Name = " " }, "name cannot be blank"},
-		{"start only", func(d *surveys.Definition) { d.StartTime = &t0 }, "both start_date and end_date"},
-		{"end only", func(d *surveys.Definition) { d.EndTime = &t1 }, "both start_date and end_date"},
-		{"end before start", func(d *surveys.Definition) { d.StartTime = &t1; d.EndTime = &t0 }, "end_date must be after"},
-		{"end equals start", func(d *surveys.Definition) { d.StartTime = &t0; d.EndTime = &t0 }, "end_date must be after"},
-		{"bad question", func(d *surveys.Definition) { d.Questions[0].Content.Options = nil }, "question 1: radio question needs"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			d := validDefinition()
-			tt.mutate(&d)
-			err := d.Validate()
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Validate() = %v, want error containing %q", err, tt.wantErr)
-			}
-		})
-	}
-	t.Run("no questions is valid", func(t *testing.T) {
-		t.Parallel()
-		d := validDefinition()
-		d.Questions = nil
-		if err := d.Validate(); err != nil {
-			t.Fatal(err)
-		}
-	})
-	t.Run("window ok", func(t *testing.T) {
-		t.Parallel()
-		d := validDefinition()
-		d.StartTime, d.EndTime = &t0, &t1
-		if err := d.Validate(); err != nil {
-			t.Fatal(err)
 		}
 	})
 }
