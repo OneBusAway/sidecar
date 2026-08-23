@@ -242,6 +242,68 @@ func TestGhostBusCreate_JSONBody(t *testing.T) {
 	}
 }
 
+// TestGhostBusCreate_PredictedThreeStates pins the other two states of
+// Predicted's three-state contract (present-true is already covered by
+// cases 1/2 above): present-false must store &false, not be dropped to
+// nil, and absent must store nil, not default to &false. Collapsing the
+// field to a plain bool, or defaulting an absent key to &false, would pass
+// every other case in this file but fail one of these two.
+func TestGhostBusCreate_PredictedThreeStates(t *testing.T) {
+	t.Parallel()
+
+	t.Run("present false", func(t *testing.T) {
+		t.Parallel()
+		repo := &fakeGhostBusRepo{}
+		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
+		putRegion(t, regs, 1)
+
+		fields := validGhostBusFields()
+		fields["predicted"] = "0"
+		rec := ghostBusPost(t, h, formCT, formEncode(fields))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+		}
+		if len(repo.created) != 1 {
+			t.Fatalf("created = %d rows, want 1", len(repo.created))
+		}
+		in := repo.created[0]
+		if in.Predicted == nil || *in.Predicted {
+			t.Errorf("Predicted = %v, want non-nil false", boolPtrString(in.Predicted))
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		repo := &fakeGhostBusRepo{}
+		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
+		putRegion(t, regs, 1)
+
+		fields := validGhostBusFields()
+		delete(fields, "predicted")
+		rec := ghostBusPost(t, h, formCT, formEncode(fields))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+		}
+		if len(repo.created) != 1 {
+			t.Fatalf("created = %d rows, want 1", len(repo.created))
+		}
+		in := repo.created[0]
+		if in.Predicted != nil {
+			t.Errorf("Predicted = %v, want nil", boolPtrString(in.Predicted))
+		}
+	})
+}
+
+func boolPtrString(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	if *b {
+		return "&true"
+	}
+	return "&false"
+}
+
 // --- Case 3: missing requireds ---
 
 func TestGhostBusCreate_MissingRequireds(t *testing.T) {
@@ -540,6 +602,36 @@ func TestGhostBusCreate_OversizedDeclaredJSON(t *testing.T) {
 
 	body := strings.Repeat("x", 9000)
 	rec := ghostBusPost(t, h, jsonCT, body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("403 body = %q, want empty", rec.Body.String())
+	}
+	if len(repo.attempts) != 0 {
+		t.Errorf("repo touched: %d attempts", len(repo.attempts))
+	}
+}
+
+// TestGhostBusCreate_LyingHighContentLength pins the pre-read
+// r.ContentLength guard specifically -- not just its end-state. A
+// genuinely-9000-byte body (as in TestGhostBusCreate_OversizedDeclaredJSON
+// above) produces a byte-identical bodyless 403 whether that guard exists
+// or parseRequestParams' MaxBytesReader alone catches it, so that case
+// alone cannot tell the two apart. Here the body is short and entirely
+// valid; only a declared Content-Length that lies high triggers the 403.
+// Without the pre-read guard, MaxBytesReader never sees more than the real
+// (small) body and the request would parse and succeed.
+func TestGhostBusCreate_LyingHighContentLength(t *testing.T) {
+	t.Parallel()
+	repo := &fakeGhostBusRepo{}
+	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
+	putRegion(t, regs, 1)
+
+	body := jsonEncode(t, stringsToAny(validGhostBusFields()))
+	rec := ghostBusRequest(t, h, "/api/v2/regions/1/ghost_bus_reports", jsonCT, body, func(r *http.Request) {
+		r.ContentLength = 9000
+	})
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
 	}
