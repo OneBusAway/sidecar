@@ -24,6 +24,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -199,6 +200,19 @@ func run(stdout, stderr io.Writer, args []string) error {
 	}
 	go sched.RunLoop(ctx, alarmCheckInterval)
 
+	// Always runs, mirroring the alarm scheduler above: a region that
+	// resolves no OBA key just yields per-report 'unavailable' snapshots
+	// (spec §8), which is designed degraded behavior, not a reason to skip
+	// starting the loop.
+	snapSched := &ghostbus.SnapshotScheduler{
+		Repo:    store.GhostBus(),
+		Regions: store.Regions(),
+		OBA:     deps.OBA,
+		Now:     time.Now,
+		Logger:  logger,
+	}
+	go snapSched.RunLoop(ctx, ghostbus.SnapshotInterval)
+
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
 		Deps: deps,
@@ -266,6 +280,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, w
 		OBA:              obaClient,
 		FeedbackSecret:   webhookSecret,
 		Surveys:          store.Surveys(),
+		GhostBus:         store.GhostBus(),
 	}
 }
 
