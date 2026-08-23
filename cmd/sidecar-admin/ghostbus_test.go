@@ -72,8 +72,13 @@ func TestGhostBusExportCSV(t *testing.T) {
 
 	// service_date is an independent epoch-ms field (the rider's service
 	// day), distinct from created_at -- pin its local rendering from the
-	// same zone the CLI resolves through region.Timezone.
-	serviceDateTime := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	// same zone the CLI resolves through region.Timezone. 03:00 UTC is
+	// 20:00 the PREVIOUS day in America/Los_Angeles (UTC-7 in August), so
+	// the UTC and local calendar dates genuinely disagree here -- unlike a
+	// noon-UTC instant, which lands on the same date in both zones and so
+	// would pass this assertion even if ghostBusRow rendered service_date
+	// in UTC instead of the region's local zone.
+	serviceDateTime := time.Date(2026, 8, 10, 3, 0, 0, 0, time.UTC)
 	serviceDateMs := serviceDateTime.UnixMilli()
 	wantServiceDate := serviceDateTime.In(loc).Format("2006-01-02")
 
@@ -184,6 +189,14 @@ func TestGhostBusExportCSV(t *testing.T) {
 	}
 	if got := ghostBusCol(t, r1Row, "prediction_staleness_minutes"); got != "30" {
 		t.Errorf("R1 prediction_staleness_minutes = %q, want 30 (ms divisor regression guard)", got)
+	}
+	// reported_at_local must render in the region's zone (America/Los_Angeles,
+	// -07:00 in August), not UTC -- computed here via the same loc the CLI
+	// resolves through region.Timezone rather than a hardcoded literal, but
+	// it still differs from the UTC rendering of the same instant.
+	wantReportedAtLocal := createdEarly.In(loc).Format(time.RFC3339)
+	if got := ghostBusCol(t, r1Row, "reported_at_local"); got != wantReportedAtLocal {
+		t.Errorf("R1 reported_at_local = %q, want %q", got, wantReportedAtLocal)
 	}
 	if got := ghostBusCol(t, r1Row, "service_date"); got != wantServiceDate {
 		t.Errorf("R1 service_date = %q, want %q", got, wantServiceDate)
@@ -333,5 +346,33 @@ func TestGhostBusExportRejectsNaiveSince(t *testing.T) {
 	_, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1", "--since", "2026-09-01T00:00:00")
 	if err == nil || !strings.Contains(err.Error(), "explicit UTC offset") {
 		t.Fatalf("naive --since err = %v, want an explicit UTC offset error", err)
+	}
+}
+
+// TestGhostBusExportMissingRegionFlag pins that a missing (or explicit
+// zero) --region is a usage error, not a "region 0: not found" store
+// lookup -- --since alone must not satisfy the flag-parsing check that
+// used to let this fall through to the store.
+func TestGhostBusExportMissingRegionFlag(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedGhostBusRegion(t, store.Regions(), 1, "America/Los_Angeles")
+
+	const wantUsage = "usage: ghostbus export --region N [--since RFC3339]"
+
+	if _, _, err := cli(t, dbPath, "ghostbus", "export"); err == nil || err.Error() != wantUsage {
+		t.Errorf("no flags err = %v, want %q", err, wantUsage)
+	}
+	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--since", "2026-09-01T00:00:00Z"); err == nil || err.Error() != wantUsage {
+		t.Errorf("--since with no --region err = %v, want %q", err, wantUsage)
+	}
+	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "0"); err == nil || err.Error() != wantUsage {
+		t.Errorf("--region 0 err = %v, want %q", err, wantUsage)
+	}
+
+	// A nonzero, nonexistent region must still surface the store's
+	// not-found error, not the usage message.
+	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "999"); err == nil || !strings.Contains(err.Error(), "region") {
+		t.Errorf("unknown region err = %v, want an error mentioning region", err)
 	}
 }
