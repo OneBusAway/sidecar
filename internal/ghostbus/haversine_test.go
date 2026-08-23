@@ -1,7 +1,9 @@
 package ghostbus
 
-import "math"
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestHaversineMeters(t *testing.T) {
 	// Pike Place Market to Space Needle: ~1,300 m. The tolerance is loose

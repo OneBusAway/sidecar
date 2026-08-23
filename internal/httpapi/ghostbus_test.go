@@ -513,7 +513,7 @@ func TestGhostBusCreate_Duplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	var gotDecoded any
-	if err := json.Unmarshal(rec.Body.Bytes(), &gotDecoded); err != nil {
+	if err = json.Unmarshal(rec.Body.Bytes(), &gotDecoded); err != nil {
 		t.Fatalf("decode response: %v; body = %s", err, rec.Body.String())
 	}
 	got, err := json.Marshal(gotDecoded)

@@ -436,7 +436,9 @@ func tripDisplayBlock(trips, routes, stops []map[string]any, q TripDetailsQuery)
 	trip := find(trips, q.TripID)
 	routeID := q.RouteID
 	if routeID == "" && trip != nil {
-		routeID, _ = trip["routeId"].(string)
+		if v, ok := trip["routeId"].(string); ok {
+			routeID = v
+		}
 	}
 	put := func(key string, src map[string]any, srcKey string) {
 		if src == nil {

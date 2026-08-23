@@ -127,7 +127,9 @@ func ghostBusRow(r ghostbus.Report, loc *time.Location, tripCounts map[[2]any]in
 		// A malformed or unrecognized snapshot document degrades to blank
 		// derived columns, not a failed export -- the raw snapshot_json
 		// column still carries the original document for inspection.
-		_ = json.Unmarshal([]byte(r.SnapshotJSON), &snap)
+		if err := json.Unmarshal([]byte(r.SnapshotJSON), &snap); err != nil {
+			snap = ghostBusSnapshot{}
+		}
 	}
 
 	vehLat, vehLon := ghostBusVehiclePosition(snap)

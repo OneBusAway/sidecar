@@ -111,13 +111,13 @@ func TestGhostBusExportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create R1: %v", err)
 	}
-	if err := store.GhostBus().MarkSnapshotCaptured(ctx, r1.ID, r1Snapshot, createdEarly.Add(time.Minute)); err != nil {
+	if err = store.GhostBus().MarkSnapshotCaptured(ctx, r1.ID, r1Snapshot, createdEarly.Add(time.Minute)); err != nil {
 		t.Fatalf("mark R1 captured: %v", err)
 	}
 
 	// R2 "bare": only required fields, same (trip, service_date) as R1 so
 	// trip_report_count == 2 for both. Snapshot stays pending.
-	if _, err := store.GhostBus().Create(ctx, ghostbus.NewReport{
+	if _, err = store.GhostBus().Create(ctx, ghostbus.NewReport{
 		RegionID:            1,
 		PublicID:            "tok_bare_000000000001",
 		UserIdentifier:      "user-b",
@@ -144,7 +144,7 @@ func TestGhostBusExportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create R3: %v", err)
 	}
-	if err := store.GhostBus().MarkSnapshotCaptured(ctx, r3.ID, r3Snapshot, createdLate.Add(time.Minute)); err != nil {
+	if err = store.GhostBus().MarkSnapshotCaptured(ctx, r3.ID, r3Snapshot, createdLate.Add(time.Minute)); err != nil {
 		t.Fatalf("mark R3 captured: %v", err)
 	}
 
@@ -248,5 +248,20 @@ func TestGhostBusExportCSV(t *testing.T) {
 	// Unknown region: run() must return an error mentioning the region.
 	if _, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "999"); err == nil || !strings.Contains(err.Error(), "region") {
 		t.Errorf("unknown region err = %v, want an error mentioning region", err)
+	}
+}
+
+// TestGhostBusExportRejectsNaiveSince pins design §2.8/§5: --since is an
+// instant, and (like every other CLI timestamp in this repo) a naive
+// datetime with no UTC offset must be rejected rather than silently
+// interpreted in some default zone.
+func TestGhostBusExportRejectsNaiveSince(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedGhostBusRegion(t, store.Regions(), 1, "America/Los_Angeles")
+
+	_, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1", "--since", "2026-09-01T00:00:00")
+	if err == nil || !strings.Contains(err.Error(), "explicit UTC offset") {
+		t.Fatalf("naive --since err = %v, want an explicit UTC offset error", err)
 	}
 }

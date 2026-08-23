@@ -205,20 +205,22 @@ func testGhostBusFailureCap(t *testing.T, newStore newGhostBusStoreFunc) {
 		t.Fatalf("Create: %v", err)
 	}
 	for want := int64(1); want < ghostbus.MaxSnapshotAttempts; want++ {
-		n, err := repo.RecordSnapshotFailure(ctx, rep.ID, base)
-		if err != nil || n != want {
-			t.Fatalf("failure %d: n=%d err=%v", want, n, err)
+		n, failErr := repo.RecordSnapshotFailure(ctx, rep.ID, base)
+		if failErr != nil || n != want {
+			t.Fatalf("failure %d: n=%d err=%v", want, n, failErr)
 		}
-		if p, _ := repo.ListPendingSnapshots(ctx, 10); len(p) != 1 {
-			t.Fatalf("after failure %d report should still be pollable", want)
+		p, pendErr := repo.ListPendingSnapshots(ctx, 10)
+		if pendErr != nil || len(p) != 1 {
+			t.Fatalf("after failure %d report should still be pollable: err=%v", want, pendErr)
 		}
 	}
 	n, err := repo.RecordSnapshotFailure(ctx, rep.ID, base)
 	if err != nil || n != ghostbus.MaxSnapshotAttempts {
 		t.Fatalf("final failure: n=%d err=%v", n, err)
 	}
-	if p, _ := repo.ListPendingSnapshots(ctx, 10); len(p) != 0 {
-		t.Fatalf("report at the cap must not be pollable; got %+v", p)
+	p, err := repo.ListPendingSnapshots(ctx, 10)
+	if err != nil || len(p) != 0 {
+		t.Fatalf("report at the cap must not be pollable: err=%v got=%+v", err, p)
 	}
 	exported, err := repo.ListForExport(ctx, regionID, 0)
 	if err != nil || len(exported) != 1 {
@@ -239,7 +241,7 @@ func testGhostBusCaptureRoundTrip(t *testing.T, newStore newGhostBusStoreFunc) {
 	}
 	snap := `{"current_time":1,"status":{"phase":"in_progress"}}`
 	capturedAt := base.Add(45 * time.Second)
-	if err := repo.MarkSnapshotCaptured(ctx, rep.ID, snap, capturedAt); err != nil {
+	if err = repo.MarkSnapshotCaptured(ctx, rep.ID, snap, capturedAt); err != nil {
 		t.Fatalf("MarkSnapshotCaptured: %v", err)
 	}
 	got, err := repo.ListForExport(ctx, regionID, 0)

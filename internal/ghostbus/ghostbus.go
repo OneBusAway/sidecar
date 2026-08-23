@@ -16,22 +16,39 @@ import (
 )
 
 const (
-	CommentMaxLen       = 1000 // runes; mirrored in GhostBusReportView.swift
-	MaxSnapshotAttempts = 3    // total tries, matching OBACloud retry_on attempts: 3
+	// CommentMaxLen is the comment cap in runes; mirrored in GhostBusReportView.swift.
+	CommentMaxLen = 1000
+	// MaxSnapshotAttempts is the total tries per report, matching OBACloud's
+	// retry_on attempts: 3.
+	MaxSnapshotAttempts = 3
 
-	SnapshotPending     = "pending"
-	SnapshotCaptured    = "captured"
+	// SnapshotPending marks a report still awaiting enrichment.
+	SnapshotPending = "pending"
+	// SnapshotCaptured marks a report whose snapshot was fetched successfully.
+	SnapshotCaptured = "captured"
+	// SnapshotUnavailable marks a report that exhausted its retries or whose
+	// region has no resolvable OBA key.
 	SnapshotUnavailable = "unavailable"
 )
 
+// WaitDurationChoices are the valid values of wait_duration_minutes (spec
+// §8); mirrored by hand in GhostBusReportView.swift's waitChoices.
 var WaitDurationChoices = []int64{5, 10, 15, 20, 30}
 
 var (
-	ErrDuplicate      = errors.New("duplicate ghost bus report")  // dedupe-index hit → already_reported 422
-	ErrTokenCollision = errors.New("public identifier collision") // re-mint and retry once, never already_reported
-	ErrNotFound       = errors.New("ghost bus report not found")
+	// ErrDuplicate is returned when the dedupe index rejects an insert; the
+	// handler maps it to a 422 already_reported response.
+	ErrDuplicate = errors.New("duplicate ghost bus report")
+	// ErrTokenCollision is returned on a public_identifier collision; the
+	// handler re-mints and retries once, and this must never surface as
+	// ErrDuplicate.
+	ErrTokenCollision = errors.New("public identifier collision")
+	// ErrNotFound is returned when a report id does not resolve.
+	ErrNotFound = errors.New("ghost bus report not found")
 )
 
+// Report is a stored ghost bus report, including its snapshot enrichment
+// bookkeeping.
 type Report struct {
 	ID                       int64
 	RegionID                 int64
@@ -82,6 +99,9 @@ type NewReport struct {
 	PredictionLastUpdatedAt  *int64
 }
 
+// Repository is the storage interface the domain package needs from a
+// backing store: creating reports, driving the snapshot poll-loop, and
+// listing for the CSV export.
 type Repository interface {
 	Create(ctx context.Context, in NewReport, now time.Time) (Report, error) // ErrDuplicate | ErrTokenCollision
 	ListPendingSnapshots(ctx context.Context, limit int64) ([]Report, error) // pending AND attempts < MaxSnapshotAttempts, oldest first
