@@ -9,6 +9,7 @@ package obaapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +68,15 @@ type Departure struct {
 	Predicted              bool
 }
 
+// TripDetailsQuery identifies the trip instance a ghost bus report named,
+// plus the report's own route/stop ids used to resolve display names.
+type TripDetailsQuery struct {
+	TripID      string
+	ServiceDate int64  // epoch ms
+	RouteID     string // report's route_identifier; "" = fall back to the trip reference's routeId
+	StopID      string // report's stop_identifier; "" = no stop display block
+}
+
 // Client reads the OBA REST API for one region at a time. Implementations
 // must be safe for concurrent use.
 type Client interface {
@@ -80,6 +90,11 @@ type Client interface {
 	// trip/stop/date combination, and ErrNotConfigured when the region has
 	// no API key.
 	ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error)
+
+	// TripDetails fetches trip-details for one trip instance and returns the
+	// pruned spec-§2.6 snapshot document. ErrNotFound on a definitive miss
+	// (404 or empty entry); ErrNotConfigured when the region has no API key.
+	TripDetails(ctx context.Context, region regions.Region, q TripDetailsQuery) (json.RawMessage, error)
 }
 
 const (
@@ -321,6 +336,126 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 		PredictedDepartureTime: entry.PredictedDepartureTime,
 		Predicted:              entry.Predicted,
 	}, nil
+}
+
+// tripStatusKeys is OBACloud's STATUS_KEYS allow-list, verbatim: the
+// forensic subset of a trip-details status block worth storing per report.
+var tripStatusKeys = []string{
+	"predicted", "vehicleId", "lastUpdateTime", "lastLocationUpdateTime",
+	"scheduleDeviation", "phase", "serviceDate", "closestStop",
+	"closestStopTimeOffset", "distanceAlongTrip", "totalDistanceAlongTrip",
+	"lastKnownLocation", "position", "orientation", "activeTripId",
+}
+
+func (c *client) TripDetails(ctx context.Context, region regions.Region, q TripDetailsQuery) (json.RawMessage, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return nil, err // ErrNotConfigured
+	}
+	// includeSchedule stays at the server default (true) deliberately: the
+	// schedule block is what pulls the queried stop into references.stops;
+	// disabling it silently blanks the CSV's stop columns (design §2.7).
+	resp, err := sdk.TripDetails.Get(ctx, q.TripID, oba.TripDetailGetParams{
+		ServiceDate: oba.F(q.ServiceDate),
+	})
+	if err != nil {
+		// Mirrors ArrivalAndDeparture: only a 404 is the upstream's
+		// definitive "no such trip" signal. isClientError's broader 4xx
+		// tolerance is Fleet's "agency permanently has no feed" concept and
+		// would misclassify e.g. a 400 as a trip aging out.
+		if statusOf(err) == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("obaapi: trip-details in region %d: %w", region.ID, redact(err))
+	}
+	// See ArrivalAndDeparture: the live server answers an unknown
+	// trip/service-date with HTTP 200 and the literal body `null`, which
+	// decodes to a nil response with a nil error. resp.JSON below would
+	// panic on a nil resp, so this must come first.
+	if resp == nil {
+		return nil, ErrNotFound
+	}
+	return pruneTripSnapshot([]byte(resp.JSON.RawJSON()), q)
+}
+
+// pruneTripSnapshot builds the spec-§2.6 snapshot from the RAW response
+// JSON. Raw, not the SDK's typed structs, deliberately: every typed status
+// field is value-typed, so absence and zero are indistinguishable there --
+// and a fabricated zero lastKnownLocation puts the vehicle at Null Island,
+// which the CSV would render as kilometers of plausible garbage.
+func pruneTripSnapshot(raw []byte, q TripDetailsQuery) (json.RawMessage, error) {
+	var doc struct {
+		CurrentTime int64 `json:"currentTime"`
+		Data        struct {
+			Entry      map[string]any `json:"entry"`
+			References struct {
+				Trips  []map[string]any `json:"trips"`
+				Routes []map[string]any `json:"routes"`
+				Stops  []map[string]any `json:"stops"`
+			} `json:"references"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, ErrNotFound // unparseable body: definitive, not transient
+	}
+	if len(doc.Data.Entry) == 0 {
+		return nil, ErrNotFound // 200-with-null-entry, same as ArrivalAndDeparture
+	}
+	status := map[string]any{}
+	if entryStatus, ok := doc.Data.Entry["status"].(map[string]any); ok {
+		for _, k := range tripStatusKeys {
+			if v, present := entryStatus[k]; present {
+				status[k] = v
+			}
+		}
+	}
+	snap := map[string]any{"current_time": doc.CurrentTime, "status": status}
+	if display := tripDisplayBlock(doc.Data.References.Trips, doc.Data.References.Routes, doc.Data.References.Stops, q); len(display) > 0 {
+		snap["display"] = display
+	}
+	return json.Marshal(snap)
+}
+
+// tripDisplayBlock resolves human-readable names out of the references:
+// best-effort, absent keys simply missing (OBACloud's .compact). The DB
+// stores only raw identifiers; without this the CSV could never show route
+// names, headsigns, or stop coordinates.
+func tripDisplayBlock(trips, routes, stops []map[string]any, q TripDetailsQuery) map[string]any {
+	find := func(list []map[string]any, id string) map[string]any {
+		if id == "" {
+			return nil
+		}
+		for _, m := range list {
+			if m["id"] == id {
+				return m
+			}
+		}
+		return nil
+	}
+	display := map[string]any{}
+	trip := find(trips, q.TripID)
+	routeID := q.RouteID
+	if routeID == "" && trip != nil {
+		routeID, _ = trip["routeId"].(string)
+	}
+	put := func(key string, src map[string]any, srcKey string) {
+		if src == nil {
+			return
+		}
+		if v, ok := src[srcKey]; ok && v != nil && v != "" {
+			display[key] = v
+		}
+	}
+	put("headsign", trip, "tripHeadsign")
+	route := find(routes, routeID)
+	put("route_short_name", route, "shortName")
+	put("route_long_name", route, "longName")
+	put("route_type", route, "type")
+	stop := find(stops, q.StopID)
+	put("stop_name", stop, "name")
+	put("stop_lat", stop, "lat")
+	put("stop_lon", stop, "lon")
+	return display
 }
 
 // agencies fetches the region's agencies. Names live in the response's

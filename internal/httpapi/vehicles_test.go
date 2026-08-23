@@ -44,6 +44,12 @@ func (f *fakeOBA) ArrivalAndDeparture(context.Context, regions.Region, obaapi.De
 	return obaapi.Departure{}, nil
 }
 
+// TripDetails is unused by these tests; it exists only so fakeOBA still
+// satisfies obaapi.Client.
+func (f *fakeOBA) TripDetails(context.Context, regions.Region, obaapi.TripDetailsQuery) (json.RawMessage, error) {
+	return nil, nil
+}
+
 // newTestRegions opens a migrated store and seeds it with the given regions.
 // There is no shared helper for this in the package -- the existing tests each
 // call sqlitetest.Open and seed inline -- so this one is defined here and
