@@ -307,3 +307,49 @@ func TestIsTerminal(t *testing.T) {
 		})
 	}
 }
+
+// TestNewGorushAppliesDefaultTimeout pins the constructor's timeout
+// contract. TestGorushSendTimesOutOnHungServer above cannot: it sets the
+// client's Timeout to 50ms explicitly so the test stays fast, which means it
+// proves http.Client honors a Timeout -- a stdlib property -- not that
+// NewGorush supplies gorushTimeout when the caller's client has none. That
+// is the case cmd/sidecar actually hits (it passes http.DefaultClient), and
+// deleting the default left the whole suite green.
+func TestNewGorushAppliesDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	if g := NewGorush("http://gorush.test", &http.Client{}); g.http.Timeout != gorushTimeout {
+		t.Errorf("client without a Timeout: got %v, want the %v default", g.http.Timeout, gorushTimeout)
+	}
+	if g := NewGorush("http://gorush.test", nil); g.http.Timeout != gorushTimeout {
+		t.Errorf("nil client: got %v, want the %v default", g.http.Timeout, gorushTimeout)
+	}
+	if http.DefaultClient.Timeout != 0 {
+		t.Errorf("http.DefaultClient.Timeout = %v, want 0; the shared client must never be mutated",
+			http.DefaultClient.Timeout)
+	}
+
+	// A caller who set their own keeps it, and their client is copied, not
+	// modified in place.
+	custom := &http.Client{Timeout: 3 * time.Second}
+	if g := NewGorush("http://gorush.test", custom); g.http.Timeout != 3*time.Second {
+		t.Errorf("caller Timeout = %v, want it preserved at 3s", g.http.Timeout)
+	}
+	if custom.Timeout != 3*time.Second {
+		t.Errorf("caller's client was mutated: Timeout = %v, want 3s", custom.Timeout)
+	}
+}
+
+// TestNewGorushTrimsTrailingSlash keeps a trailing slash in an
+// operator-supplied SIDECAR_GORUSH_URL from producing a double-slashed
+// //api/push.
+func TestNewGorushTrimsTrailingSlash(t *testing.T) {
+	t.Parallel()
+
+	const want = "http://gorush.test/api/push"
+	for _, base := range []string{"http://gorush.test", "http://gorush.test/", "http://gorush.test///"} {
+		if got := NewGorush(base, nil).pushURL; got != want {
+			t.Errorf("NewGorush(%q).pushURL = %q, want %q", base, got, want)
+		}
+	}
+}

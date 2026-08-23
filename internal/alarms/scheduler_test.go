@@ -536,3 +536,35 @@ func TestRunLoopStopsOnContextCancel(t *testing.T) {
 		t.Fatal("RunLoop did not return after context cancellation")
 	}
 }
+
+// TestNotConfiguredCountsTowardStreak pins the §5.3 judgment call that a
+// region with no OBA API key counts toward the reaping streak rather than
+// being treated as transient. ErrNotFound and ErrNotConfigured share one
+// case clause, and only ErrNotFound was covered: dropping ErrNotConfigured
+// from that clause left the whole suite green, while in production every
+// alarm in an unconfigured region would be re-checked forever instead of
+// reaped.
+func TestNotConfiguredCountsTowardStreak(t *testing.T) {
+	t.Parallel()
+	alarm := testAlarm(1, 600)
+	repo := newFakeAlarmRepo(alarm)
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		return obaapi.Departure{}, obaapi.ErrNotConfigured
+	}}
+	sender := &fakeSender{}
+	s := newScheduler(repo, oba, sender)
+
+	s.CheckAll(context.Background())
+	if got, ok := repo.get(1); !ok || got.FailureCount != 1 {
+		t.Fatalf("after cycle 1: got=%+v ok=%v; want FailureCount=1, present", got, ok)
+	}
+
+	s.CheckAll(context.Background())
+	s.CheckAll(context.Background())
+	if _, ok := repo.get(1); ok {
+		t.Error("alarm still present; want reaped at 3 consecutive ErrNotConfigured lookups")
+	}
+	if sender.count() != 0 {
+		t.Errorf("sent = %d; want 0 across all cycles", sender.count())
+	}
+}

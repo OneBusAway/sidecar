@@ -399,13 +399,21 @@ func TestThrottle(t *testing.T) {
 	h := httpapi.NewRouter(deps)
 	putRegion(t, store.Regions(), 1)
 
-	const addr = "1.2.3.4:5555"
+	// Every request gets a fresh ephemeral source port, the way real ones
+	// arrive. Reusing one fixed RemoteAddr would let this test pass against
+	// a limiter keyed on host:port -- which in production would hand every
+	// request its own bucket and make the throttle a no-op.
+	port := 5000
+	nextAddr := func(ip string) string {
+		port++
+		return fmt.Sprintf("%s:%d", ip, port)
+	}
 
 	post := func(token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 			"/api/v2/regions/1/push_registrations", strings.NewReader("token="+token+"&operating_system=ios"))
 		req.Header.Set("Content-Type", formCT)
-		req.RemoteAddr = addr
+		req.RemoteAddr = nextAddr("1.2.3.4")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec
@@ -430,7 +438,7 @@ func TestThrottle(t *testing.T) {
 	// throttled too even though it has made no requests of its own.
 	delReq := httptest.NewRequestWithContext(context.Background(), http.MethodDelete,
 		"/api/v2/regions/1/push_registrations?token=tok1", nil)
-	delReq.RemoteAddr = addr
+	delReq.RemoteAddr = nextAddr("1.2.3.4")
 	delRec := httptest.NewRecorder()
 	h.ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusTooManyRequests {
@@ -441,7 +449,7 @@ func TestThrottle(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/api/v2/regions/1/push_registrations", strings.NewReader("token=tok4&operating_system=ios"))
 	req.Header.Set("Content-Type", formCT)
-	req.RemoteAddr = "9.9.9.9:1111"
+	req.RemoteAddr = "9.9.9.9:5001" // a port 1.2.3.4 already used: only the host differs
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req)
 	if rec2.Code != http.StatusNoContent {
@@ -495,5 +503,97 @@ func TestRegister_TokenNeverLogged(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "[token]") {
 		t.Errorf("log output missing sanitized [token] marker: %s", logOutput)
+	}
+}
+
+// TestRegister_BlankValuesAreStickyToo covers the half of the §4 sticky-field
+// rule that TestRegister_StickyOnRePost does not: that test omits the keys
+// entirely, so it only exercises the absent branch. A client sending
+// locale= and description= as present-but-empty must be treated the same as
+// one that omitted them -- blank counts as absent, so the stored values
+// survive. Both blank guards could be deleted without failing any other test.
+func TestRegister_BlankValuesAreStickyToo(t *testing.T) {
+	t.Parallel()
+	h, pushRepo, regionRepo := newPushTestServer(t)
+	putRegion(t, regionRepo, 1)
+
+	first := "token=tok1&operating_system=ios&locale=fr-FR&test_device=true&description=Aaron%27s+iPhone"
+	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, first); rec.Code != http.StatusNoContent {
+		t.Fatalf("first register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	second := "token=tok1&operating_system=ios&locale=&description=&test_device=true"
+	rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, second)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("re-register with blanks: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	reg := getReg(t, pushRepo, 1, "tok1")
+	if reg.Locale != "fr-FR" {
+		t.Errorf("Locale = %q, want fr-FR (blank locale must not overwrite)", reg.Locale)
+	}
+	if reg.Description != "Aaron's iPhone" {
+		t.Errorf("Description = %q, want %q (blank description must not overwrite)", reg.Description, "Aaron's iPhone")
+	}
+	if !reg.TestDevice {
+		t.Errorf("TestDevice = false, want true")
+	}
+}
+
+// countingPushRegs counts Get calls so a test can assert that a request
+// never reached the store. It delegates everything else.
+type countingPushRegs struct {
+	pushreg.Repository
+	gets int
+}
+
+func (c *countingPushRegs) Get(ctx context.Context, regionID int64, token string) (pushreg.Registration, error) {
+	c.gets++
+	return c.Repository.Get(ctx, regionID, token)
+}
+
+// TestRegister_InvalidRequestCostsNoStoreRead pins the short-circuit in
+// register: this endpoint is unauthenticated (§2.6), so a request that
+// cannot possibly succeed must be rejected before it costs a database read,
+// or anyone can turn cheap garbage into store load. Nothing observable on
+// the wire changes if the early return is deleted -- the same 422 comes back
+// either way -- so only counting the reads can hold this, the same shape as
+// ratelimit's sweep-gate test.
+func TestRegister_InvalidRequestCostsNoStoreRead(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	counting := &countingPushRegs{Repository: store.PushRegs()}
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs:    counting,
+		PushLimiter: ratelimit.New(30, time.Minute),
+		Regions:     store.Regions(),
+		Now:         func() time.Time { return base },
+		Logger:      slog.New(slog.DiscardHandler),
+	})
+	putRegion(t, store.Regions(), 1)
+
+	for _, body := range []string{
+		"operating_system=ios",                   // blank token
+		"token=tok1",                             // blank operating system
+		"token=tok1&operating_system=blackberry", // unknown operating system
+	} {
+		rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT, body)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("body %q: status = %d, want 422", body, rec.Code)
+		}
+	}
+	if counting.gets != 0 {
+		t.Errorf("store Get called %d times for requests that can only 422; want 0", counting.gets)
+	}
+
+	// A request that can still succeed does read, so the assertion above is
+	// about the short-circuit and not about Get being unreachable.
+	if rec := pushRequest(t, h, http.MethodPost, "/api/v2/regions/1/push_registrations", formCT,
+		"token=tok1&operating_system=ios"); rec.Code != http.StatusNoContent {
+		t.Fatalf("valid register: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+	if counting.gets != 1 {
+		t.Errorf("store Get called %d times for a valid request; want 1", counting.gets)
 	}
 }

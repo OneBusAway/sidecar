@@ -74,17 +74,42 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
 		}
 	}
+}
 
-	// Every timestamp is epoch seconds in an INTEGER column, never DATETIME or
-	// TEXT. Nothing else in the suite can hold this: SQLite's dynamic typing
-	// round-trips an int64 unchanged through a TEXT- or DATETIME-declared
-	// column, so the storetest conformance suite stays green against a
-	// mis-declared schema and cannot be the check. Reading the declared types
-	// back out of the catalog is the only assertion that bites, and it is
-	// engine-specific, which is why it lives here rather than in storetest.
+// TestMigrateDeclaresTimeColumnsAsInteger pins the declared type of every
+// column the migrations use to hold a time value -- epoch seconds everywhere
+// except alarms.service_date, which is epoch milliseconds. All of them are
+// INTEGER, never DATETIME or TEXT.
+//
+// Nothing else in the suite can hold this: SQLite's dynamic typing round-trips
+// an int64 unchanged through a TEXT- or DATETIME-declared column, so every
+// storetest conformance suite stays green against a mis-declared schema and
+// cannot be the check. Reading the declared types back out of the catalog is
+// the only assertion that bites, and it is engine-specific, which is why it
+// lives here rather than in storetest.
+//
+// Every table in the schema is listed. A new table with a time column and no
+// entry here is unpinned, so add it when you add the migration.
+func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
+	t.Parallel()
+
+	path, _ := sqlitetest.OpenAt(t)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
 	wantIntegerColumns := map[string][]string{
-		"users":    {"created_at", "updated_at"},
-		"sessions": {"created_at", "expires_at"},
+		"regions":            {"synced_at", "created_at", "updated_at"},
+		"alerts":             {"start_time", "end_time", "created_at", "updated_at"},
+		"alert_translations": {"created_at", "updated_at"},
+		"users":              {"created_at", "updated_at"},
+		"sessions":           {"created_at", "expires_at"},
+		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
+		"alarms":             {"service_date", "created_at", "updated_at"},
 	}
 	for table, columns := range wantIntegerColumns {
 		types, err := columnTypes(ctx, db, table)
@@ -98,7 +123,7 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 				continue
 			}
 			if got != "INTEGER" {
-				t.Errorf("%s.%s declared type = %q, want INTEGER (epoch seconds, never DATETIME/TEXT)", table, column, got)
+				t.Errorf("%s.%s declared type = %q, want INTEGER (never DATETIME/TEXT)", table, column, got)
 			}
 		}
 	}
