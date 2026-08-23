@@ -98,6 +98,7 @@ sidecar-admin survey  create --study N --file <path|->
                        edit ID --file <path|->
                        delete ID
                        responses ID        # long-format CSV, one row per answer
+sidecar-admin ghostbus export --region N [--since RFC3339]   # CSV, one row per report
 sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
@@ -184,6 +185,82 @@ sidecar-admin survey  create    --study N --file <path|->
 answer) with a leading apostrophe when the cell would otherwise open with a
 spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return), so
 opening the export can't execute a formula a rider embedded in their answer.
+
+## Ghost bus reports
+
+The sidecar serves spec §8: a write-only endpoint for riders to report a bus
+that the app predicted but that never arrived, plus a background worker that
+enriches each report with a snapshot of the trip's state at report time.
+There is deliberately no rider-facing read API -- the CSV export below is the
+read surface, and reports are agency data kept indefinitely (no retention
+sweep, unlike push token registrations or alarms above).
+
+### Endpoint
+
+- `POST /api/v2/regions/{regionId}/ghost_bus_reports` -- creates a report.
+  Requires `user_identifier`, `trip_identifier`, `service_date`, and
+  `wait_duration_minutes` (one of `5`, `10`, `15`, `20`, `30`); accepts
+  optional route/stop/vehicle identifiers, a coordinate pair, timing fields,
+  and a comment up to 1,000 runes. Accepts JSON, form-encoded, or query
+  parameters, matching every other write endpoint in this repo. `{regionId}`
+  accepts either a bare id (`1`) or an id-prefixed slug (`1-puget-sound`), the
+  same as the alerts feed; there is no `.json` variant, since the shipped
+  client doesn't send one here.
+- On success: `201 {"id": "<public identifier>"}`. One report per `(region,
+  user_identifier, trip_identifier, service_date)` -- a duplicate returns
+  `422 {"error": "already_reported", ...}`. The shipped iOS app treats *any*
+  `422` as "already reported" regardless of error code, so validation
+  failures and duplicates both read as a soft failure to riders; the distinct
+  `already_reported` code is still emitted for future or third-party clients
+  that want to tell the two apart.
+- A JSON body over 8 KB (by declared `Content-Length` or by streaming past
+  the cap) is rejected with a bodyless `403`, before or without reading the
+  body. This cap is JSON-only: form bodies keep the shared 64 KB request
+  limit, because iOS percent-encodes comments with an allow-list, and a
+  rider-legal emoji-heavy comment can legally push a form body past 8 KB.
+
+### Abuse throttles
+
+Two independent limiters, per spec §2.6:
+
+- **10 reports per hour per IP**, keyed on the request's TCP peer address --
+  the same reverse-proxy caveat as push registrations applies here (see the
+  Deployment section below): a proxy that re-originates the TCP connection
+  merges every client into one shared bucket.
+- **20 reports per day per `user_identifier`**, read from whichever of
+  query/form/JSON the request actually used, so the bucket always matches the
+  identifier the report is filed under. A blank or missing `user_identifier`
+  skips the counter and fails validation instead; an over-length identifier
+  is rejected before the throttle is consulted, so it never becomes a limiter
+  key.
+
+### Snapshot enrichment
+
+A background worker polls every 30 seconds for reports still awaiting
+enrichment, fetches trip details from the region's OneBusAway REST API (its
+own key, falling back to `SIDECAR_OBA_API_KEY`), and stores a pruned snapshot
+of the trip's status and display fields at the time of capture. Each report
+is tried up to 3 times total before it's given up on; `snapshot_status` is
+one of `pending`, `captured`, or `unavailable`. Enrichment never blocks or
+fails the rider's `201` -- a region with no resolvable OBA key, or a trip
+details lookup that never succeeds, just leaves the report's snapshot
+`unavailable`.
+
+### Exporting reports with `sidecar-admin`
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db ghostbus export --region 1 \
+  --since 2026-09-01T00:00:00-07:00 > reports.csv
+```
+
+`ghostbus export` writes CSV to stdout, one row per report, with columns for
+the report itself, its trip/route/stop display fields, and the snapshot
+(vehicle position, distance from stop, trip phase, and the raw snapshot
+JSON). `--since` is optional and, like every other CLI instant in this repo,
+requires an explicit UTC offset. Rider-sourced and GTFS-derived cells go
+through the same formula-injection guard as `survey responses`: a leading
+apostrophe when a cell would otherwise open with `=`, `+`, `-`, `@`, a tab,
+or a carriage return.
 
 ## Weather and vehicle search
 
