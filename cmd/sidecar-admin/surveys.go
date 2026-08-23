@@ -111,66 +111,32 @@ func runSurvey(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sq
 	}
 }
 
-// surveyDocument is the authoring document of design spec 2.13: the wire
-// Survey shape minus server-owned keys, plus available. The server-owned
-// keys are declared (and ignored on input) so `show | edit --file -` round
-// trips; everything else unknown is rejected so a typo like
+// readDocument loads a survey document (surveys.Document, design spec 2.13)
+// from path, or stdin for "-". Unknown fields are rejected so a typo like
 // "show_on_maps" cannot silently become a hidden survey.
-type surveyDocument struct {
-	ID                      *int64             `json:"id,omitempty"`
-	Name                    string             `json:"name"`
-	Available               *bool              `json:"available"`
-	StartDate               *string            `json:"start_date"`
-	EndDate                 *string            `json:"end_date"`
-	ShowOnMap               bool               `json:"show_on_map"`
-	ShowOnStops             bool               `json:"show_on_stops"`
-	AlwaysVisible           bool               `json:"always_visible"`
-	AllowsMultipleResponses bool               `json:"allows_multiple_responses"`
-	VisibleStopList         []string           `json:"visible_stop_list"`
-	VisibleRouteList        []string           `json:"visible_route_list"`
-	Questions               []questionDocument `json:"questions"`
-	Study                   *studyDocument     `json:"study,omitempty"`
-	CreatedAt               string             `json:"created_at,omitempty"`
-	UpdatedAt               string             `json:"updated_at,omitempty"`
-}
-
-type questionDocument struct {
-	ID       *int64          `json:"id,omitempty"`
-	Position *int64          `json:"position,omitempty"`
-	Required bool            `json:"required"`
-	Content  surveys.Content `json:"content"`
-}
-
-type studyDocument struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
-// readDocument loads a survey document from path, or stdin for "-".
-func readDocument(stdin io.Reader, path string) (surveyDocument, error) {
+func readDocument(stdin io.Reader, path string) (surveys.Document, error) {
 	r := stdin
 	if path != "-" {
 		f, err := os.Open(path)
 		if err != nil {
-			return surveyDocument{}, err
+			return surveys.Document{}, err
 		}
 		defer func() { _ = f.Close() }()
 		r = f
 	}
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
-	var doc surveyDocument
+	var doc surveys.Document
 	if err := dec.Decode(&doc); err != nil {
-		return surveyDocument{}, fmt.Errorf("parse survey document: %w", err)
+		return surveys.Document{}, fmt.Errorf("parse survey document: %w", err)
 	}
 	return doc, nil
 }
 
-// toDefinition converts a document to a validated Definition. Dates go
-// through parseInstant with the region, so the explicit-offset rule and
-// its timezone hint carry over from alert create.
-func (doc surveyDocument) toDefinition(region regions.Region) (surveys.Definition, error) {
+// definitionFromDocument converts a document to a validated Definition.
+// Dates go through parseInstant with the region, so the explicit-offset
+// rule and its timezone hint carry over from alert create.
+func definitionFromDocument(doc surveys.Document, region regions.Region) (surveys.Definition, error) {
 	def := surveys.Definition{
 		Name: doc.Name, Available: true,
 		ShowOnMap: doc.ShowOnMap, ShowOnStops: doc.ShowOnStops, AlwaysVisible: doc.AlwaysVisible,
@@ -201,32 +167,6 @@ func (doc surveyDocument) toDefinition(region regions.Region) (surveys.Definitio
 		return surveys.Definition{}, err
 	}
 	return def, nil
-}
-
-func documentFromSurvey(s surveys.Survey) surveyDocument {
-	available := s.Available
-	doc := surveyDocument{
-		ID: &s.ID, Name: s.Name, Available: &available,
-		ShowOnMap: s.ShowOnMap, ShowOnStops: s.ShowOnStops, AlwaysVisible: s.AlwaysVisible,
-		AllowsMultipleResponses: s.AllowsMultipleResponses,
-		VisibleStopList:         s.VisibleStopList, VisibleRouteList: s.VisibleRouteList,
-		Questions: make([]questionDocument, 0, len(s.Questions)),
-		Study:     &studyDocument{ID: s.Study.ID, Name: s.Study.Name, Description: s.Study.Description},
-		CreatedAt: surveys.FormatTime(s.CreatedAt), UpdatedAt: surveys.FormatTime(s.UpdatedAt),
-	}
-	if s.StartTime != nil {
-		v := surveys.FormatTime(*s.StartTime)
-		doc.StartDate = &v
-	}
-	if s.EndTime != nil {
-		v := surveys.FormatTime(*s.EndTime)
-		doc.EndDate = &v
-	}
-	for _, q := range s.Questions {
-		id, pos := q.ID, q.Position
-		doc.Questions = append(doc.Questions, questionDocument{ID: &id, Position: &pos, Required: q.Required, Content: q.Content})
-	}
-	return doc
 }
 
 func parseSurveyIDArg(op string, args []string) (int64, error) {
@@ -274,7 +214,7 @@ func surveyCreate(ctx context.Context, stdin io.Reader, stdout io.Writer, store 
 	if err != nil {
 		return fmt.Errorf("survey create: %w", err)
 	}
-	def, err := doc.toDefinition(reg)
+	def, err := definitionFromDocument(doc, reg)
 	if err != nil {
 		return fmt.Errorf("survey create: %w", err)
 	}
@@ -332,7 +272,7 @@ func surveyShow(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
-	if err = enc.Encode(documentFromSurvey(s)); err != nil {
+	if err = enc.Encode(surveys.DocumentFromSurvey(s)); err != nil {
 		return fmt.Errorf("survey show %d: %w", id, err)
 	}
 	_, err = stdout.Write(buf.Bytes())
@@ -365,7 +305,7 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 	if err != nil {
 		return fmt.Errorf("survey edit %d: %w", id, err)
 	}
-	def, err := doc.toDefinition(reg)
+	def, err := definitionFromDocument(doc, reg)
 	if err != nil {
 		return fmt.Errorf("survey edit %d: %w", id, err)
 	}
