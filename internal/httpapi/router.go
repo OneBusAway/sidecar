@@ -19,6 +19,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
@@ -83,6 +84,15 @@ type Deps struct {
 	// (surveys design spec §2.9): one bucket shared by create and amend.
 	// NewRouter defaults it (60/minute); tests inject tighter ones.
 	SurveyLimiter *ratelimit.Limiter
+
+	// GhostBus backs the ghost bus report endpoint (spec §8). Nil means the
+	// route is not registered.
+	GhostBus ghostbus.Repository
+	// GhostBusIPLimiter is the §2.6 10/hour-per-IP throttle; NewRouter
+	// defaults it, tests inject tighter ones.
+	GhostBusIPLimiter *ratelimit.Limiter
+	// GhostBusUserLimiter is the §2.6 20/day-per-user_identifier throttle.
+	GhostBusUserLimiter *ratelimit.Limiter
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -243,6 +253,23 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("POST /api/v1/survey_responses/{responseId}", write(sh.amend))
 		mux.HandleFunc("PUT /api/v1/survey_responses/{responseId}", write(sh.amend))
 		mux.HandleFunc("PATCH /api/v1/survey_responses/{responseId}", write(sh.amend))
+	}
+
+	if deps.GhostBus != nil {
+		if missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.GhostBus is set")
+		}
+		if deps.GhostBusIPLimiter == nil {
+			deps.GhostBusIPLimiter = ratelimit.New(10, time.Hour) // spec §2.6
+		}
+		if deps.GhostBusUserLimiter == nil {
+			deps.GhostBusUserLimiter = ratelimit.New(20, 24*time.Hour) // spec §2.6
+		}
+		gh := &ghostBusHandler{deps: deps}
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/ghost_bus_reports",
+			throttleByIP(deps.GhostBusIPLimiter, deps, gh.create))
 	}
 
 	// The admin SPA is registered independently of the admin API below, and
