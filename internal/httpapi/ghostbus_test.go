@@ -179,25 +179,47 @@ func decodeGhostBusID(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return body.ID
 }
 
-// --- Case 1: iOS-shaped form body succeeds (pinned client contract) ---
-
-func TestGhostBusCreate_IOSFormBody(t *testing.T) {
-	t.Parallel()
+// postGhostBusForm spins up a fresh server + fake repo, seeds region 1,
+// and form-posts fields -- the setup/post shell every single-shot create
+// case would otherwise repeat verbatim. Returns the response and the repo
+// for stored-value asserts.
+func postGhostBusForm(t *testing.T, fields map[string]string) (*httptest.ResponseRecorder, *fakeGhostBusRepo) {
+	t.Helper()
 	repo := &fakeGhostBusRepo{}
 	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
 	putRegion(t, regs, 1)
+	return ghostBusPost(t, h, formCT, formEncode(fields)), repo
+}
 
-	body := "user_identifier=device-abc-1&trip_identifier=1_604370&service_date=1754809200000&wait_duration_minutes=15&predicted=1&stop_identifier=1_570&route_identifier=1_44&vehicle_identifier=1_4361&stop_sequence=3&scheduled_arrival_at=1754809100000&schedule_deviation_minutes=2&comment=never+showed&user_latitude=47.6&user_longitude=-122.3"
-	rec := ghostBusPost(t, h, formCT, body)
+// requireCreated fails the test unless rec is a 201 and exactly one report
+// reached the repo; it returns that report for field asserts.
+func requireCreated(t *testing.T, rec *httptest.ResponseRecorder, repo *fakeGhostBusRepo) ghostbus.NewReport {
+	t.Helper()
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
-	decodeGhostBusID(t, rec)
-
 	if len(repo.created) != 1 {
 		t.Fatalf("created = %d rows, want 1", len(repo.created))
 	}
-	in := repo.created[0]
+	return repo.created[0]
+}
+
+// require422Message fails unless rec is a 422 whose messages contain want.
+func require422Message(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	}
+	if eb := decodeErrBody(t, rec); !slicesContains(eb.Messages, want) {
+		t.Errorf("messages = %v, want to contain %q", eb.Messages, want)
+	}
+}
+
+// assertPinnedCreateFields is the success-path client-contract assert
+// shared by the form and JSON cases: the three fields whose decoded types
+// (not just presence) the shipped iOS payload pins.
+func assertPinnedCreateFields(t *testing.T, in ghostbus.NewReport) {
+	t.Helper()
 	if in.Predicted == nil || !*in.Predicted {
 		t.Errorf("Predicted = %v, want true", in.Predicted)
 	}
@@ -207,6 +229,23 @@ func TestGhostBusCreate_IOSFormBody(t *testing.T) {
 	if in.StopSequence == nil || *in.StopSequence != 3 {
 		t.Errorf("StopSequence = %v, want 3", in.StopSequence)
 	}
+}
+
+// --- Case 1: iOS-shaped form body succeeds (pinned client contract) ---
+
+func TestGhostBusCreate_IOSFormBody(t *testing.T) {
+	t.Parallel()
+	repo := &fakeGhostBusRepo{}
+	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
+	putRegion(t, regs, 1)
+
+	// Raw body, deliberately not built from validGhostBusFields: this is
+	// byte-for-byte what NetworkHelpers-encoded iOS submissions look like.
+	body := "user_identifier=device-abc-1&trip_identifier=1_604370&service_date=1754809200000&wait_duration_minutes=15&predicted=1&stop_identifier=1_570&route_identifier=1_44&vehicle_identifier=1_4361&stop_sequence=3&scheduled_arrival_at=1754809100000&schedule_deviation_minutes=2&comment=never+showed&user_latitude=47.6&user_longitude=-122.3"
+	rec := ghostBusPost(t, h, formCT, body)
+	in := requireCreated(t, rec, repo)
+	decodeGhostBusID(t, rec)
+	assertPinnedCreateFields(t, in)
 }
 
 // --- Case 2: JSON body succeeds with native numeric/bool types ---
@@ -222,24 +261,9 @@ func TestGhostBusCreate_JSONBody(t *testing.T) {
 	fields["service_date"] = 1754809200000
 	fields["stop_sequence"] = 3
 	rec := ghostBusPost(t, h, jsonCT, jsonEncode(t, fields))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
-	}
+	in := requireCreated(t, rec, repo)
 	decodeGhostBusID(t, rec)
-
-	if len(repo.created) != 1 {
-		t.Fatalf("created = %d rows, want 1", len(repo.created))
-	}
-	in := repo.created[0]
-	if in.Predicted == nil || !*in.Predicted {
-		t.Errorf("Predicted = %v, want true", in.Predicted)
-	}
-	if in.ServiceDate != 1754809200000 {
-		t.Errorf("ServiceDate = %d, want 1754809200000", in.ServiceDate)
-	}
-	if in.StopSequence == nil || *in.StopSequence != 3 {
-		t.Errorf("StopSequence = %v, want 3", in.StopSequence)
-	}
+	assertPinnedCreateFields(t, in)
 }
 
 // TestGhostBusCreate_PredictedThreeStates pins the other two states of
@@ -253,20 +277,10 @@ func TestGhostBusCreate_PredictedThreeStates(t *testing.T) {
 
 	t.Run("present false", func(t *testing.T) {
 		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
 		fields := validGhostBusFields()
 		fields["predicted"] = "0"
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
-		}
-		if len(repo.created) != 1 {
-			t.Fatalf("created = %d rows, want 1", len(repo.created))
-		}
-		in := repo.created[0]
+		rec, repo := postGhostBusForm(t, fields)
+		in := requireCreated(t, rec, repo)
 		if in.Predicted == nil || *in.Predicted {
 			t.Errorf("Predicted = %v, want non-nil false", boolPtrString(in.Predicted))
 		}
@@ -274,20 +288,10 @@ func TestGhostBusCreate_PredictedThreeStates(t *testing.T) {
 
 	t.Run("absent", func(t *testing.T) {
 		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
 		fields := validGhostBusFields()
 		delete(fields, "predicted")
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
-		}
-		if len(repo.created) != 1 {
-			t.Fatalf("created = %d rows, want 1", len(repo.created))
-		}
-		in := repo.created[0]
+		rec, repo := postGhostBusForm(t, fields)
+		in := requireCreated(t, rec, repo)
 		if in.Predicted != nil {
 			t.Errorf("Predicted = %v, want nil", boolPtrString(in.Predicted))
 		}
@@ -344,147 +348,61 @@ func slicesContains(ss []string, want string) bool {
 	return false
 }
 
-// --- Case 4: non-integer service_date coerces to null then fails presence ---
-
-func TestGhostBusCreate_NonIntegerServiceDate(t *testing.T) {
+// --- Cases 4-7: single-field validation rejections (table) ---
+//
+// One row per 422 the handler must emit for a bad field on an otherwise
+// valid report. U+96E8 ("Yu", 3 bytes, 1 rune) makes the comment rows pin
+// rune counting: byte-counting would misjudge both the 1000 and the 1001
+// case (its boundary-accept twin lives in TestGhostBusCreate_BoundaryAccepts).
+func TestGhostBusCreate_FieldValidation(t *testing.T) {
 	t.Parallel()
-	repo := &fakeGhostBusRepo{}
-	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-	putRegion(t, regs, 1)
 
-	fields := validGhostBusFields()
-	fields["service_date"] = "2026-08-23T10:00:00Z"
-	rec := ghostBusPost(t, h, formCT, formEncode(fields))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	cases := []struct{ name, field, value, wantMsg string }{
+		{"non-integer service_date coerces to null then fails presence",
+			"service_date", "2026-08-23T10:00:00Z", "Service date can't be blank"},
+		{"wait duration outside the choice list",
+			"wait_duration_minutes", "25", "Wait duration minutes is not included in the list"},
+		{"comment over 1000 runes",
+			"comment", strings.Repeat("雨", 1001), "Comment is too long (maximum is 1000 characters)"},
+		{"latitude out of range",
+			"user_latitude", "91", "User latitude must be between -90 and 90"},
+		{"latitude unparseable",
+			"user_latitude", "abc", "User latitude must be between -90 and 90"},
 	}
-	eb := decodeErrBody(t, rec)
-	if !slicesContains(eb.Messages, "Service date can't be blank") {
-		t.Errorf("messages = %v, want to contain %q", eb.Messages, "Service date can't be blank")
-	}
-}
-
-// --- Case 5: wait_duration_minutes=25 -> 422 ---
-
-func TestGhostBusCreate_InvalidWaitDuration(t *testing.T) {
-	t.Parallel()
-	repo := &fakeGhostBusRepo{}
-	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-	putRegion(t, regs, 1)
-
-	fields := validGhostBusFields()
-	fields["wait_duration_minutes"] = "25"
-	rec := ghostBusPost(t, h, formCT, formEncode(fields))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
-	}
-	eb := decodeErrBody(t, rec)
-	if !slicesContains(eb.Messages, "Wait duration minutes is not included in the list") {
-		t.Errorf("messages = %v, want to contain the wait-duration message", eb.Messages)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fields := validGhostBusFields()
+			fields[tc.field] = tc.value
+			rec, repo := postGhostBusForm(t, fields)
+			require422Message(t, rec, tc.wantMsg)
+			if len(repo.created) != 0 {
+				t.Errorf("created = %d rows, want 0", len(repo.created))
+			}
+		})
 	}
 }
 
-// --- Case 6: comment length (rune counting, not byte counting) ---
-
-func TestGhostBusCreate_CommentLength(t *testing.T) {
+// Boundary and pass-through companions to the rejection table above.
+func TestGhostBusCreate_BoundaryAccepts(t *testing.T) {
 	t.Parallel()
 
-	// U+96E8 ("雨") is a 3-byte, 1-rune character: 1000 of them is legal,
-	// 1001 is not, and byte-counting would misjudge both.
-	rune1000 := strings.Repeat("雨", 1000)
-	rune1001 := strings.Repeat("雨", 1001)
-
-	t.Run("over limit rejected", func(t *testing.T) {
+	t.Run("comment exactly 1000 runes accepted", func(t *testing.T) {
 		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
 		fields := validGhostBusFields()
-		fields["comment"] = rune1001
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
-		}
-		eb := decodeErrBody(t, rec)
-		want := "Comment is too long (maximum is 1000 characters)"
-		if !slicesContains(eb.Messages, want) {
-			t.Errorf("messages = %v, want to contain %q", eb.Messages, want)
-		}
+		fields["comment"] = strings.Repeat("雨", 1000)
+		rec, repo := postGhostBusForm(t, fields)
+		requireCreated(t, rec, repo)
 	})
 
-	t.Run("exactly at limit accepted", func(t *testing.T) {
+	t.Run("valid negative longitude stored", func(t *testing.T) {
 		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
-		fields := validGhostBusFields()
-		fields["comment"] = rune1000
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
-		}
-	})
-}
-
-// --- Case 7: coordinate validation ---
-
-func TestGhostBusCreate_Coordinates(t *testing.T) {
-	t.Parallel()
-
-	t.Run("latitude out of range", func(t *testing.T) {
-		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
-		fields := validGhostBusFields()
-		fields["user_latitude"] = "91"
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
-		}
-		eb := decodeErrBody(t, rec)
-		want := "User latitude must be between -90 and 90"
-		if !slicesContains(eb.Messages, want) {
-			t.Errorf("messages = %v, want to contain %q", eb.Messages, want)
-		}
-	})
-
-	t.Run("latitude unparseable", func(t *testing.T) {
-		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
-		fields := validGhostBusFields()
-		fields["user_latitude"] = "abc"
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
-		}
-		eb := decodeErrBody(t, rec)
-		want := "User latitude must be between -90 and 90"
-		if !slicesContains(eb.Messages, want) {
-			t.Errorf("messages = %v, want to contain %q", eb.Messages, want)
-		}
-	})
-
-	t.Run("valid negative longitude passes", func(t *testing.T) {
-		t.Parallel()
-		repo := &fakeGhostBusRepo{}
-		h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
-		putRegion(t, regs, 1)
-
 		fields := validGhostBusFields()
 		fields["user_longitude"] = "-122.3"
-		rec := ghostBusPost(t, h, formCT, formEncode(fields))
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
-		}
-		if len(repo.created) != 1 || repo.created[0].UserLongitude == nil || *repo.created[0].UserLongitude != -122.3 {
-			t.Errorf("stored longitude wrong: %+v", repo.created)
+		rec, repo := postGhostBusForm(t, fields)
+		in := requireCreated(t, rec, repo)
+		if in.UserLongitude == nil || *in.UserLongitude != -122.3 {
+			t.Errorf("stored longitude wrong: %+v", in)
 		}
 	})
 }
