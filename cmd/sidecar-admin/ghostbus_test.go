@@ -251,6 +251,76 @@ func TestGhostBusExportCSV(t *testing.T) {
 	}
 }
 
+// TestGhostBusExportCSV_MalformedSnapshotBlanksDerivedColumns pins
+// ghostBusRow's degrade-to-blank behavior on a malformed-but-partially-
+// parseable snapshot document. The stored document is syntactically valid
+// JSON but has the wrong type for status.position (a number where an
+// object is expected), so encoding/json's decoder populates display and
+// status.phase/lastKnownLocation *before* it reaches the type error on
+// position -- json.Unmarshal returns an error, but (unlike a fully
+// destination-untouched failure) the destination struct is left partially
+// filled in. ghostBusRow must discard that partial result wholesale: every
+// derived column blank, not a mix of "some snapshot fields happened to
+// decode before the error." The raw snapshot_json cell still carries the
+// stored string through csvCell, since that column exists precisely so a
+// malformed document doesn't vanish from the export.
+func TestGhostBusExportCSV_MalformedSnapshotBlanksDerivedColumns(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedGhostBusRegion(t, store.Regions(), 1, "America/Los_Angeles")
+	ctx := context.Background()
+
+	// Valid JSON syntax; "status.position" is a number, not an object, so
+	// json.Unmarshal fails there -- but only after display and
+	// status.phase/lastKnownLocation have already been decoded into the
+	// target struct.
+	const malformed = `{"display":{"route_short_name":"44","headsign":"Downtown Local","stop_name":"Main St","stop_lat":47.6,"stop_lon":-122.3},"status":{"phase":"in_progress","lastKnownLocation":{"lat":47.61,"lon":-122.34},"position":123}}`
+
+	rep, err := store.GhostBus().Create(ctx, ghostbus.NewReport{
+		RegionID:            1,
+		PublicID:            "tok_malf_000000000001",
+		UserIdentifier:      "user-m",
+		TripIdentifier:      "trip-malformed",
+		ServiceDate:         time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		WaitDurationMinutes: 10,
+	}, time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err = store.GhostBus().MarkSnapshotCaptured(ctx, rep.ID, malformed, time.Date(2026, 8, 10, 9, 1, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("mark captured: %v", err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "ghostbus", "export", "--region", "1")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("parse csv: %v (stdout=%q)", err, stdout)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (header + 1 report); stdout=%q", len(rows), stdout)
+	}
+	row := rows[1]
+
+	for _, col := range []string{
+		"route_short_name", "headsign", "stop_name",
+		"snapshot_trip_phase", "vehicle_last_lat", "vehicle_last_lon",
+		"vehicle_distance_from_stop_m",
+	} {
+		if got := ghostBusCol(t, row, col); got != "" {
+			t.Errorf("%s = %q, want blank (malformed snapshot must not leak a partial decode)", col, got)
+		}
+	}
+	if got := ghostBusCol(t, row, "snapshot_json"); got != malformed {
+		t.Errorf("snapshot_json = %q, want the raw stored document %q", got, malformed)
+	}
+	if got := ghostBusCol(t, row, "snapshot_status"); got != ghostbus.SnapshotCaptured {
+		t.Errorf("snapshot_status = %q, want %q", got, ghostbus.SnapshotCaptured)
+	}
+}
+
 // TestGhostBusExportRejectsNaiveSince pins design §2.8/§5: --since is an
 // instant, and (like every other CLI timestamp in this repo) a naive
 // datetime with no UTC offset must be rejected rather than silently
