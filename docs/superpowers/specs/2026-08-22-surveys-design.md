@@ -354,14 +354,16 @@ Absent booleans are `false`; absent lists are `null`; absent `available` is `tru
 Dates follow the `alert create` rule: RFC 3339 with an explicit offset, or rejected.
 
 On `edit`, the survey's scalar fields are always rewritten from the document. The
-question set is **replaced wholesale** — delete all, insert in document order — but
-only while the survey has no responses. Once a response exists, question ids are what
-riders' stored answers reference and what iOS uses to dedupe locally, so renumbering
-would corrupt both; an edit whose questions differ from the stored set is refused with
-`survey N has M responses; its questions are frozen`. An edit whose questions are
-identical to the stored set (same order, same `required`, same content) is accepted
-and touches only the scalars. Id-preserving reconciliation is a follow-up if anyone
-needs to fix a typo in a live survey.
+question set is **replaced wholesale** — delete all, insert in document order — only
+when the document's questions differ from the stored set (`QuestionsEqual`); an edit
+whose questions are identical to the stored set (same order, same `required`, same
+content) never touches them and its question ids survive, whether or not the survey
+has any responses. When the questions do differ and the survey has responses, the
+edit is refused instead of replacing: question ids are what riders' stored answers
+reference and what iOS uses to dedupe locally, so renumbering would corrupt both, and
+the refusal reads `survey N has M responses; its questions are frozen`. Id-preserving
+reconciliation of a genuinely changed question set is a follow-up if anyone needs to
+fix a typo in a live survey.
 
 ### 2.14 Export is long-format CSV
 
@@ -779,9 +781,10 @@ dropped, empty → nil. `QuestionsEqual`: order, `Required`, and each `Content` 
 round trip including every boolean and both list columns as nil and populated;
 `study.description` default; active filter at both inclusive boundaries,
 `available = false` excluded, unscheduled always included, other regions excluded,
-ordering by id; `UpdateSurvey` replaces questions when no responses exist, refuses
-with `ErrQuestionsFrozen` when one does and the questions differ, accepts a
-scalar-only edit when they are identical; `DeleteSurvey` refuses with `ErrHasResponses`
+ordering by id; `UpdateSurvey` replaces questions only when they differ from the
+stored set, refuses with `ErrQuestionsFrozen` when they differ and a response exists,
+and keeps question ids on a scalar-only edit (same questions) regardless of whether
+any response exists; `DeleteSurvey` refuses with `ErrHasResponses`
 and cascades questions otherwise; `CountResponses`; `CreateResponse` on an unknown
 survey → `ErrNotFound`; `AmendResponse` merge, `ErrNotFound`, and the cap; **two
 concurrent `AmendResponse` calls on one row both succeed and both land** (mutation:

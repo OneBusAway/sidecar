@@ -26,6 +26,7 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("ActiveFilterRegionScoping", func(t *testing.T) { testActiveFilterRegionScoping(t, newStore) })
 	t.Run("EndTimeBeyond32Bit", func(t *testing.T) { testSurveyEndTimeBeyond32Bit(t, newStore) })
 	t.Run("UpdateReplacesQuestionsWhenNoResponses", func(t *testing.T) { testUpdateReplacesQuestions(t, newStore) })
+	t.Run("UpdateKeepsQuestionIDsWhenUnchanged", func(t *testing.T) { testUpdateKeepsQuestionIDsWhenUnchanged(t, newStore) })
 	t.Run("UpdateFreezesQuestionsOnceAnswered", func(t *testing.T) { testUpdateFreezesQuestions(t, newStore) })
 	t.Run("UpdateScalarsOnFrozenSurvey", func(t *testing.T) { testUpdateScalarsOnFrozen(t, newStore) })
 	t.Run("DeleteRefusesWithResponses", func(t *testing.T) { testDeleteRefusesWithResponses(t, newStore) })
@@ -314,6 +315,38 @@ func testUpdateReplacesQuestions(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 	if _, err := repo.UpdateSurvey(context.Background(), 999, def, base); !errors.Is(err, surveys.ErrNotFound) {
 		t.Fatalf("UpdateSurvey(999) err = %v", err)
+	}
+}
+
+// testUpdateKeepsQuestionIDsWhenUnchanged pins finding 6: even with zero
+// responses, an edit whose questions are identical to the stored set (same
+// order, required, and content -- only the name differs) must not
+// renumber them. Before the fix, UpdateSurvey replaced questions
+// unconditionally whenever responses == 0, so this scalar-only edit would
+// silently mint new question ids.
+func testUpdateKeepsQuestionIDsWhenUnchanged(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1"))
+	def := surveyDef("renamed") // same questions as surveyDef("v1"); only the name changes
+	if err := def.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.UpdateSurvey(context.Background(), s.ID, def, base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("scalar-only edit with no responses: %v", err)
+	}
+	if got.Name != "renamed" {
+		t.Errorf("Name = %q, want renamed", got.Name)
+	}
+	if len(got.Questions) != len(s.Questions) {
+		t.Fatalf("Questions = %+v, want %d unchanged questions", got.Questions, len(s.Questions))
+	}
+	for i, q := range got.Questions {
+		if q.ID != s.Questions[i].ID {
+			t.Errorf("question %d id = %d, want unchanged id %d", i, q.ID, s.Questions[i].ID)
+		}
 	}
 }
 

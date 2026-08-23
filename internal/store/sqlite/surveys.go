@@ -292,11 +292,13 @@ func (r *surveyRepo) ListActiveSurveys(ctx context.Context, regionID int64, now 
 	})
 }
 
-// UpdateSurvey rewrites the scalars and replaces the question set
-// wholesale -- unless responses exist, in which case the document's
-// questions must equal the stored ones (design spec 2.13). The check and
-// both writes share one immediate transaction, so a response arriving
-// between the count and the delete cannot orphan its question ids.
+// UpdateSurvey rewrites the scalars unconditionally. Questions are replaced
+// wholesale only when they differ from the stored set; an edit whose
+// questions are unchanged never touches them, so ids survive a scalar-only
+// edit even with zero responses. Once responses exist, a document whose
+// questions differ is refused (design spec 2.13). The check and both
+// writes share one immediate transaction, so a response arriving between
+// the count and the delete cannot orphan its question ids.
 func (r *surveyRepo) UpdateSurvey(ctx context.Context, id int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
 	p, err := paramsFromDefinition(def)
 	if err != nil {
@@ -321,17 +323,23 @@ func (r *surveyRepo) UpdateSurvey(ctx context.Context, id int64, def surveys.Def
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d: count responses: %w", id, err)
 	}
-	replaceQuestions := true
-	if responses > 0 {
-		var stored surveys.Survey
-		stored, err = loadSurvey(ctx, q, current)
-		if err != nil {
-			return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
-		}
-		if !surveys.QuestionsEqual(stored.Questions, def.Questions) {
+	// The question set is replaced (delete all, insert in document order)
+	// only when the document's questions differ from the stored set --
+	// never when they are identical, so a scalar-only edit (or a document
+	// that happens to reproduce the same questions) never renumbers ids.
+	// When they do differ and the survey has responses, the edit is
+	// refused: those ids are what stored answers reference and what iOS
+	// uses to dedupe locally (design spec §2.13).
+	stored, err := loadSurvey(ctx, q, current)
+	if err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
+	}
+	replaceQuestions := false
+	if !surveys.QuestionsEqual(stored.Questions, def.Questions) {
+		if responses > 0 {
 			return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d with %d responses: %w", id, responses, surveys.ErrQuestionsFrozen)
 		}
-		replaceQuestions = false
+		replaceQuestions = true
 	}
 	row, err := q.UpdateSurvey(ctx, gen.UpdateSurveyParams{
 		ID: id, Name: def.Name, Available: def.Available,

@@ -197,10 +197,10 @@ func TestSurveyShowEditRoundTrip(t *testing.T) {
 
 // assertSurveyRoundTrips checks that after -- produced by feeding show's own
 // output straight back through edit -- is unchanged from before on every
-// field the authoring document carries. Question ids may legitimately
-// differ even on an identity edit, since edit replaces the question set
-// wholesale (design spec 2.13) rather than diffing it; identity is asserted
-// on question content and required-ness, not database ids.
+// field the authoring document carries. Question ids are asserted
+// unchanged too: an identity edit's questions are identical to the stored
+// set, so UpdateSurvey never replaces them and the ids riders' stored
+// answers reference stay put (design spec 2.13, finding 6).
 func assertSurveyRoundTrips(t *testing.T, before, after surveys.Survey) {
 	t.Helper()
 	if after.Name != before.Name || after.Available != before.Available ||
@@ -227,6 +227,9 @@ func assertSurveyRoundTrips(t *testing.T, before, after surveys.Survey) {
 		if after.Questions[i].Required != before.Questions[i].Required ||
 			!surveys.ContentEqual(after.Questions[i].Content, before.Questions[i].Content) {
 			t.Errorf("question %d = %+v, want %+v", i, after.Questions[i], before.Questions[i])
+		}
+		if after.Questions[i].ID != before.Questions[i].ID {
+			t.Errorf("question %d id = %d, want unchanged id %d", i, after.Questions[i].ID, before.Questions[i].ID)
 		}
 	}
 }
