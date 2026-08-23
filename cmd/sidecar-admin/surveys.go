@@ -239,23 +239,18 @@ func parseSurveyIDArg(op string, args []string) (int64, error) {
 	return id, nil
 }
 
-// regionForStudy resolves the region a study belongs to, for parseInstant.
-//
-// here, but is part of the documented resolve-study-and-region helper this
-// task's brief specifies; Task 10's `survey responses` is expected to need
-// it too.
-//
-//nolint:unparam // the Study return is currently discarded by every caller
-func regionForStudy(ctx context.Context, store *sqlite.Store, studyID int64) (surveys.Study, regions.Region, error) {
+// regionForStudy resolves the region a study belongs to, for parseInstant's
+// explicit-offset check and timezone hint.
+func regionForStudy(ctx context.Context, store *sqlite.Store, studyID int64) (regions.Region, error) {
 	st, err := store.Surveys().GetStudy(ctx, studyID)
 	if err != nil {
-		return surveys.Study{}, regions.Region{}, fmt.Errorf("study %d: %w", studyID, err)
+		return regions.Region{}, fmt.Errorf("study %d: %w", studyID, err)
 	}
 	reg, err := store.Regions().Get(ctx, st.RegionID)
 	if err != nil {
-		return surveys.Study{}, regions.Region{}, fmt.Errorf("region %d: %w", st.RegionID, err)
+		return regions.Region{}, fmt.Errorf("region %d: %w", st.RegionID, err)
 	}
-	return st, reg, nil
+	return reg, nil
 }
 
 func surveyCreate(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
@@ -270,7 +265,7 @@ func surveyCreate(ctx context.Context, stdin io.Reader, stdout io.Writer, store 
 	if !seen["study"] || !seen["file"] {
 		return errors.New("survey create requires --study and --file")
 	}
-	_, reg, err := regionForStudy(ctx, store, *studyID)
+	reg, err := regionForStudy(ctx, store, *studyID)
 	if err != nil {
 		return fmt.Errorf("survey create: %w", err)
 	}
@@ -361,7 +356,7 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 	if err != nil {
 		return fmt.Errorf("survey edit %d: %w", id, err)
 	}
-	_, reg, err := regionForStudy(ctx, store, current.StudyID)
+	reg, err := regionForStudy(ctx, store, current.StudyID)
 	if err != nil {
 		return fmt.Errorf("survey edit %d: %w", id, err)
 	}
@@ -375,10 +370,14 @@ func surveyEdit(ctx context.Context, stdin io.Reader, store *sqlite.Store, now t
 	}
 	if _, err = store.Surveys().UpdateSurvey(ctx, id, def, now); err != nil {
 		if errors.Is(err, surveys.ErrQuestionsFrozen) {
-			//nolint:errcheck // best-effort count for the error message; if
-			// this also fails, n stays 0 and the frozen-questions error --
-			// the one that matters here -- is still returned unchanged.
-			n, _ := store.Surveys().CountResponses(ctx, id)
+			// The count is informational only: if it also fails, the message
+			// still names the real problem (frozen questions) without
+			// asserting a response count the code could not confirm --
+			// never "0 responses" when the count itself is unknown.
+			n, countErr := store.Surveys().CountResponses(ctx, id)
+			if countErr != nil {
+				return fmt.Errorf("survey edit %d: survey has responses; its questions are frozen (edit only name, dates, flags, and targeting)", id)
+			}
 			return fmt.Errorf("survey edit %d: survey has %d responses; its questions are frozen (edit only name, dates, flags, and targeting)", id, n)
 		}
 		return fmt.Errorf("survey edit %d: %w", id, err)
@@ -393,10 +392,14 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 	}
 	if err := store.Surveys().DeleteSurvey(ctx, id); err != nil {
 		if errors.Is(err, surveys.ErrHasResponses) {
-			//nolint:errcheck // best-effort count for the error message; if
-			// this also fails, n stays 0 and the has-responses error -- the
-			// one that matters here -- is still returned unchanged.
-			n, _ := store.Surveys().CountResponses(ctx, id)
+			// The count is informational only: if it also fails, the
+			// message still names the real problem (responses exist) without
+			// asserting a count the code could not confirm -- never "0
+			// response(s)" when the count itself is unknown.
+			n, countErr := store.Surveys().CountResponses(ctx, id)
+			if countErr != nil {
+				return fmt.Errorf("survey delete %d: survey has responses; responses are retained indefinitely, so the survey cannot be deleted", id)
+			}
 			return fmt.Errorf("survey delete %d: survey has %d response(s); responses are retained indefinitely, so the survey cannot be deleted", id, n)
 		}
 		return fmt.Errorf("survey delete %d: %w", id, err)

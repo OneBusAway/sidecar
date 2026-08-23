@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,21 +164,69 @@ func TestSurveyShowEditRoundTrip(t *testing.T) {
 			t.Errorf("show output missing %q", k)
 		}
 	}
-	// Feed show's output straight back through edit via stdin.
+	before, err := store.Surveys().GetSurvey(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Feed show's output straight back through edit via stdin: an identity
+	// round trip must leave the survey unchanged.
 	stdout, _, err := cliStdin(t, strings.NewReader(shown), dbPath, "survey", "edit", itoa(id), "--file", "-")
 	if err != nil {
 		t.Fatalf("edit from show output: %v (%s)", err, stdout)
 	}
-	before, _ := store.Surveys().GetSurvey(context.Background(), id)
-	edited := strings.Replace(shown, `"Rider satisfaction"`, `"Renamed"`, 1)
-	if _, _, err := cliStdin(t, strings.NewReader(edited), dbPath, "survey", "edit", itoa(id), "--file", "-"); err != nil {
+	roundTripped, err := store.Surveys().GetSurvey(context.Background(), id)
+	if err != nil {
 		t.Fatal(err)
 	}
-	after, _ := store.Surveys().GetSurvey(context.Background(), id)
+	assertSurveyRoundTrips(t, before, roundTripped)
+
+	edited := strings.Replace(shown, `"Rider satisfaction"`, `"Renamed"`, 1)
+	if _, _, err = cliStdin(t, strings.NewReader(edited), dbPath, "survey", "edit", itoa(id), "--file", "-"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Surveys().GetSurvey(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if after.Name != "Renamed" || len(after.Questions) != 2 {
 		t.Errorf("after edit = %+v", after)
 	}
-	_ = before
+}
+
+// assertSurveyRoundTrips checks that after -- produced by feeding show's own
+// output straight back through edit -- is unchanged from before on every
+// field the authoring document carries. Question ids may legitimately
+// differ even on an identity edit, since edit replaces the question set
+// wholesale (design spec 2.13) rather than diffing it; identity is asserted
+// on question content and required-ness, not database ids.
+func assertSurveyRoundTrips(t *testing.T, before, after surveys.Survey) {
+	t.Helper()
+	if after.Name != before.Name || after.Available != before.Available ||
+		after.ShowOnMap != before.ShowOnMap || after.ShowOnStops != before.ShowOnStops ||
+		after.AlwaysVisible != before.AlwaysVisible || after.AllowsMultipleResponses != before.AllowsMultipleResponses {
+		t.Errorf("round trip changed scalars: before = %+v, after = %+v", before, after)
+	}
+	if before.StartTime == nil || after.StartTime == nil || !after.StartTime.Equal(*before.StartTime) {
+		t.Errorf("StartTime = %v, want %v", after.StartTime, before.StartTime)
+	}
+	if before.EndTime == nil || after.EndTime == nil || !after.EndTime.Equal(*before.EndTime) {
+		t.Errorf("EndTime = %v, want %v", after.EndTime, before.EndTime)
+	}
+	if !reflect.DeepEqual(after.VisibleStopList, before.VisibleStopList) {
+		t.Errorf("VisibleStopList = %v, want %v", after.VisibleStopList, before.VisibleStopList)
+	}
+	if !reflect.DeepEqual(after.VisibleRouteList, before.VisibleRouteList) {
+		t.Errorf("VisibleRouteList = %v, want %v", after.VisibleRouteList, before.VisibleRouteList)
+	}
+	if len(after.Questions) != len(before.Questions) {
+		t.Fatalf("Questions = %d, want %d", len(after.Questions), len(before.Questions))
+	}
+	for i := range before.Questions {
+		if after.Questions[i].Required != before.Questions[i].Required ||
+			!surveys.ContentEqual(after.Questions[i].Content, before.Questions[i].Content) {
+			t.Errorf("question %d = %+v, want %+v", i, after.Questions[i], before.Questions[i])
+		}
+	}
 }
 
 func TestSurveyEditFrozenAndDelete(t *testing.T) {
