@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -407,6 +408,49 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 	return nil
 }
 
-func surveyResponses(context.Context, io.Writer, *sqlite.Store, []string) error {
-	return errors.New("survey responses: not implemented") // Task 10
+// surveyResponses writes long-format CSV: one row per answer, so no answer
+// to a since-deleted question is lost and the sheet pivots cleanly; a
+// response with no answers still gets a row so abandoned submissions are
+// visible (design spec 2.14).
+func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
+	id, err := parseSurveyIDArg("survey responses", args)
+	if err != nil {
+		return err
+	}
+	if _, err = store.Surveys().GetSurvey(ctx, id); err != nil {
+		return fmt.Errorf("survey responses %d: %w", id, err)
+	}
+	list, err := store.Surveys().ListResponses(ctx, id)
+	if err != nil {
+		return fmt.Errorf("survey responses %d: %w", id, err)
+	}
+	w := csv.NewWriter(stdout)
+	if err := w.Write([]string{"response_id", "user_identifier", "stop_identifier", "stop_latitude", "stop_longitude",
+		"created_at", "updated_at", "question_id", "question_type", "question_label", "answer"}); err != nil {
+		return err
+	}
+	floatCell := func(v *float64) string {
+		if v == nil {
+			return ""
+		}
+		return strconv.FormatFloat(*v, 'f', -1, 64)
+	}
+	for _, r := range list {
+		prefix := []string{r.PublicID, r.UserIdentifier, r.StopIdentifier, floatCell(r.StopLatitude), floatCell(r.StopLongitude),
+			surveys.FormatTime(r.CreatedAt), surveys.FormatTime(r.UpdatedAt)}
+		if len(r.Answers) == 0 {
+			if err := w.Write(append(prefix, "", "", "", "")); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, a := range r.Answers {
+			row := append(append([]string{}, prefix...), strconv.FormatInt(a.QuestionID, 10), a.QuestionType, a.QuestionLabel, a.Answer)
+			if err := w.Write(row); err != nil {
+				return err
+			}
+		}
+	}
+	w.Flush()
+	return w.Error()
 }

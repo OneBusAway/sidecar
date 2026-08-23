@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
@@ -267,4 +269,57 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func parseLine(s, format string, id *int64) (int, error) {
 	return fmt.Sscanf(strings.TrimSpace(s), format, id)
+}
+
+func TestSurveyResponsesCSV(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	st := createStudy(t, dbPath)
+	id := createSurvey(t, dbPath, st, surveyDoc)
+	s, _ := store.Surveys().GetSurvey(context.Background(), id)
+	lat, lon := 47.6, -122.3
+	ctx := context.Background()
+	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{
+		SurveyID: id, PublicID: "two-answers", UserIdentifier: "dev-1", StopIdentifier: "1_570", StopLatitude: &lat, StopLongitude: &lon,
+		Answers: []surveys.Answer{
+			{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "How was your trip?", Answer: "Great"},
+			{QuestionID: 77, QuestionType: "checkbox", QuestionLabel: "Modes", Answer: "[Bus, Train]"},
+		},
+	}, s.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{SurveyID: id, PublicID: "abandoned", UserIdentifier: "dev-2"}, s.CreatedAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, err := cli(t, dbPath, "survey", "responses", itoa(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
+	if err != nil {
+		t.Fatalf("not CSV: %v\n%s", err, stdout)
+	}
+	wantHeader := "response_id,user_identifier,stop_identifier,stop_latitude,stop_longitude,created_at,updated_at,question_id,question_type,question_label,answer"
+	if got := strings.Join(rows[0], ","); got != wantHeader {
+		t.Fatalf("header = %s", got)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d (%v), want header + 2 answers + 1 abandoned", len(rows), rows)
+	}
+	if rows[1][0] != "two-answers" || rows[1][2] != "1_570" || rows[1][3] != "47.6" || rows[1][10] != "Great" {
+		t.Errorf("row 1 = %v", rows[1])
+	}
+	if rows[2][7] != "77" || rows[2][10] != "[Bus, Train]" {
+		t.Errorf("row 2 = %v", rows[2])
+	}
+	if rows[3][0] != "abandoned" || rows[3][2] != "" || rows[3][3] != "" || rows[3][7] != "" || rows[3][10] != "" {
+		t.Errorf("abandoned row = %v, want empty stop and answer cells", rows[3])
+	}
+	if !strings.HasSuffix(rows[1][5], "Z") || len(rows[1][5]) != len("2026-01-01T00:00:00.000Z") {
+		t.Errorf("created_at = %q, want wire format", rows[1][5])
+	}
+	if _, _, err := cli(t, dbPath, "survey", "responses", "999"); err == nil {
+		t.Error("unknown survey accepted")
+	}
 }
