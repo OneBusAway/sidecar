@@ -692,6 +692,135 @@ func TestSDKClientCacheKeyedOnBaseURLAndKey(t *testing.T) {
 	}
 }
 
+// tripDetailsServer stands in for a region's trip-details endpoint. status,
+// when not http.StatusOK, makes every request answer with that bare HTTP
+// status (and whatever body was configured, mirroring a real error body);
+// otherwise it serves body verbatim as the JSON envelope.
+type tripDetailsServer struct {
+	*httptest.Server
+	calls  atomic.Int64
+	status int
+	body   string
+}
+
+func newTripDetailsFake(t *testing.T, status int, body string) (Client, regions.Region) {
+	t.Helper()
+	s := &tripDetailsServer{status: status, body: body}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/where/trip-details/", func(w http.ResponseWriter, r *http.Request) {
+		s.calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if s.status != http.StatusOK {
+			w.WriteHeader(s.status)
+		}
+		if _, err := w.Write([]byte(s.body)); err != nil {
+			t.Errorf("write body: %v", err)
+		}
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+
+	client := New("", s.Client(), slog.New(slog.DiscardHandler))
+	return client, testRegion(s.URL, sentinelKey)
+}
+
+func TestTripDetailsPrunesRawJSON(t *testing.T) {
+	// Serve a realistic trip-details document. Crucially the status block
+	// OMITS lastKnownLocation and includes an extra key (nextStop) that the
+	// allow-list must drop; the references resolve the trip, its route, and
+	// the queried stop.
+	body := `{
+	  "code": 200, "currentTime": 1756000123456,
+	  "data": {
+	    "entry": {
+	      "tripId": "1_604370",
+	      "status": {
+	        "predicted": true, "vehicleId": "1_4361", "phase": "in_progress",
+	        "scheduleDeviation": 60, "nextStop": "1_999",
+	        "position": {"lat": 47.61, "lon": -122.34}
+	      }
+	    },
+	    "references": {
+	      "trips":  [{"id": "1_604370", "routeId": "1_100044", "tripHeadsign": "Ballard"}],
+	      "routes": [{"id": "1_100044", "shortName": "44", "longName": "Ballard - Montlake", "type": 3}],
+	      "stops":  [{"id": "1_570", "name": "15th Ave NW & NW Market St", "lat": 47.668, "lon": -122.376}]
+	    }
+	  }
+	}`
+	client, region := newTripDetailsFake(t, http.StatusOK, body)
+
+	raw, err := client.TripDetails(context.Background(), region, TripDetailsQuery{
+		TripID: "1_604370", ServiceDate: 1754809200000, StopID: "1_570",
+	})
+	if err != nil {
+		t.Fatalf("TripDetails: %v", err)
+	}
+	var snap map[string]any
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("snapshot is not JSON: %v", err)
+	}
+	status, _ := snap["status"].(map[string]any)
+	if status["phase"] != "in_progress" || status["vehicleId"] != "1_4361" {
+		t.Errorf("status block = %v", status)
+	}
+	// Absent means absent: keys the upstream omitted must not appear as
+	// zero values (a defaulted lastKnownLocation puts the bus at Null
+	// Island and poisons the CSV distance column).
+	if _, ok := status["lastKnownLocation"]; ok {
+		t.Error("lastKnownLocation fabricated from a zero value")
+	}
+	if _, ok := status["nextStop"]; ok {
+		t.Error("nextStop survived the STATUS_KEYS allow-list")
+	}
+	display, _ := snap["display"].(map[string]any)
+	if display["route_short_name"] != "44" || display["headsign"] != "Ballard" ||
+		display["stop_name"] != "15th Ave NW & NW Market St" {
+		t.Errorf("display block = %v", display)
+	}
+	if display["stop_lat"] != 47.668 {
+		t.Errorf("stop_lat = %v", display["stop_lat"])
+	}
+	if ct, ok := snap["current_time"].(float64); !ok || int64(ct) != 1756000123456 {
+		t.Errorf("current_time = %v", snap["current_time"])
+	}
+}
+
+func TestTripDetailsEmptyEntryIsNotFound(t *testing.T) {
+	// Upstream 200 with a null/empty entry is a definitive miss, same
+	// contract as ArrivalAndDeparture's 200-with-null handling (0bb74c2).
+	client, region := newTripDetailsFake(t, http.StatusOK, `{"code":200,"data":{"entry":null,"references":{}}}`)
+	_, err := client.TripDetails(context.Background(), region, TripDetailsQuery{TripID: "1_x", ServiceDate: 1})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTripDetails404IsNotFound(t *testing.T) {
+	client, region := newTripDetailsFake(t, http.StatusNotFound, `{}`)
+	_, err := client.TripDetails(context.Background(), region, TripDetailsQuery{TripID: "1_x", ServiceDate: 1})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTripDetails500IsTransient(t *testing.T) {
+	client, region := newTripDetailsFake(t, http.StatusInternalServerError, `{}`)
+	_, err := client.TripDetails(context.Background(), region, TripDetailsQuery{TripID: "1_x", ServiceDate: 1})
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("err = %v, want a transient (unclassified) error", err)
+	}
+}
+
+func TestTripDetailsNoKeyIsNotConfigured(t *testing.T) {
+	// Region with no key and no process default: same contract as the
+	// existing calls. Reuse the file's existing no-key client fixture.
+	client := New("", http.DefaultClient, slog.New(slog.DiscardHandler))
+	_, err := client.TripDetails(context.Background(), regions.Region{ID: 1, OBABaseURL: "https://example.com"}, TripDetailsQuery{TripID: "1_x", ServiceDate: 1})
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+}
+
 // TestSDKClientCacheSendsToTheRightServer is the behavioral counterpart: the
 // pointer-identity test above cannot catch a client that is distinct but
 // still configured for the wrong host.

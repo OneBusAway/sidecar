@@ -2,6 +2,7 @@ package vehicles
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sync/atomic"
 	"testing"
@@ -39,6 +40,12 @@ func (f *fleetByRegion) Fleet(_ context.Context, region regions.Region) ([]obaap
 // fleetByRegion still satisfies obaapi.Client.
 func (f *fleetByRegion) ArrivalAndDeparture(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
 	return obaapi.Departure{}, nil
+}
+
+// TripDetails is unused by these tests; it exists only so fleetByRegion
+// still satisfies obaapi.Client.
+func (f *fleetByRegion) TripDetails(context.Context, regions.Region, obaapi.TripDetailsQuery) (json.RawMessage, error) {
+	return nil, nil
 }
 
 func newTestService(t *testing.T, oba obaapi.Client) *Service {
