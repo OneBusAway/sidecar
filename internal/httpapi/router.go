@@ -23,6 +23,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
 	"github.com/OneBusAway/sidecar/internal/weather"
 )
@@ -74,6 +75,14 @@ type Deps struct {
 	// composed from. Nil (or any lookup failure) degrades every alarm to the
 	// generic message rather than failing the create.
 	OBA obaapi.Client
+
+	// Surveys backs the survey list and survey response endpoints (spec
+	// §7). Nil means those routes are not registered.
+	Surveys surveys.Repository
+	// SurveyLimiter is the per-source throttle on survey response writes
+	// (surveys design spec §2.9): one bucket shared by create and amend.
+	// NewRouter defaults it (60/minute); tests inject tighter ones.
+	SurveyLimiter *ratelimit.Limiter
 
 	// FailDelay is the constant pause on a failed login: a brake on online
 	// guessing, not a substitute for rate limiting (design spec §4.3).
@@ -210,6 +219,30 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
 		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
+	}
+
+	if deps.Surveys != nil {
+		if missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Surveys is set")
+		}
+		if deps.SurveyLimiter == nil {
+			deps.SurveyLimiter = ratelimit.New(surveyWritesPerMinute, time.Minute)
+		}
+		sh := &surveysHandler{deps: deps}
+		// Both apps fetch the Rails-style ".json" path; both POST the
+		// create with a trailing slash ({$} is the exact-match pattern; the
+		// mux does not strip it); iOS amends with PUT, Android with POST,
+		// the OpenAPI with PATCH (surveys design spec §2.1).
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/surveys", sh.list)
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/surveys.json", sh.list)
+		write := func(next http.HandlerFunc) http.HandlerFunc { return throttleByIP(deps.SurveyLimiter, deps, next) }
+		mux.HandleFunc("POST /api/v1/survey_responses", write(sh.create))
+		mux.HandleFunc("POST /api/v1/survey_responses/{$}", write(sh.create))
+		mux.HandleFunc("POST /api/v1/survey_responses/{responseId}", write(sh.amend))
+		mux.HandleFunc("PUT /api/v1/survey_responses/{responseId}", write(sh.amend))
+		mux.HandleFunc("PATCH /api/v1/survey_responses/{responseId}", write(sh.amend))
 	}
 
 	// The admin SPA is registered independently of the admin API below, and
