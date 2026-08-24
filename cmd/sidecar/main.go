@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -136,6 +137,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 		}
 		return err
 	}
+	*gorushURL = normalizeGorushURL(*gorushURL)
 
 	// time.NewTicker panics on a duration <= 0. --refresh=0 is a natural way
 	// to try to disable the sync loop, and --refresh=nonsense is already
@@ -314,6 +316,16 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 		}
 		return <-errCh
 	}
+}
+
+// normalizeGorushURL defaults a scheme-less gateway address to http://.
+// Render's Blueprint fromService "hostport" property hands out
+// "name-xxxx:8088" with no scheme, and the private network is plain HTTP.
+func normalizeGorushURL(s string) string {
+	if s == "" || strings.Contains(s, "://") {
+		return s
+	}
+	return "http://" + s
 }
 
 // envOrDefault returns the value of the environment variable key, or def if

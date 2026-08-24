@@ -433,3 +433,20 @@ func TestRun_APNsTopicFlagParses(t *testing.T) {
 		t.Errorf("usage output lacks apns-topic:\n%s", stdout.String())
 	}
 }
+
+// TestNormalizeGorushURL pins the scheme default that lets Render's
+// fromService hostport ("gorush-abcd:8088") be used verbatim.
+func TestNormalizeGorushURL(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"":                   "",
+		"gorush:8088":        "http://gorush:8088",
+		"http://gorush:8088": "http://gorush:8088",
+		"https://g.example":  "https://g.example",
+	}
+	for in, want := range cases {
+		if got := normalizeGorushURL(in); got != want {
+			t.Errorf("normalizeGorushURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -1,0 +1,80 @@
+# Render Blueprint: the same two services compose.yaml runs locally.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Secrets marked `sync: false` are entered in the dashboard on first deploy.
+# Ports are 8080 (sidecar) and 8088 (gorush) on the private network, same as
+# local; Render forbids 10000 there.
+
+envVarGroups:
+  - name: sidecar-shared
+    envVars:
+      # openssl rand -hex 32 -- no ':' or whitespace.
+      - key: SIDECAR_GORUSH_WEBHOOK_SECRET
+        sync: false
+
+services:
+  - type: web
+    name: sidecar
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /healthz
+    disk:
+      name: sidecar-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - fromGroup: sidecar-shared
+      - key: PORT
+        value: "8080"
+      - key: SIDECAR_DB
+        value: /data/sidecar.db
+      - key: SIDECAR_GORUSH_URL
+        fromService:
+          name: gorush
+          type: pserv
+          property: hostport
+      - key: SIDECAR_APNS_TOPIC
+        sync: false
+      - key: SIDECAR_OBA_API_KEY
+        sync: false
+      - key: SIDECAR_PIRATE_WEATHER_KEY
+        sync: false
+
+  - type: pserv
+    name: gorush
+    runtime: image
+    image:
+      url: docker.io/appleboy/gorush:1.22.0
+    plan: starter
+    region: oregon
+    envVars:
+      - fromGroup: sidecar-shared
+      - key: GORUSH_CORE_PORT
+        value: "8088"
+      - key: GORUSH_IOS_ENABLED
+        value: "true"
+      - key: GORUSH_IOS_KEY_TYPE
+        value: p8
+      - key: GORUSH_IOS_PRODUCTION
+        value: "true"
+      - key: GORUSH_IOS_KEY_BASE64
+        sync: false
+      - key: GORUSH_IOS_KEY_ID
+        sync: false
+      - key: GORUSH_IOS_TEAM_ID
+        sync: false
+      - key: GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT
+        fromService:
+          name: sidecar
+          type: web
+          property: hostport
+      # Blueprint cannot concatenate values, so the two derived settings
+      # below are entered by hand on first deploy (see README):
+      #   GORUSH_CORE_FEEDBACK_HOOK_URL = http://<GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT>/webhooks/gorush
+      #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<SIDECAR_GORUSH_WEBHOOK_SECRET>
+      - key: GORUSH_CORE_FEEDBACK_HOOK_URL
+        sync: false
+      - key: GORUSH_CORE_FEEDBACK_HEADER
+        sync: false
