@@ -35,7 +35,7 @@ func TestGorushSendPostsExpectedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client())
+	g := NewGorush(server.URL, "", server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -168,7 +168,7 @@ func TestGorushOmitsDevelopment(t *testing.T) {
 			}))
 			defer server.Close()
 
-			g := NewGorush(server.URL, server.Client())
+			g := NewGorush(server.URL, "", server.Client())
 			if err := g.Send(context.Background(), Notification{
 				Tokens: []string{"tok1"}, Platform: tc.platform, Sandbox: tc.sandbox,
 				Title: "Test", Message: "Test message",
@@ -200,7 +200,7 @@ func TestGorushNon2xxIsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	g := NewGorush(server.URL, server.Client())
+	g := NewGorush(server.URL, "", server.Client())
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -238,7 +238,7 @@ func TestGorushSendTimesOutOnHungServer(t *testing.T) {
 
 	client := *server.Client()
 	client.Timeout = 50 * time.Millisecond
-	g := NewGorush(server.URL, &client)
+	g := NewGorush(server.URL, "", &client)
 
 	n := Notification{
 		Tokens:   []string{"tok1"},
@@ -292,10 +292,10 @@ func TestIsTerminal(t *testing.T) {
 func TestNewGorushAppliesDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
-	if g := NewGorush("http://gorush.test", &http.Client{}); g.http.Timeout != gorushTimeout {
+	if g := NewGorush("http://gorush.test", "", &http.Client{}); g.http.Timeout != gorushTimeout {
 		t.Errorf("client without a Timeout: got %v, want the %v default", g.http.Timeout, gorushTimeout)
 	}
-	if g := NewGorush("http://gorush.test", nil); g.http.Timeout != gorushTimeout {
+	if g := NewGorush("http://gorush.test", "", nil); g.http.Timeout != gorushTimeout {
 		t.Errorf("nil client: got %v, want the %v default", g.http.Timeout, gorushTimeout)
 	}
 	if http.DefaultClient.Timeout != 0 {
@@ -306,7 +306,7 @@ func TestNewGorushAppliesDefaultTimeout(t *testing.T) {
 	// A caller who set their own keeps it, and their client is copied, not
 	// modified in place.
 	custom := &http.Client{Timeout: 3 * time.Second}
-	if g := NewGorush("http://gorush.test", custom); g.http.Timeout != 3*time.Second {
+	if g := NewGorush("http://gorush.test", "", custom); g.http.Timeout != 3*time.Second {
 		t.Errorf("caller Timeout = %v, want it preserved at 3s", g.http.Timeout)
 	}
 	if custom.Timeout != 3*time.Second {
@@ -322,8 +322,65 @@ func TestNewGorushTrimsTrailingSlash(t *testing.T) {
 
 	const want = "http://gorush.test/api/push"
 	for _, base := range []string{"http://gorush.test", "http://gorush.test/", "http://gorush.test///"} {
-		if got := NewGorush(base, nil).pushURL; got != want {
+		if got := NewGorush(base, "", nil).pushURL; got != want {
 			t.Errorf("NewGorush(%q).pushURL = %q, want %q", base, got, want)
 		}
+	}
+}
+
+// TestGorushSendSetsAPNsTopicForIOSOnly pins the one field APNs token auth
+// cannot live without: under .p8 auth Apple requires apns-topic on every
+// request and gorush passes it through verbatim from the notification's
+// "topic". Android has no such concept, so the field must be absent there
+// rather than sent as an empty string.
+func TestGorushSendSetsAPNsTopicForIOSOnly(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		platform  Platform
+		wantTopic string
+		wantSet   bool
+	}{
+		{"ios carries topic", PlatformIOS, "org.onebusaway.iphone", true},
+		{"android omits topic", PlatformAndroid, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var captured map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read body: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				var req map[string]any
+				if err := json.Unmarshal(body, &req); err != nil {
+					t.Errorf("unmarshal body: %v", err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				captured = req["notifications"].([]any)[0].(map[string]any)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
+			err := g.Send(context.Background(), Notification{
+				Tokens: []string{"tok"}, Platform: tc.platform, Message: "hi",
+			})
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			got, set := captured["topic"]
+			if set != tc.wantSet {
+				t.Fatalf("topic present = %v, want %v (payload %v)", set, tc.wantSet, captured)
+			}
+			if set && got != tc.wantTopic {
+				t.Errorf("topic = %v, want %q", got, tc.wantTopic)
+			}
+		})
 	}
 }

@@ -125,6 +125,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 			"unset leaves the webhook open but rate limited")
 	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
 		"base URL of the gorush push gateway; without it alarms are stored but never fire")
+	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
+		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -188,7 +190,10 @@ func run(stdout, stderr io.Writer, args []string) error {
 	if *gorushURL == "" {
 		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms will be stored and reaped but never fire")
 	} else {
-		sender = push.NewGorush(*gorushURL, http.DefaultClient)
+		if *apnsTopic == "" {
+			logger.Warn("no --apns-topic/SIDECAR_APNS_TOPIC set; iOS pushes will be rejected by APNs with MissingTopic")
+		}
+		sender = push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
 	}
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),

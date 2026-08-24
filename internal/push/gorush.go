@@ -28,28 +28,36 @@ const gorushTimeout = 10 * time.Second
 // time-sensitive by definition, and gorush maps it to APNs priority 10 /
 // FCM high so an idle phone does not hold the wake-the-rider push.
 type gorushNotification struct {
-	Tokens      []string       `json:"tokens"`
-	Platform    int            `json:"platform"`
-	Title       string         `json:"title,omitempty"`
-	Message     string         `json:"message"`
-	Priority    string         `json:"priority"`
-	Development bool           `json:"development,omitempty"`
-	Data        map[string]any `json:"data,omitempty"`
+	Tokens      []string `json:"tokens"`
+	Platform    int      `json:"platform"`
+	Title       string   `json:"title,omitempty"`
+	Message     string   `json:"message"`
+	Priority    string   `json:"priority"`
+	Development bool     `json:"development,omitempty"`
+	// Topic is the APNs topic (the app's bundle id). Required by Apple under
+	// token-based (.p8) auth -- without it every push bounces MissingTopic --
+	// and gorush has no global setting for it, so it rides on each request.
+	Topic string         `json:"topic,omitempty"`
+	Data  map[string]any `json:"data,omitempty"`
 }
 
 // Gorush is a Sender backed by one gorush instance's HTTP push API.
 type Gorush struct {
-	pushURL string
-	http    *http.Client
+	pushURL   string
+	apnsTopic string
+	http      *http.Client
 }
 
-// NewGorush builds a Gorush that posts to baseURL's /api/push. A nil
+// NewGorush builds a Gorush that posts to baseURL's /api/push and stamps
+// apnsTopic (the iOS app's bundle id) onto every iOS notification; an empty
+// topic is sent as no field, which APNs rejects under .p8 auth, so callers
+// should treat empty as misconfiguration (main warns at boot). A nil
 // httpClient defaults to http.DefaultClient. If the given client has no
 // Timeout set, NewGorush uses a copy with a 10-second Timeout rather than
 // the caller's client as-is -- see gorushTimeout -- following
 // httpx.NoRedirectClient's copy-don't-mutate rule so a shared
 // http.DefaultClient is never altered out from under other callers.
-func NewGorush(baseURL string, httpClient *http.Client) *Gorush {
+func NewGorush(baseURL, apnsTopic string, httpClient *http.Client) *Gorush {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -58,8 +66,9 @@ func NewGorush(baseURL string, httpClient *http.Client) *Gorush {
 		client.Timeout = gorushTimeout
 	}
 	return &Gorush{
-		pushURL: strings.TrimRight(baseURL, "/") + "/api/push",
-		http:    client,
+		pushURL:   strings.TrimRight(baseURL, "/") + "/api/push",
+		apnsTopic: apnsTopic,
+		http:      client,
 	}
 }
 
@@ -79,6 +88,7 @@ func (g *Gorush) Send(ctx context.Context, n Notification) error {
 	}
 	if n.Platform == PlatformIOS {
 		gn.Development = n.Sandbox
+		gn.Topic = g.apnsTopic
 	}
 	body, err := json.Marshal(map[string]any{"notifications": []gorushNotification{gn}})
 	if err != nil {

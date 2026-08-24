@@ -418,3 +418,18 @@ func TestCacheBudgetsUnderWriteTimeout(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_APNsTopicFlagParses pins that --apns-topic is a recognised flag:
+// a typo'd or missing definition would make every deployment that sets it
+// fail at boot with "flag provided but not defined".
+func TestRun_APNsTopicFlagParses(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	err := run(&stdout, &stderr, []string{"--apns-topic", "org.example.app", "--help"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "apns-topic") {
+		t.Errorf("usage output lacks apns-topic:\n%s", stdout.String())
+	}
+}
