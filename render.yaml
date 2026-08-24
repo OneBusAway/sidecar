@@ -8,9 +8,16 @@
 envVarGroups:
   - name: sidecar-shared
     envVars:
-      # openssl rand -hex 32 -- no ':' or whitespace.
+      # Render ignores sync: false inside an env group (Blueprint spec:
+      # "You can't define an environment variable with sync: false in an
+      # environment group. If you do this, Render ignores the environment
+      # variable."), so this is auto-generated instead: base64, no ':' or
+      # whitespace, which satisfies gorush's header split. After the first
+      # deploy, copy the generated value from Dashboard -> Environment
+      # Groups -> sidecar-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
+      # as "authorization:<value>" (see the comment block below).
       - key: SIDECAR_GORUSH_WEBHOOK_SECRET
-        sync: false
+        generateValue: true
 
 services:
   - type: web
@@ -65,6 +72,10 @@ services:
         sync: false
       - key: GORUSH_IOS_TEAM_ID
         sync: false
+      # Staging value only -- gorush never reads
+      # GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT itself. It exists only to expose
+      # the sidecar's private host:port here so it can be copied into
+      # GORUSH_CORE_FEEDBACK_HOOK_URL below.
       - key: GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT
         fromService:
           name: sidecar
@@ -73,7 +84,9 @@ services:
       # Blueprint cannot concatenate values, so the two derived settings
       # below are entered by hand on first deploy (see README):
       #   GORUSH_CORE_FEEDBACK_HOOK_URL = http://<GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT>/webhooks/gorush
-      #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<SIDECAR_GORUSH_WEBHOOK_SECRET>
+      #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<value auto-generated for
+      #     SIDECAR_GORUSH_WEBHOOK_SECRET -- Dashboard -> Environment Groups ->
+      #     sidecar-shared>
       - key: GORUSH_CORE_FEEDBACK_HOOK_URL
         sync: false
       - key: GORUSH_CORE_FEEDBACK_HEADER
