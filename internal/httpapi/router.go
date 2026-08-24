@@ -160,6 +160,8 @@ func NewRouter(deps Deps) http.Handler {
 	h := &alertsHandler{deps: deps}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", healthz)
+
 	// The feed routes are unauthenticated by design (design spec §1.3) and
 	// deliberately bypass every admin middleware.
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
