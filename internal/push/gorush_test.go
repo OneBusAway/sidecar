@@ -11,6 +11,34 @@ import (
 	"time"
 )
 
+// newCaptureServer starts a gorush stand-in that records the first
+// notification of each request. The handler reports failures with t.Errorf
+// rather than t.Fatalf: Fatalf would stop only the handler goroutine and
+// leave the client blocked on an unanswered request. Callers read the
+// capture only after Send returns, so no synchronisation is needed.
+func newCaptureServer(t *testing.T) (*httptest.Server, func() map[string]any) {
+	t.Helper()
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal body %s: %v", body, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		captured = req["notifications"].([]any)[0].(map[string]any)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	return server, func() map[string]any { return captured }
+}
+
 func TestGorushSendPostsExpectedJSON(t *testing.T) {
 	var (
 		capturedMethod string
@@ -153,20 +181,7 @@ func TestGorushOmitsDevelopment(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var capturedBody []byte
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var err error
-				capturedBody, err = io.ReadAll(r.Body)
-				if err != nil {
-					// t.Fatalf would stop only this handler goroutine,
-					// leaving the request unanswered and the client blocked.
-					t.Errorf("failed to read body in server: %v", err)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			server, captured := newCaptureServer(t)
 
 			g := NewGorush(server.URL, "", server.Client())
 			if err := g.Send(context.Background(), Notification{
@@ -175,18 +190,13 @@ func TestGorushOmitsDevelopment(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Send() returned unexpected error: %v", err)
 			}
-
-			var reqBody map[string]any
-			if err := json.Unmarshal(capturedBody, &reqBody); err != nil {
-				t.Fatalf("failed to unmarshal body: %v", err)
-			}
-			notif := reqBody["notifications"].([]any)[0].(map[string]any)
+			notif := captured()
 
 			if platform, ok := notif["platform"].(float64); !ok || platform != tc.wantPlatform {
 				t.Errorf("platform = %v, want %v", notif["platform"], tc.wantPlatform)
 			}
 			if _, hasDevelopment := notif["development"]; hasDevelopment {
-				t.Errorf("development key present, want it omitted; payload = %s", capturedBody)
+				t.Errorf("development key present, want it omitted; payload = %v", notif)
 			}
 		})
 	}
@@ -355,36 +365,20 @@ func TestNewGorushTrimsTrailingSlash(t *testing.T) {
 func TestGorushSendSetsAPNsTopicForIOSOnly(t *testing.T) {
 	t.Parallel()
 
+	// want is the decoded "topic" value: a missing key reads back as nil,
+	// which is what omitempty must produce for Android (not "").
 	cases := []struct {
-		name      string
-		platform  Platform
-		wantTopic string
-		wantSet   bool
+		name     string
+		platform Platform
+		want     any
 	}{
-		{"ios carries topic", PlatformIOS, "org.onebusaway.iphone", true},
-		{"android omits topic", PlatformAndroid, "", false},
+		{"ios carries topic", PlatformIOS, "org.onebusaway.iphone"},
+		{"android omits topic", PlatformAndroid, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var captured map[string]any
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					t.Errorf("read body: %v", err)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				var req map[string]any
-				if err := json.Unmarshal(body, &req); err != nil {
-					t.Errorf("unmarshal body: %v", err)
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				captured = req["notifications"].([]any)[0].(map[string]any)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer server.Close()
+			server, captured := newCaptureServer(t)
 
 			g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
 			err := g.Send(context.Background(), Notification{
@@ -393,12 +387,8 @@ func TestGorushSendSetsAPNsTopicForIOSOnly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Send: %v", err)
 			}
-			got, set := captured["topic"]
-			if set != tc.wantSet {
-				t.Fatalf("topic present = %v, want %v (payload %v)", set, tc.wantSet, captured)
-			}
-			if set && got != tc.wantTopic {
-				t.Errorf("topic = %v, want %q", got, tc.wantTopic)
+			if got := captured()["topic"]; got != tc.want {
+				t.Errorf("topic = %v, want %v (payload %v)", got, tc.want, captured())
 			}
 		})
 	}

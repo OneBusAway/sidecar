@@ -5,12 +5,10 @@
 set -eu
 base="${1:-http://localhost:8080}"
 
-# status prints the HTTP status for a path, or 000 when the connection
-# fails. curl already writes '000' via -w before returning non-zero, so the
-# fallback replaces the captured value rather than appending to it.
+# status prints the HTTP status for a path. curl writes '000' via -w when
+# the connection fails and exits non-zero; || true keeps set -e from aborting.
 status() {
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$base$1")" || code=000
-  echo "$code"
+  curl -s -o /dev/null -w '%{http_code}' "$base$1" || true
 }
 
 check() {

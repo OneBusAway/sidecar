@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -113,7 +114,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 	fs.SetOutput(io.Discard)
 
 	dbPath := fs.String("db", envOrDefault("SIDECAR_DB", defaultDB), "path to the sqlite database file")
-	addr := fs.String("addr", defaultAddr, "address for the HTTP server to listen on")
+	addr := fs.String("addr", defaultListenAddr(), "address for the HTTP server to listen on; "+
+		"defaults to SIDECAR_ADDR, then :$PORT (what Render and similar hosts set), then "+defaultAddr)
 	regionsURL := fs.String("regions-url", envOrDefault("SIDECAR_REGIONS_URL", defaultRegionsURL), "URL of the regions directory document")
 	refresh := fs.Duration("refresh", defaultRefresh, "interval between regions directory refreshes")
 	obaAPIKey := fs.String("oba-api-key", envOrDefault("SIDECAR_OBA_API_KEY", ""),
@@ -135,6 +137,15 @@ func run(stdout, stderr io.Writer, args []string) error {
 			return nil
 		}
 		return err
+	}
+
+	// gorush builds its feedback header from "name:value" by splitting on
+	// every ':' and silently sends no header at all when the split yields
+	// more than two parts, so a secret containing ':' (or whitespace, which
+	// header values cannot carry) would make every prune 401 with nothing
+	// in the sidecar's logs to say why. Reject it here, where it is visible.
+	if strings.ContainsAny(*webhookSecret, ": \t\r\n") {
+		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
 	}
 
 	// time.NewTicker panics on a duration <= 0. --refresh=0 is a natural way
@@ -318,6 +329,20 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 
 // envOrDefault returns the value of the environment variable key, or def if
 // key is unset or empty.
+// defaultListenAddr resolves the --addr default from the environment:
+// SIDECAR_ADDR verbatim, else ":"+PORT so a host that assigns the port via
+// PORT (Render, Heroku-style platforms) and the binary cannot silently
+// disagree on where the health check should look, else defaultAddr.
+func defaultListenAddr() string {
+	if v := os.Getenv("SIDECAR_ADDR"); v != "" {
+		return v
+	}
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return defaultAddr
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

@@ -307,14 +307,21 @@ export SIDECAR_PIRATE_WEATHER_KEY=...
 # when no transport is configured.
 export SIDECAR_GORUSH_URL=...
 
+# APNs topic (the iOS app's bundle id), required alongside SIDECAR_GORUSH_URL:
+# under .p8 token auth Apple rejects every push without one (MissingTopic).
+# The server warns at boot if gorush is configured and this is not.
+export SIDECAR_APNS_TOPIC=org.onebusaway.iphone
+
 # Shared secret gorush must send on the feedback webhook, as either
 # `Authorization: Bearer <secret>` or a bare `Authorization: <secret>`.
 # Leave it unset only if your gorush cannot send a header: the webhook then
 # stays open (and rate limited), and should be restricted at the proxy.
+# gorush splits its header setting on ':', so the value must contain no ':'
+# or whitespace; the server refuses to start otherwise.
 export SIDECAR_GORUSH_WEBHOOK_SECRET=...
 ```
 
-(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url` are the equivalent `sidecar` flags.)
+(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url`/`--apns-topic`/`--gorush-webhook-secret` are the equivalent `sidecar` flags.)
 
 A region can also carry its own OneBusAway REST API key, overriding
 `SIDECAR_OBA_API_KEY` for that region alone -- set it the same way as the other
@@ -512,7 +519,7 @@ make up-gorush
 make run
 ```
 
-`.env` already points `SIDECAR_GORUSH_URL` at `localhost:8088`, and gorush's
+`.env` already points `SIDECAR_GORUSH_URL` at `http://localhost:8088`, and gorush's
 feedback hook is redirected to `host.docker.internal:8080` so token prunes
 still arrive. `make down` stops either arrangement; the SQLite volume
 (`sidecar-data`) survives. `GORUSH_IOS_ENABLED` and `GORUSH_ANDROID_ENABLED`
@@ -534,7 +541,7 @@ Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golan
 ```sh
 make tools     # install pinned dev tooling
 make check     # fmt-check + vet + lint + test + test-tz + test-race — everything CI runs
-make run       # build and run the server
+make run       # go run the server (/admin serves 503 until `make web`)
 make up        # start sidecar + gorush in Docker (see "Running locally with Docker")
 make help      # list all targets, including the rest of the Docker ones
 ```

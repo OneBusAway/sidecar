@@ -433,3 +433,39 @@ func TestRun_APNsTopicFlagParses(t *testing.T) {
 		t.Errorf("usage output lacks apns-topic:\n%s", stdout.String())
 	}
 }
+
+// TestRun_RejectsWebhookSecretWithColon pins the boot-time guard for a
+// secret gorush cannot transmit: it splits GORUSH_CORE_FEEDBACK_HEADER on
+// every ':' and drops the header when that yields more than two parts, so a
+// secret with a ':' would 401 every prune with no local evidence.
+func TestRun_RejectsWebhookSecretWithColon(t *testing.T) {
+	t.Parallel()
+	for _, secret := range []string{"ab:cd", "ab cd", "ab\tcd"} {
+		var stdout, stderr bytes.Buffer
+		// --refresh 0 is rejected right after the secret check, so a
+		// regression fails on the wrong error rather than booting a server.
+		err := run(&stdout, &stderr, []string{"--gorush-webhook-secret", secret, "--refresh", "0"})
+		if err == nil || !strings.Contains(err.Error(), "must not contain") {
+			t.Errorf("secret %q: err = %v, want the ':'/whitespace rejection", secret, err)
+		}
+	}
+}
+
+// TestDefaultListenAddr pins the PORT/SIDECAR_ADDR precedence: render.yaml
+// sets PORT and Render probes that port, so a binary that ignored it would
+// fail its health check the moment the two values diverged.
+func TestDefaultListenAddr(t *testing.T) {
+	t.Setenv("SIDECAR_ADDR", "")
+	t.Setenv("PORT", "")
+	if got := defaultListenAddr(); got != defaultAddr {
+		t.Errorf("no env: got %q, want %q", got, defaultAddr)
+	}
+	t.Setenv("PORT", "9090")
+	if got := defaultListenAddr(); got != ":9090" {
+		t.Errorf("PORT=9090: got %q, want :9090", got)
+	}
+	t.Setenv("SIDECAR_ADDR", "127.0.0.1:7000")
+	if got := defaultListenAddr(); got != "127.0.0.1:7000" {
+		t.Errorf("SIDECAR_ADDR wins over PORT: got %q", got)
+	}
+}
