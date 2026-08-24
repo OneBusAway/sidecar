@@ -33,6 +33,12 @@ help: ## Show this help
 build: web ## Build the sidecar binary into bin/ (SPA first, so it is embedded)
 	$(GO) build -o $(BIN_DIR)/$(BINARY) $(CMD)
 
+IMAGE ?= sidecar:local
+
+.PHONY: image
+image: ## Build the container image (SPA + both binaries)
+	docker build -t $(IMAGE) .
+
 # Shared by web and web-check so a single make invocation installs once:
 # make builds a phony target at most once, and npm ci wipes and reinstalls
 # the whole tree every time it runs.
