@@ -314,6 +314,25 @@ func TestNewGorushAppliesDefaultTimeout(t *testing.T) {
 	}
 }
 
+// TestNewGorushDefaultsScheme pins that a bare host:port -- what Render's
+// fromService hostport property yields -- is usable verbatim, while an
+// explicit scheme is left alone.
+func TestNewGorushDefaultsScheme(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"gorush:8088":        "http://gorush:8088/api/push",
+		"http://gorush:8088": "http://gorush:8088/api/push",
+		"https://g.example":  "https://g.example/api/push",
+		"https://g.example/": "https://g.example/api/push",
+	}
+	for base, want := range cases {
+		if got := NewGorush(base, "", nil).pushURL; got != want {
+			t.Errorf("NewGorush(%q).pushURL = %q, want %q", base, got, want)
+		}
+	}
+}
+
 // TestNewGorushTrimsTrailingSlash keeps a trailing slash in an
 // operator-supplied SIDECAR_GORUSH_URL from producing a double-slashed
 // //api/push.

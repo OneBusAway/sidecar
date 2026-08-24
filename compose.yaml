@@ -6,7 +6,7 @@ name: sidecar
 services:
   sidecar:
     build: .
-    image: sidecar:local
+    image: ${IMAGE:-sidecar:local}   # same default as the Makefile's IMAGE
     ports:
       - "8080:8080"
     volumes:

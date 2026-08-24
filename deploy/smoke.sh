@@ -5,13 +5,17 @@
 set -eu
 base="${1:-http://localhost:8080}"
 
+# status prints the HTTP status for a path, or 000 when the connection
+# fails. curl already writes '000' via -w before returning non-zero, so the
+# fallback replaces the captured value rather than appending to it.
+status() {
+  code="$(curl -s -o /dev/null -w '%{http_code}' "$base$1")" || code=000
+  echo "$code"
+}
+
 check() {
   path="$1"; want="$2"
-  # curl itself already writes '000' via -w on a connection failure before
-  # returning non-zero, so `|| echo 000` inside the substitution would
-  # append a second '000' (-> "000000"); fall back on the assignment
-  # instead, which replaces rather than appends.
-  got="$(curl -s -o /dev/null -w '%{http_code}' "$base$path")" || got=000
+  got="$(status "$path")"
   if [ "$got" != "$want" ]; then
     echo "FAIL $path -> $got (want $want)" >&2
     exit 1
@@ -21,7 +25,7 @@ check() {
 
 check /healthz 200
 check /admin 200            # proves the SPA embedded (503 means it did not)
-alerts="$(curl -s -o /dev/null -w '%{http_code}' "$base/api/v1/regions/1/alerts.pbtext")" || alerts=000
+alerts="$(status /api/v1/regions/1/alerts.pbtext)"
 case "$alerts" in
   200) echo "ok   /api/v1/regions/1/alerts.pbtext -> 200" ;;
   404) echo "skip /api/v1/regions/1/alerts.pbtext -> 404 (no regions synced yet)" ;;

@@ -4,7 +4,7 @@
 FROM node:24-alpine AS web
 WORKDIR /src/web/admin
 COPY web/admin/package.json web/admin/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY web/admin/ ./
 RUN npm run build
 
@@ -12,15 +12,17 @@ RUN npm run build
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 # The SPA is embedded via //go:embed all:dist, so it must sit in the tree
 # before go build. Copy from the web stage rather than trusting whatever the
 # developer's local dist/ holds.
 RUN rm -rf internal/httpapi/adminui/dist && mkdir -p internal/httpapi/adminui/dist
 COPY --from=web /src/web/admin/build/ internal/httpapi/adminui/dist/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sidecar ./cmd/sidecar \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sidecar-admin ./cmd/sidecar-admin
+# One invocation builds both binaries so shared packages compile once; the
+# cache mounts keep incremental builds across `make image` runs.
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/sidecar ./cmd/sidecar-admin
 
 # --- Stage 3: runtime --------------------------------------------------------
 FROM alpine:3.22

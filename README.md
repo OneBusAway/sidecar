@@ -535,15 +535,9 @@ Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golan
 make tools     # install pinned dev tooling
 make check     # fmt-check + vet + lint + test + test-tz + test-race — everything CI runs
 make run       # build and run the server
-make image     # build the container image (sidecar:local)
-make up        # start sidecar + gorush in Docker (reads .env)
-make up-gorush # start only gorush; run the sidecar on the host with `make run`
-make down      # stop the local stack (data volume is kept)
-make admin     # run sidecar-admin inside the container (make admin ARGS="region list")
-make help      # list all targets
+make up        # start sidecar + gorush in Docker (see "Running locally with Docker")
+make help      # list all targets, including the rest of the Docker ones
 ```
-
-See "Running locally with Docker" above for the full compose workflow.
 
 Run `make check` before opening a pull request. There is no CI workflow in
 this repo yet (no `.github/`), but whoever adds one needs to route it

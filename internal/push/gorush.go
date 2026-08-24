@@ -48,7 +48,8 @@ type Gorush struct {
 	http      *http.Client
 }
 
-// NewGorush builds a Gorush that posts to baseURL's /api/push and stamps
+// NewGorush builds a Gorush that posts to baseURL's /api/push (a bare
+// host:port is treated as http://) and stamps
 // apnsTopic (the iOS app's bundle id) onto every iOS notification; an empty
 // topic is sent as no field, which APNs rejects under .p8 auth, so callers
 // should treat empty as misconfiguration (main warns at boot). A nil
@@ -64,6 +65,12 @@ func NewGorush(baseURL, apnsTopic string, httpClient *http.Client) *Gorush {
 	client := httpx.NoRedirectClient(httpClient)
 	if client.Timeout == 0 {
 		client.Timeout = gorushTimeout
+	}
+	// A scheme-less address is taken as plain HTTP: Render's Blueprint
+	// fromService "hostport" hands out "name-xxxx:8088", and the private
+	// network it names is unencrypted.
+	if !strings.Contains(baseURL, "://") {
+		baseURL = "http://" + baseURL
 	}
 	return &Gorush{
 		pushURL:   strings.TrimRight(baseURL, "/") + "/api/push",
