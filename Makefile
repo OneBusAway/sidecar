@@ -64,6 +64,28 @@ run: ## Run the sidecar server (make run ARGS="--addr :8080")
 tidy: ## Sync go.mod/go.sum
 	$(GO) mod tidy
 
+## --- Local stack -----------------------------------------------------------
+
+.PHONY: up
+up: ## Start sidecar + gorush in Docker (reads .env)
+	docker compose up --build -d
+
+.PHONY: up-gorush
+up-gorush: ## Start only gorush; run the sidecar on the host with `make run`
+	FEEDBACK_HOOK_HOST=host.docker.internal docker compose up -d gorush
+
+.PHONY: down
+down: ## Stop the local stack (data volume is kept)
+	docker compose down
+
+.PHONY: logs
+logs: ## Follow local stack logs
+	docker compose logs -f
+
+.PHONY: admin
+admin: ## Run sidecar-admin inside the container (make admin ARGS="region list")
+	docker compose exec sidecar sidecar-admin $(ARGS)
+
 ## --- Tests -----------------------------------------------------------------
 
 # The Go tests include an embed assertion that needs a populated dist/ (see
