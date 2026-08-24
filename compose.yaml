@@ -5,7 +5,6 @@ name: sidecar
 
 services:
   sidecar:
-    profiles: [full]
     build: .
     image: sidecar:local
     ports:
@@ -17,6 +16,9 @@ services:
       # Inside the compose network the gateway is the gorush service, not
       # localhost; this overrides the host-oriented value in .env.
       SIDECAR_GORUSH_URL: http://gorush:8088
+      # Pinned here so env_file doesn't let a host path (e.g. ./sidecar.db)
+      # in .env leak into the container, where /data is the writable volume.
+      SIDECAR_DB: /data/sidecar.db
     depends_on:
       gorush:
         condition: service_healthy
@@ -25,7 +27,9 @@ services:
   gorush:
     image: appleboy/gorush:1.22.0
     ports:
-      - "8088:8088"
+      # gorush has no auth and holds the APNs signing key; only the
+      # host-run sidecar needs it, via localhost. Not exposed on the LAN.
+      - "127.0.0.1:8088:8088"
     environment:
       GORUSH_CORE_PORT: "8088"
       GORUSH_IOS_ENABLED: ${GORUSH_IOS_ENABLED:-true}

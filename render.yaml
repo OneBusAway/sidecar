@@ -60,6 +60,11 @@ services:
       - fromGroup: sidecar-shared
       - key: GORUSH_CORE_PORT
         value: "8088"
+      # gorush ignores PORT, but setting it makes Render's port detection
+      # deterministic and keeps it off the forbidden private port 10000
+      # (same reasoning as the sidecar's PORT).
+      - key: PORT
+        value: "8088"
       - key: GORUSH_IOS_ENABLED
         value: "true"
       - key: GORUSH_IOS_KEY_TYPE
