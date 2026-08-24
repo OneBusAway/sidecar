@@ -21,13 +21,18 @@ make web                # build the SvelteKit admin SPA into internal/httpapi/ad
 make build              # SPA + go build -o bin/sidecar
 make run ARGS="..."     # go run ./cmd/sidecar — does NOT build the SPA; /admin serves 503 until `make web`
 go build -o bin/sidecar-admin ./cmd/sidecar-admin
+make image              # docker build -t sidecar:local .
+make up / down / logs   # compose stack: sidecar + gorush (needs .env)
+make up-gorush          # gorush only; pair with `make run` on the host
+make admin ARGS="…"     # sidecar-admin inside the container
+deploy/smoke.sh [url]   # /healthz + /admin + alerts feed check
 ```
 
 Single test: `go test ./internal/httpapi -run 'TestName/Subtest'`. Go tests need no SPA except `internal/httpapi/adminui` (its embed assertion needs a populated `dist/`), so plain `go test ./...` fails there until you've run `make web` once.
 
 Frontend (`web/admin`): `npm run check` (svelte-check), `npm run lint` (prettier + eslint), `npm run test:unit` (vitest), `npm run dev`.
 
-Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and real env vars win. Keys: `SIDECAR_DB`, `SIDECAR_OBA_API_KEY`, `SIDECAR_PIRATE_WEATHER_KEY`, `SIDECAR_GORUSH_URL`, `SIDECAR_GORUSH_WEBHOOK_SECRET` (each also a flag). `*.db` files are gitignored.
+Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and real env vars win. Keys: `SIDECAR_DB`, `SIDECAR_OBA_API_KEY`, `SIDECAR_PIRATE_WEATHER_KEY`, `SIDECAR_GORUSH_URL`, `SIDECAR_GORUSH_WEBHOOK_SECRET`, `SIDECAR_APNS_TOPIC` (each also a flag). `*.db` files are gitignored.
 
 ## Architecture
 
@@ -35,7 +40,7 @@ Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and 
 
 **Layering.** Each feature is a domain package under `internal/` (`alerts`, `regions`, `auth`, `pushreg`, `alarms`, `surveys`, `ghostbus`, `weather`, `vehicles`) that defines its own `Repository` interface and domain types. `internal/store/sqlite` implements every repository over sqlc-generated code (`gen/`, from `queries/*.sql` against goose migrations in `migrations/`) and exposes them via `Store.Alerts()`, `Store.Regions()`, etc. `internal/httpapi` holds handlers; everything they need arrives through the `Deps` struct (`router.go`). Most `Deps` fields are optional: a nil repository/service means *those routes are not registered*, which is how feed-only deployments and narrow tests work. Admin routes are a table (`adminRoutes`) rather than ad-hoc `mux.Handle` calls, so tests can enumerate them and assert every one is wrapped in the cross-site guard.
 
-**Wiring lives only in `cmd/sidecar/main.go`**: open store → `Migrate()` → build `Deps` → start background loops (regions directory sync, push-registration prune, alarm scheduler, ghost bus snapshot enrichment) → serve. Background loops take `ctx`, a repository, an interval, and a clock.
+**Wiring lives only in `cmd/sidecar/main.go`**: open store → `Migrate()` → build `Deps` → start background loops (regions directory sync, push-registration prune, alarm scheduler, ghost bus snapshot enrichment) → serve. Background loops take `ctx`, a repository, an interval, and a clock. `compose.yaml` (local) and `render.yaml` (Render) mirror each other on ports 8080 (sidecar) and 8088 (gorush).
 
 **Tests.** `internal/store/storetest` is an engine-agnostic conformance suite (`RunAlertRepository(t, newStore)` etc.) that a future Postgres adapter must pass unchanged — it must not import any adapter. `internal/store/sqlitetest.Open(t)` gives a migrated temp-file store for everything else. Handler tests build a `Deps` with only what they need and inject tighter rate limiters, a fixed `Now`, and recorder `Sleep`/`VerifyPassword` funcs.
 
