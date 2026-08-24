@@ -534,6 +534,111 @@ APNs under `.p8` token auth requires a topic on every push, so
 `SIDECAR_APNS_TOPIC` (the iOS bundle id) must be set wherever
 `SIDECAR_GORUSH_URL` is; the server warns at boot if it is not.
 
+### Verifying a push on a real device
+
+A complete runbook for getting an APNs push from this stack onto an iPhone.
+
+**1. Fill in `.env`.** A base64 `.p8` key is *not enough on its own* — token
+auth also needs the key id and team id, and every push needs the app's bundle
+id as its topic. All five of these must be set (get the first three from
+[developer.apple.com](https://developer.apple.com) → Keys / Membership):
+
+```sh
+# gorush — the APNs credential
+GORUSH_IOS_KEY_BASE64=...        # base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n'
+GORUSH_IOS_KEY_ID=XXXXXXXXXX     # 10 chars, the key's ID
+GORUSH_IOS_TEAM_ID=XXXXXXXXXX    # 10 chars, your team ID
+# sidecar
+SIDECAR_APNS_TOPIC=org.onebusaway.iphone   # the EXACT bundle id of the build on the phone
+SIDECAR_GORUSH_WEBHOOK_SECRET=...          # openssl rand -hex 32  (needed only for the prune half)
+```
+
+The topic must be the bundle id of the build actually installed on the
+device. A debug build often has a different id than the App Store build
+(e.g. a `.debug` suffix); the wrong one bounces every push with
+`DeviceTokenNotForTopic`.
+
+**2. Start the stack and confirm the key loaded.**
+
+```sh
+make up
+deploy/smoke.sh                              # /healthz, /admin, alerts feed
+curl -s localhost:8088/api/config | sed -n '/^ios:/,/^queue:/p'
+```
+
+The `ios:` block must show `enabled: true`, `key_type: p8`, and a
+`[REDACTED]` `key_id`/`team_id` (gorush hides their values). If `enabled` is
+false or the container is restart-looping, gorush rejected the key — check
+`docker compose logs gorush`.
+
+**3. Get the device token and your Mac's LAN address.**
+
+```sh
+ipconfig getifaddr en0        # your Mac's LAN IP; the phone must be on the same Wi-Fi
+```
+
+Point the debug build at `http://<that-ip>:8080` (a debug build allows
+plain-HTTP via its ATS exception) and let it register — it will `POST` its
+APNs token to `/api/v2/regions/1/push_registrations` with `apns_sandbox=1`.
+Grab that 64-hex-character token from the Xcode console or the app's debug UI.
+
+**4a. Fastest check — push straight through gorush.** This skips the
+sidecar's trip lookup and proves the credential + topic + token + sandbox
+routing all work. Use `"development": true` for a debug build (sandbox
+token); `false` for a TestFlight/App Store build (production token):
+
+```sh
+curl -s -X POST localhost:8088/api/push -H 'Content-Type: application/json' -d '{
+  "notifications": [{
+    "tokens": ["<the 64-hex device token>"],
+    "platform": 1,
+    "topic": "org.onebusaway.iphone",
+    "title": "OneBusAway",
+    "message": "Sidecar test push",
+    "development": true
+  }]
+}'
+# → {"counts":1,"logs":[],"success":"ok"}   (queued, not yet delivered)
+docker compose logs -f gorush                # watch the async APNs result
+```
+
+A `200`/`success: ok` only means gorush accepted the request; delivery
+happens asynchronously. Watch the gorush log for the outcome (see the error
+table below).
+
+**4b. Full end-to-end through the sidecar** (exercises the real alarm path).
+Register the token, then create an alarm on a live upcoming departure; the
+push fires when the trip is `seconds_before` seconds from leaving:
+
+```sh
+IP=$(ipconfig getifaddr en0)
+curl -s -X POST http://$IP:8080/api/v2/regions/1/push_registrations \
+  -d token=<device token> -d operating_system=ios -d apns_sandbox=1
+
+curl -s -X POST http://$IP:8080/api/v2/regions/1/alarms \
+  -d user_push_id=<device token> -d operating_system=ios -d apns_sandbox=1 \
+  -d stop_id=<stop> -d trip_id=<trip> -d service_date=<epoch ms> \
+  -d stop_sequence=<n> -d seconds_before=60
+```
+
+See [specification.md](specification/specification.md) §5.2 for the field
+semantics. `service_date` is epoch **milliseconds**. Only `user_push_id` and
+`operating_system` are validated; a bogus trip still returns `201` but its
+push carries a generic message and never resolves a real departure, so use a
+trip that is genuinely a minute or two out.
+
+**Reading the result.** gorush returns immediately; the real outcome is in
+`docker compose logs gorush` and, for terminal failures, on the feedback
+webhook (which prunes the dead token). Common APNs errors:
+
+| gorush log message | Cause | Fix |
+|---|---|---|
+| `InvalidProviderToken` | `GORUSH_IOS_KEY_ID`/`TEAM_ID`/key don't match, or the host clock is skewed | recheck all three; ensure the Mac's clock is correct |
+| `MissingTopic` | no topic sent | set `SIDECAR_APNS_TOPIC` (4a sends `topic` inline) |
+| `DeviceTokenNotForTopic` | topic ≠ the build's bundle id | set the topic to the installed build's exact bundle id |
+| `BadDeviceToken` | `development` flag doesn't match the build's environment | `true` for a debug/sandbox build, `false` for TestFlight/release |
+| `TopicDisallowed` | the key isn't enabled for this topic | enable the key for the app in the Apple developer portal |
+
 ## Development
 
 Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golangci-lint.run) 2.12+, and Node (for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
