@@ -8,91 +8,28 @@ on:
 permissions:
   contents: read
 
-# Every job runs the same make target a developer runs locally, so CI and
-# `make check` cannot drift. Go comes from go.mod, Node from mise.toml
-# (24), and golangci-lint / sqlc from the Makefile pins.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# One job per `make check` target, so CI runs exactly what a developer runs
+# locally and there is one list to maintain. The whole toolchain (Go, Node,
+# golangci-lint, sqlc) comes from mise.toml.
 jobs:
-  generate-check:
-    name: make generate-check
+  check:
+    name: make ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fmt-check, vet, lint, generate-check, test, test-tz, test-race, web-check]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: jdx/mise-action@v2
         with:
-          go-version-file: go.mod
-      - name: Install pinned sqlc
-        run: |
-          version="$(sed -n 's/^SQLC_VERSION *:= *//p' Makefile)"
-          go install "github.com/sqlc-dev/sqlc/cmd/sqlc@${version}"
-      - run: make generate-check
-
-  lint:
-    name: make lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+          cache: true
+      - uses: actions/cache@v4
         with:
-          go-version-file: go.mod
-      - name: Install pinned golangci-lint
-        run: |
-          version="$(sed -n 's/^GOLANGCI_LINT_VERSION *:= *//p' Makefile)"
-          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${version}"
-      - run: make lint
-
-  test:
-    name: make test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
-      - run: make test
-
-  test-race:
-    name: make test-race
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
-      - run: make test-race
-
-  test-tz:
-    name: make test-tz
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
-      - run: make test-tz
-
-  web-check:
-    name: make web-check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
-      - run: make web-check
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/admin/package-lock.json') }}
+      - run: make ${{ matrix.target }}

@@ -725,20 +725,20 @@ curl -s -X DELETE http://$IP:8080/api/v2/regions/1/live_activities/<token>
 
 ## Development
 
-Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golangci-lint.run) 2.12+, [sqlc](https://sqlc.dev) 1.31+ (`make tools` installs both), and Node (for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
+Requires Go 1.26+, [golangci-lint](https://golangci-lint.run) 2.12+, [sqlc](https://sqlc.dev) 1.31+, and Node -- all pinned in `mise.toml`, so `mise install` (or `make tools`) sets up everything (Node is for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
 
 ```sh
 make tools     # install pinned dev tooling
-make check     # fmt-check + vet + lint + test + test-tz + test-race — everything CI runs
+make check     # fmt-check + vet + lint + generate-check + test + test-tz + test-race + web-check — everything CI runs
 make run       # go run the server (/admin serves 503 until `make web`)
 make up        # start sidecar + gorush in Docker (see "Running locally with Docker")
 make help      # list all targets, including the rest of the Docker ones
 ```
 
-Run `make check` before opening a pull request. There is no CI workflow in
-this repo yet (no `.github/`), but whoever adds one needs to route it
-through `make check`, or run `make web` before any `go test` step: the Go
-suite includes an embed regression test
+Run `make check` before opening a pull request. CI
+(`.github/workflows/ci.yml`) runs one job per `make check` target, so a green
+`make check` locally means green CI. Keep any `go test` step routed through
+make: the Go suite includes an embed regression test
 (`internal/httpapi/adminui/adminui_test.go`) that needs a populated
 `internal/httpapi/adminui/dist/`, and a bare `go test ./...` against the
 empty, gitignored `dist/` fails it.

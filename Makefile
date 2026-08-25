@@ -8,10 +8,6 @@ GO          ?= go
 WEB_DIR     := web/admin
 EMBED_DIR   := internal/httpapi/adminui/dist
 
-# Pin generator and linter so local runs and CI agree.
-GOLANGCI_LINT_VERSION := v2.12.2
-SQLC_VERSION          := v1.31.1
-
 .DEFAULT_GOAL := help
 
 # Targets here share two mutable trees -- the embed directory that `web`
@@ -134,18 +130,18 @@ vet: ## Run go vet
 	$(GO) vet ./...
 
 .PHONY: lint
-lint: require-golangci-lint ## Run golangci-lint
+lint: require-tools ## Run golangci-lint
 	golangci-lint run
 
 .PHONY: lint-fix
-lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
+lint-fix: require-tools ## Run golangci-lint with autofixes applied
 	golangci-lint run --fix
 	golangci-lint fmt
 
 ## --- Aggregates ------------------------------------------------------------
 
 .PHONY: check
-check: fmt-check vet lint test test-tz test-race web-check ## Everything CI runs
+check: fmt-check vet lint generate-check test test-tz test-race web-check ## Everything CI runs
 
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
@@ -156,24 +152,26 @@ clean: ## Remove build and coverage artifacts
 
 ## --- Tooling ---------------------------------------------------------------
 
-.PHONY: require-golangci-lint
-require-golangci-lint:
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "golangci-lint not found. Install it with 'make tools' or 'brew install golangci-lint'."; \
-		exit 1; \
-	}
+.PHONY: require-tools
+require-tools:
+	@for tool in golangci-lint sqlc; do \
+		command -v $$tool >/dev/null 2>&1 || { \
+			echo "$$tool not found. Install pinned tooling with 'make tools' (mise install)."; \
+			exit 1; \
+		}; \
+	done
 
+# Versions live in mise.toml -- the one toolchain file CI also reads.
 .PHONY: tools
-tools: ## Install pinned development tooling
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
-	$(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+tools: ## Install pinned development tooling from mise.toml
+	mise install
 
 .PHONY: generate
-generate: ## Regenerate sqlc code
+generate: require-tools ## Regenerate sqlc code
 	sqlc generate
 
 .PHONY: generate-check
-generate-check: ## Fail if committed sqlc output is stale
+generate-check: require-tools ## Fail if committed sqlc output is stale
 	sqlc diff
 
 .PHONY: test-tz

@@ -1,3 +1,6 @@
 [tools]
 go = "latest"
 node = "24"
+# Pinned so local runs and CI agree; CI installs from this file via mise-action.
+golangci-lint = "2.12.2"
+sqlc = "1.31.1"
