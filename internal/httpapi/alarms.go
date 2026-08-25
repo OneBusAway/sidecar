@@ -183,15 +183,23 @@ func (h *alarmsHandler) composeMessage(ctx context.Context, region regions.Regio
 	return alarms.ComposeMessage(dep.RouteShortName, dep.TripHeadsign, secondsBefore)
 }
 
-// alarmURL builds the §2.4 creation-response URL. The region's directory
-// sidecarBaseUrl wins; a region without one falls back to this request's
-// Host over https (the only scheme the apps will talk to us on).
-func alarmURL(region regions.Region, r *http.Request, version int, token string) string {
+// resourceURL builds a §2.4 creation-response URL for path (which starts
+// with "/api/…"). The region's directory sidecarBaseUrl wins; a region
+// without one falls back to this request's Host over https (the only scheme
+// the apps will talk to us on).
+func resourceURL(region regions.Region, r *http.Request, path string) string {
 	base := strings.TrimRight(region.SidecarBaseURL, "/")
 	if base == "" {
 		base = "https://" + r.Host
 	}
-	return fmt.Sprintf("%s/api/v%d/regions/%d/alarms/%s", base, version, region.ID, token)
+	return base + path
+}
+
+// alarmURL builds the §2.4 creation-response URL. The region's directory
+// sidecarBaseUrl wins; a region without one falls back to this request's
+// Host over https (the only scheme the apps will talk to us on).
+func alarmURL(region regions.Region, r *http.Request, version int, token string) string {
+	return resourceURL(region, r, fmt.Sprintf("/api/v%d/regions/%d/alarms/%s", version, region.ID, token))
 }
 
 func (h *alarmsHandler) delete(w http.ResponseWriter, r *http.Request) {

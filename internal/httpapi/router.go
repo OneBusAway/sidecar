@@ -20,6 +20,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
@@ -76,6 +77,15 @@ type Deps struct {
 	// composed from. Nil (or any lookup failure) degrades every alarm to the
 	// generic message rather than failing the create.
 	OBA obaapi.Client
+
+	// LiveActivities backs the Live Activity register/delete endpoints
+	// (spec §6.1). Nil means those routes are not registered.
+	LiveActivities liveactivities.Repository
+	// LiveActivityLimiter throttles Live Activity registration POSTs
+	// (design spec §4: a sidecar-specific 30/minute per IP, because every
+	// distinct stop a registration names costs one upstream call per
+	// minute for eight hours). NewRouter defaults it; tests inject tighter.
+	LiveActivityLimiter *ratelimit.Limiter
 
 	// Surveys backs the survey list and survey response endpoints (spec
 	// §7). Nil means those routes are not registered.
@@ -231,6 +241,23 @@ func NewRouter(deps Deps) http.Handler {
 		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
 		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
+	}
+
+	if deps.LiveActivities != nil {
+		if missing := missingDeps(map[string]bool{
+			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.LiveActivities is set")
+		}
+		if deps.LiveActivityLimiter == nil {
+			deps.LiveActivityLimiter = ratelimit.New(liveActivityRegistrationsPerMinute, time.Minute)
+		}
+		lh := &liveActivitiesHandler{deps: deps}
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/live_activities",
+			throttleByIP(deps.LiveActivityLimiter, deps, lh.register))
+		// DELETE is unthrottled: dismissals are cheap and a throttled
+		// dismissal would strand a row until expiry.
+		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/live_activities/{liveActivityToken}", lh.delete)
 	}
 
 	if deps.Surveys != nil {
