@@ -21,6 +21,7 @@ import (
 
 	oba "github.com/OneBusAway/go-sdk"
 	"github.com/OneBusAway/go-sdk/option"
+	"github.com/OneBusAway/go-sdk/shared"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/OneBusAway/sidecar/internal/httpx"
@@ -315,6 +316,26 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	return fleet, nil
 }
 
+// routeShortNameFallback resolves a route's display short name: the entry's
+// own override when it has one, else the matching references.routes entry's
+// shortName, else its longName. Shared by ArrivalAndDeparture and
+// ArrivalsAndDeparturesForStop, whose responses both carry a
+// shared.References with the same routes shape.
+func routeShortNameFallback(routes []shared.ReferencesRoute, routeID, override string) string {
+	if override != "" {
+		return override
+	}
+	for _, route := range routes {
+		if route.ID == routeID {
+			if route.ShortName != "" {
+				return route.ShortName
+			}
+			return route.LongName
+		}
+	}
+	return ""
+}
+
 func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
 	sdk, err := c.sdkFor(region)
 	if err != nil {
@@ -356,20 +377,8 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 		return Departure{}, ErrNotFound
 	}
 
-	shortName := entry.RouteShortName
-	if shortName == "" {
-		for _, route := range resp.Data.References.Routes {
-			if route.ID == entry.RouteID {
-				shortName = route.ShortName
-				if shortName == "" {
-					shortName = route.LongName
-				}
-				break
-			}
-		}
-	}
 	return Departure{
-		RouteShortName:         shortName,
+		RouteShortName:         routeShortNameFallback(resp.Data.References.Routes, entry.RouteID, entry.RouteShortName),
 		TripHeadsign:           entry.TripHeadsign,
 		ScheduledDepartureTime: entry.ScheduledDepartureTime,
 		PredictedDepartureTime: entry.PredictedDepartureTime,
@@ -415,22 +424,11 @@ func (c *client) ArrivalsAndDeparturesForStop(ctx context.Context, region region
 	routes := resp.Data.References.Routes
 	trips := resp.Data.References.Trips
 	entries := resp.Data.Entry.ArrivalsAndDepartures
+	present := func(f jsonField) bool { return !f.IsNull() && !f.IsInvalid() }
 	out := make([]StopArrival, 0, len(entries))
 	for _, e := range entries {
 		j := e.JSON
-		present := func(f jsonField) bool { return !f.IsNull() && !f.IsInvalid() }
-		shortName := e.RouteShortName
-		if shortName == "" {
-			for _, r := range routes {
-				if r.ID == e.RouteID {
-					shortName = r.ShortName
-					if shortName == "" {
-						shortName = r.LongName
-					}
-					break
-				}
-			}
-		}
+		shortName := routeShortNameFallback(routes, e.RouteID, e.RouteShortName)
 		headsign := e.TripHeadsign
 		if headsign == "" {
 			for _, tr := range trips {
