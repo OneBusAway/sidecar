@@ -61,13 +61,7 @@ func (h *liveActivitiesHandler) register(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tripID, _ := p.str("trip_id")
-	vehicleID, _ := p.str("vehicle_id")
-	serviceDate, _ := p.int64("service_date") // non-numeric -> 0 = omitted
-	var stopSeq *int64
-	if v, ok := p.int64("stop_sequence"); ok {
-		stopSeq = &v
-	}
+	trip := parseTripIdentity(p)
 	token, err := securetoken.New()
 	if err != nil {
 		writeServerError(w, h.deps.Logger, region.ID, "mint live activity token", err)
@@ -78,7 +72,7 @@ func (h *liveActivitiesHandler) register(w http.ResponseWriter, r *http.Request)
 		RegionID: region.ID, Token: token, ExpiresAt: now.Add(liveactivities.Lifetime),
 		ActivityID: activityID, PushToken: pushToken, APNSSandbox: parseAPNSSandbox(p, h.deps.Logger),
 		StopID: stopID, RouteShortName: routeShortName, TripHeadsign: tripHeadsign,
-		TripID: tripID, ServiceDate: serviceDate, VehicleID: vehicleID, StopSequence: stopSeq,
+		TripID: trip.TripID, ServiceDate: trip.ServiceDate, VehicleID: trip.VehicleID, StopSequence: trip.StopSequence,
 	}
 	la, err := h.deps.LiveActivities.Upsert(r.Context(), in, now)
 	if errors.Is(err, liveactivities.ErrDuplicate) {

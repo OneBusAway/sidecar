@@ -256,8 +256,9 @@ type LiveActivitySender interface {
   `apnsTopic` makes `SendLiveActivity` return an error **without sending** (unlike
   `Send`, which omits the field): a Live Activity push cannot succeed without a topic,
   and sending `.push-type.liveactivity` bare would bounce `BadTopic` every minute for
-  eight hours. The updater logs it like any send failure; main's boot warning already
-  covers the missing topic.
+  eight hours. `main` never hands the updater a sender without a topic: with a gorush
+  URL but no topic it runs Live Activities store-only (design spec §2.5) and warns at
+  boot, rather than logging one refused send per subscription per minute.
 - `priority: "high"` → APNs priority 10, required (§6.6; verified on-device by the
   reference: at 5 an idle phone holds every push).
 - The three date keys and `content-state` are **hyphenated**; gorush's unmarshaller
@@ -276,9 +277,11 @@ registered when **either** `PushRegs` or `LiveActivities` is non-nil, and each d
 runs only when its repository is set. For a terminal reason the handler deletes from
 every configured table for that token — a token that bounced `Unregistered` is dead
 whichever table holds it, and a token never appears in both (ActivityKit tokens are
-not device alert tokens). No end push is sent (§6.4: the token is dead). The existing
-store-error path (500 so gorush retries) applies to both deletes. A router test covers
-the `LiveActivities`-only configuration.
+not device alert tokens). No end push is sent (§6.4: the token is dead). Both deletes
+always run even if the first fails — gorush's feedback dispatch is a single
+fire-and-forget POST with no retry, so a skipped delete would never happen — and the
+response is 500 if either failed, so the failure is at least visible in gorush's log.
+A router test covers the `LiveActivities`-only configuration.
 
 ### 2.9 Time and timezones
 

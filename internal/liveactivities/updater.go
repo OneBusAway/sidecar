@@ -50,10 +50,13 @@ type Updater struct {
 // clock (design spec §2.6).
 func NewUpdater(repo Repository, regionRepo regions.Repository, oba ArrivalsSource,
 	sender push.LiveActivitySender, now func() time.Time, logger *slog.Logger) *Updater {
-	return &Updater{
-		Repo: repo, Regions: regionRepo, OBA: oba, Sender: sender, Now: now, Logger: logger,
-		stops: cache.New[[]obaapi.StopArrival](StopCacheTTL, stopCacheEntries, StopFetchBudget, now),
-	}
+	u := &Updater{Repo: repo, Regions: regionRepo, OBA: oba, Sender: sender, Now: now, Logger: logger}
+	u.stops = u.newStopCache()
+	return u
+}
+
+func (u *Updater) newStopCache() *cache.Cache[[]obaapi.StopArrival] {
+	return cache.New[[]obaapi.StopArrival](StopCacheTTL, stopCacheEntries, StopFetchBudget, u.Now)
 }
 
 // regionLookup is one cycle's cached resolution of a region (see
@@ -71,6 +74,13 @@ func (u *Updater) CheckAll(ctx context.Context) {
 		u.Logger.Error("liveactivities: list", "err", err)
 		return
 	}
+	// The stop cache exists to share one upstream call across every
+	// subscription on a stop WITHIN a cycle. Its TTL is stamped when a fetch
+	// completes, so an entry filled late in a long sweep (many rows, a slow
+	// upstream) would still be live when the next cycle starts and that stop
+	// would push a keepalive built from minute-old arrivals. Starting every
+	// cycle with a fresh cache makes the TTL a bound, not the mechanism.
+	u.stops = u.newStopCache()
 	// One region fetch per region per cycle, not per subscription. The
 	// failure is cached alongside the region: check has to tell "this region
 	// is gone" (count/reap the subscription) apart from "the store
@@ -201,18 +211,29 @@ func keepaliveDue(lastPushedAt *time.Time, now time.Time) bool {
 	return lastPushedAt == nil || now.Sub(*lastPushedAt) >= KeepaliveInterval
 }
 
-// pushTimestamp is max(now, last+1s): APNs drops a Live Activity push whose
-// timestamp does not advance (design spec §2.5).
+// pushTimestamp is max(now, last+1s) at whole-second granularity: APNs
+// drops a Live Activity push whose timestamp does not advance (design spec
+// §2.5), and the wire value is epoch seconds (as is the stored watermark),
+// so a sub-second advance is no advance at all.
 func pushTimestamp(lastPushedAt *time.Time, now time.Time) time.Time {
-	if lastPushedAt != nil && !now.After(*lastPushedAt) {
-		return lastPushedAt.Add(time.Second)
+	ts := now.Truncate(time.Second)
+	if lastPushedAt != nil {
+		last := lastPushedAt.Truncate(time.Second)
+		if !ts.After(last) {
+			return last.Add(time.Second)
+		}
 	}
-	return now
+	return ts
 }
 
 func (u *Updater) countFailure(ctx context.Context, la LiveActivity, reason string) {
 	streak, err := u.Repo.RecordFailure(ctx, la.ID)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// The row was deleted between List and now (rider DELETE or the
+			// feedback webhook); gone is the goal, same as DeleteByID.
+			return
+		}
 		u.Logger.Warn("liveactivities: record failure", "region_id", la.RegionID, "err", err)
 		return
 	}

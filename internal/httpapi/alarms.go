@@ -63,13 +63,8 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		}
 
 		stopID, _ := p.str("stop_id")
-		tripID, _ := p.str("trip_id")
-		serviceDate, _ := p.int64("service_date") // non-numeric -> 0 = omitted
-		vehicleID, _ := p.str("vehicle_id")
-		var stopSeq *int64
-		if v, ok := p.int64("stop_sequence"); ok {
-			stopSeq = &v
-		}
+		trip := parseTripIdentity(p)
+		tripID, serviceDate, vehicleID, stopSeq := trip.TripID, trip.ServiceDate, trip.VehicleID, trip.StopSequence
 		sb, sbOK := p.int64("seconds_before")
 		secondsBefore := alarms.NormalizeSecondsBefore(sb, sbOK)
 

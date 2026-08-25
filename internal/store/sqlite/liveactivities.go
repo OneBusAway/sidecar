@@ -166,7 +166,7 @@ func (r *liveActivityRepo) RecordPush(ctx context.Context, id int64, state livea
 		return fmt.Errorf("sqlite: marshal content state for live activity %d: %w", id, err)
 	}
 	err = r.q.RecordLiveActivityPush(ctx, gen.RecordLiveActivityPushParams{
-		LastContentState: string(b), PushedAt: sql.NullInt64{Int64: pushedAt.Unix(), Valid: true}, ID: id,
+		LastContentState: string(b), PushedAt: timeToNullUnix(&pushedAt), ID: id,
 	})
 	if err != nil {
 		return fmt.Errorf("sqlite: record push for live activity %d: %w", id, err)

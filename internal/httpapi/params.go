@@ -157,3 +157,24 @@ func parseAPNSSandbox(p params, logger *slog.Logger) bool {
 	}
 	return false
 }
+
+// tripIdentity is the optional trip-instance metadata alarms (spec §2.x)
+// and Live Activities (spec §6.1) both accept alongside a stop: parsed the
+// same way in both because both feed the same obaapi lookups.
+type tripIdentity struct {
+	TripID       string // "" = omitted
+	ServiceDate  int64  // epoch ms; 0 = omitted (non-numeric input reads as 0)
+	VehicleID    string // "" = omitted
+	StopSequence *int64 // nil = omitted; 0 is a real value
+}
+
+func parseTripIdentity(p params) tripIdentity {
+	var id tripIdentity
+	id.TripID, _ = p.str("trip_id")
+	id.ServiceDate, _ = p.int64("service_date")
+	id.VehicleID, _ = p.str("vehicle_id")
+	if v, ok := p.int64("stop_sequence"); ok {
+		id.StopSequence = &v
+	}
+	return id
+}

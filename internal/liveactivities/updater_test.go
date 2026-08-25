@@ -428,6 +428,43 @@ func TestSubscriptionsOnOneStopShareOneFetchPerCycle(t *testing.T) {
 	}
 }
 
+// The TTL is stamped when a fetch completes, so a stop fetched late in a
+// long sweep would otherwise still be cached when the next cycle begins
+// and push minute-old arrivals. Every cycle starts with a fresh cache.
+func TestStopCacheResetsEveryCycle(t *testing.T) {
+	s := &fakeSender{}
+	h := newHarness(t, s, activity(1, "1_570"))
+	h.cycle()
+	h.u.CheckAll(context.Background()) // clock has NOT advanced: TTL still live
+	if h.oba.count() != 2 {
+		t.Errorf("a new cycle must refetch even inside the TTL: fetches = %d", h.oba.count())
+	}
+}
+
+// The wire timestamp and the stored watermark are both whole seconds, so
+// a sub-second advance of the clock is no advance at all to APNs.
+func TestPushTimestampIsWholeSecondsAndAdvances(t *testing.T) {
+	s := &fakeSender{}
+	h := newHarness(t, s, activity(1, "1_570"))
+	h.cycle()
+	first := s.pushes()[0].Timestamp
+	// Force a content change so the next cycle pushes inside the keepalive
+	// window; the watermark stays at the whole-second first push.
+	_ = h.repo.RecordPush(context.Background(), 1, liveactivities.EmptyContentState(), first)
+	h.clk.advance(700 * time.Millisecond)
+	h.u.CheckAll(context.Background())
+	p := s.pushes()
+	if len(p) != 2 {
+		t.Fatalf("pushes = %d", len(p))
+	}
+	if !p[1].Timestamp.Equal(first.Add(time.Second)) {
+		t.Errorf("timestamp = %v, want %v (last+1s, not a same-second repeat)", p[1].Timestamp, first.Add(time.Second))
+	}
+	if p[1].Timestamp.Nanosecond() != 0 {
+		t.Errorf("timestamp must be whole seconds: %v", p[1].Timestamp)
+	}
+}
+
 func TestQueryWindowIsLookbackAndLookahead(t *testing.T) {
 	s := &fakeSender{}
 	h := newHarness(t, s, activity(1, "1_570"))

@@ -46,18 +46,20 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	// Every configured table is pruned even when an earlier delete fails:
+	// gorush's feedback dispatch is a single fire-and-forget POST (it logs a
+	// non-2xx and moves on, no retry), so a delete skipped here is a delete
+	// that never happens -- and a Live Activity row left behind is pushed to
+	// every minute until it expires. The response is 500 if any delete
+	// failed so the failure is at least visible in gorush's log.
+	failed := false
 	if h.deps.PushRegs != nil {
 		n, err := h.deps.PushRegs.DeleteByToken(r.Context(), fb.Token)
-		if err != nil {
-			// Returning 500 here without attempting the Live Activity delete
-			// below is safe: both deletes are idempotent (a second DELETE of
-			// an already-gone row is a no-op), and gorush retries webhook
-			// delivery on a non-2xx, so the skipped delete runs on the retry.
+		switch {
+		case err != nil:
 			h.deps.Logger.Error("httpapi: delete registration from feedback", "err", sanitizeToken(err, fb.Token))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if n > 0 {
+			failed = true
+		case n > 0:
 			h.deps.Logger.Info("httpapi: pruned dead push token",
 				"platform", fb.Platform, "reason", fb.Error, "registrations", n)
 		}
@@ -66,15 +68,18 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		// A terminal ActivityKit token means every future update would
 		// bounce: delete the subscription, no end push (spec §6.4/§6.5).
 		n, err := h.deps.LiveActivities.DeleteByPushToken(r.Context(), fb.Token)
-		if err != nil {
+		switch {
+		case err != nil:
 			h.deps.Logger.Error("httpapi: delete live activity from feedback", "err", sanitizeToken(err, fb.Token))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if n > 0 {
+			failed = true
+		case n > 0:
 			h.deps.Logger.Info("httpapi: retired live activity for dead token",
 				"platform", fb.Platform, "reason", fb.Error, "live_activities", n)
 		}
+	}
+	if failed {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }

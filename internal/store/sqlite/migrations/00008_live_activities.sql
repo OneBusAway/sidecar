@@ -14,7 +14,9 @@ CREATE TABLE live_activities (
   route_short_name     TEXT    NOT NULL,
   trip_headsign        TEXT    NOT NULL,
   -- Optional trip metadata, stored as sent. '' / 0 mean omitted;
-  -- stop_sequence needs NULL because 0 is a real value.
+  -- stop_sequence needs NULL because 0 is a real value. service_date is
+  -- epoch MILLISECONDS exactly as OBA sends it -- the one INTEGER column
+  -- here that is not epoch seconds; it is never converted to a time.Time.
   trip_id              TEXT    NOT NULL DEFAULT '',
   service_date         INTEGER NOT NULL DEFAULT 0,
   vehicle_id           TEXT    NOT NULL DEFAULT '',

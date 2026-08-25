@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -497,6 +498,33 @@ func TestFeedbackTerminalDeletesLiveActivityAndRegistration(t *testing.T) {
 	}
 	if n, _ := store.PushRegs().DeleteByToken(context.Background(), "dead-tok"); n != 0 {
 		t.Errorf("registration survived: %d", n)
+	}
+}
+
+// gorush does not retry a webhook on a non-2xx, so a failing registration
+// delete must not skip the Live Activity prune -- the row would otherwise be
+// pushed to every minute until expiry. Both run; the status reports the
+// failure.
+func TestFeedbackPrunesLiveActivityWhenRegistrationDeleteFails(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	seedLiveActivity(t, store.LiveActivities(), store.Regions(), "dead-tok")
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs:       erroringPushRepo{deleteErr: errors.New("db locked")},
+		LiveActivities: store.LiveActivities(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler), FeedbackSecret: "s3",
+	})
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush",
+		strings.NewReader(`{"token":"dead-tok","error":"Unregistered"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer s3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 (a delete failed)", rec.Code)
+	}
+	if list, _ := store.LiveActivities().List(context.Background()); len(list) != 0 {
+		t.Errorf("live activity must still be pruned when the registration delete fails: %+v", list)
 	}
 }
 

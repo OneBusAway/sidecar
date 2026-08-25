@@ -688,10 +688,11 @@ The runbook above applies; a few things are specific to the Live Activity path
 - **The topic is derived, not sent by the client or configured in gorush.**
   The sidecar appends `.push-type.liveactivity` to `SIDECAR_APNS_TOPIC` itself
   on every push (gorush does not derive this suffix — a bare bundle id would
-  bounce `BadTopic`). An empty `SIDECAR_APNS_TOPIC` makes the sidecar refuse
-  the push *before it reaches gorush*, logged locally as
-  `liveactivities: update push failed` — that error never shows up in
-  `docker compose logs gorush` because no request was ever sent.
+  bounce `BadTopic`). With `SIDECAR_GORUSH_URL` set but `SIDECAR_APNS_TOPIC`
+  empty, the sidecar runs Live Activities in store-only mode (rows expire and
+  reap, nothing is pushed) and says so in a boot warning — nothing ever shows
+  up in `docker compose logs gorush` because no request was sent. Alarms
+  still go out, and APNs rejects them with `MissingTopic`.
 - **The push token is not the device alert token.** ActivityKit hands the app
   a separate token per Live Activity (from `Activity.pushTokenUpdates`), not
   the `UNUserNotificationCenter` token used for `push_registrations`/alarms.

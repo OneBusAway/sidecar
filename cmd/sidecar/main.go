@@ -199,24 +199,23 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// The scheduler always runs, even with no push transport: its Expire
 	// branch and 3-strike reaping are what bound the alarms table (spec
 	// §13); only the fire step needs a sender.
-	var gorush *push.Gorush
 	var sender push.Sender
 	var laSender push.LiveActivitySender
 	if *gorushURL == "" {
 		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms and Live Activities will be stored and reaped but never pushed")
 	} else {
+		g := push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
+		sender = g
 		if *apnsTopic == "" {
-			logger.Warn("no --apns-topic/SIDECAR_APNS_TOPIC set; iOS alarm pushes will be rejected by APNs with MissingTopic and Live Activity pushes are refused locally")
+			// Gorush.SendLiveActivity refuses every call without a topic, and
+			// the updater treats a refused send as a transport blip it must
+			// retry next minute -- one Error log line per subscription per
+			// minute for eight hours. Run store-only instead (design spec
+			// §2.5): rows still expire and reap, nothing is attempted.
+			logger.Warn("no --apns-topic/SIDECAR_APNS_TOPIC set; iOS alarm pushes will be rejected by APNs with MissingTopic and Live Activities will be stored and reaped but never pushed")
+		} else {
+			laSender = g
 		}
-		gorush = push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
-	}
-	// gorush is only ever nil or a valid *push.Gorush here; assigning it
-	// under this explicit nil check, rather than always assigning and
-	// letting a nil *push.Gorush flow into the interfaces, keeps a nil
-	// *Gorush from becoming a non-nil push.Sender/push.LiveActivitySender.
-	if gorush != nil {
-		sender = gorush
-		laSender = gorush
 	}
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),
