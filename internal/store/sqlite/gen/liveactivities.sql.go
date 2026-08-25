@@ -253,7 +253,10 @@ type UpdateLiveActivityRegistrationParams struct {
 // (design spec section 2.1): token, expires_at, last_content_state,
 // last_pushed_at and consecutive_failures are deliberately untouched.
 // revision is bumped so an in-flight sweep's DeleteLiveActivityByID, which
-// compares on it, cannot remove the refreshed registration.
+// compares on it, cannot remove the refreshed registration. It is a
+// re-registration counter, deliberately NOT a write counter: the sweep's own
+// writes (RecordLiveActivityPush/Failure, ResetLiveActivityFailures) must not
+// bump it, or the sweep could never delete the rows it just listed.
 func (q *Queries) UpdateLiveActivityRegistration(ctx context.Context, arg UpdateLiveActivityRegistrationParams) (LiveActivity, error) {
 	row := q.db.QueryRowContext(ctx, updateLiveActivityRegistration,
 		arg.PushToken,

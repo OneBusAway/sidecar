@@ -130,11 +130,11 @@ vet: ## Run go vet
 	$(GO) vet ./...
 
 .PHONY: lint
-lint: require-tools ## Run golangci-lint
+lint: require-golangci-lint ## Run golangci-lint
 	golangci-lint run
 
 .PHONY: lint-fix
-lint-fix: require-tools ## Run golangci-lint with autofixes applied
+lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 	golangci-lint run --fix
 	golangci-lint fmt
 
@@ -152,14 +152,23 @@ clean: ## Remove build and coverage artifacts
 
 ## --- Tooling ---------------------------------------------------------------
 
-.PHONY: require-tools
-require-tools:
-	@for tool in golangci-lint sqlc; do \
-		command -v $$tool >/dev/null 2>&1 || { \
-			echo "$$tool not found. Install pinned tooling with 'make tools' (mise install)."; \
-			exit 1; \
-		}; \
-	done
+# require-<tool>: fail early with a hint when a pinned tool is not on PATH.
+# Each target names only the tool it actually runs.
+define require_tool
+	@command -v $(1) >/dev/null 2>&1 || { \
+		echo "$(1) not found. Install pinned tooling with 'make tools' (mise install)"; \
+		echo "and make sure mise is activated in your shell (or run 'mise exec -- make $(MAKECMDGOALS)')."; \
+		exit 1; \
+	}
+endef
+
+.PHONY: require-golangci-lint
+require-golangci-lint:
+	$(call require_tool,golangci-lint)
+
+.PHONY: require-sqlc
+require-sqlc:
+	$(call require_tool,sqlc)
 
 # Versions live in mise.toml -- the one toolchain file CI also reads.
 .PHONY: tools
@@ -167,17 +176,17 @@ tools: ## Install pinned development tooling from mise.toml
 	mise install
 
 .PHONY: generate
-generate: require-tools ## Regenerate sqlc code
+generate: require-sqlc ## Regenerate sqlc code
 	sqlc generate
 
 .PHONY: generate-check
-generate-check: require-tools ## Fail if committed sqlc output is stale
+generate-check: require-sqlc ## Fail if committed sqlc output is stale
 	sqlc diff
 
 .PHONY: test-tz
 test-tz: web ## Run tests under two timezones to catch local-time leaks
-	TZ=UTC go test ./...
-	TZ=Asia/Kathmandu go test ./...
+	TZ=UTC $(GO) test ./...
+	TZ=Asia/Kathmandu $(GO) test ./...
 	@# The SPA needs this as badly as the Go side does. A datetime assertion
 	@# written against the region zone cannot fail when the host zone happens
 	@# to match it, so a Pacific-time laptop silently loses coverage that a
