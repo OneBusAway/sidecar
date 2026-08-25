@@ -118,6 +118,7 @@ type Repository interface {
 	// ResetFailures zeroes the activity's consecutive-failure streak.
 	ResetFailures(ctx context.Context, id int64) error
 	// RecordPush stores the content state just pushed and the time it was
-	// pushed, and resets the failure streak.
+	// pushed. It does not touch the failure streak; callers that need it
+	// reset call ResetFailures separately.
 	RecordPush(ctx context.Context, id int64, state ContentState, pushedAt time.Time) error
 }
