@@ -68,6 +68,39 @@ type Departure struct {
 	Predicted              bool
 }
 
+// StopArrivalsQuery selects arrivals-and-departures-for-stop's window
+// around now, in minutes.
+type StopArrivalsQuery struct {
+	StopID        string
+	MinutesBefore int64
+	MinutesAfter  int64
+}
+
+// StopArrival is one arrivalsAndDepartures entry (design spec §2.4a). Times
+// are epoch ms with 0 meaning absent. HasIdentity reports whether all five
+// visit-identity fields (StopID, TripID, RouteID, ServiceDate, StopSequence)
+// were present and well-typed upstream: the SDK zero-fills absent fields, and
+// StopSequence 0 is a real value (the trip's first stop), so presence has to
+// travel separately (design spec §2.4).
+type StopArrival struct {
+	StopID       string
+	TripID       string
+	RouteID      string
+	ServiceDate  int64
+	StopSequence int64
+	HasIdentity  bool
+
+	LastUpdateTime int64
+	RouteShortName string // entry value, else references.routes shortName/longName
+	TripHeadsign   string // entry value, else references.trips tripHeadsign
+	Predicted      bool
+
+	ScheduledArrivalTime   int64
+	PredictedArrivalTime   int64
+	ScheduledDepartureTime int64
+	PredictedDepartureTime int64
+}
+
 // TripDetailsQuery identifies the trip instance a ghost bus report named,
 // plus the report's own route/stop ids used to resolve display names.
 type TripDetailsQuery struct {
@@ -90,6 +123,12 @@ type Client interface {
 	// trip/stop/date combination, and ErrNotConfigured when the region has
 	// no API key.
 	ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error)
+
+	// ArrivalsAndDeparturesForStop lists every arrival/departure at a stop
+	// inside the query window. ErrNotFound on a 404 or a null/absent body;
+	// an empty list is not an error. ErrNotConfigured when the region has
+	// no API key.
+	ArrivalsAndDeparturesForStop(ctx context.Context, region regions.Region, q StopArrivalsQuery) ([]StopArrival, error)
 
 	// TripDetails fetches trip-details for one trip instance and returns the
 	// pruned spec-§2.6 snapshot document. ErrNotFound on a definitive miss
@@ -338,6 +377,86 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 	}, nil
 }
 
+// jsonField is the subset of the SDK's internal apijson.Field that this
+// package needs to tell "absent/null" apart from "present but zero". The SDK
+// keeps apijson.Field in an internal package that cannot be imported, but
+// every generated entry struct exposes one JSON metadata field per data
+// field with these two methods, so a local interface reaches the same
+// information without the import.
+type jsonField interface {
+	IsNull() bool
+	IsInvalid() bool
+}
+
+func (c *client) ArrivalsAndDeparturesForStop(ctx context.Context, region regions.Region, q StopArrivalsQuery) ([]StopArrival, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return nil, err
+	}
+	params := oba.ArrivalAndDepartureListParams{}
+	if q.MinutesBefore != 0 {
+		params.MinutesBefore = oba.F(q.MinutesBefore)
+	}
+	if q.MinutesAfter != 0 {
+		params.MinutesAfter = oba.F(q.MinutesAfter)
+	}
+	resp, err := sdk.ArrivalAndDeparture.List(ctx, q.StopID, params)
+	if err != nil {
+		if statusOf(err) == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("obaapi: arrivals-and-departures-for-stop in region %d: %w", region.ID, redact(err))
+	}
+	// Same `null` body hazard as ArrivalAndDeparture: a nil response with a
+	// nil error, so this check precedes any field access.
+	if resp == nil {
+		return nil, ErrNotFound
+	}
+	routes := resp.Data.References.Routes
+	trips := resp.Data.References.Trips
+	entries := resp.Data.Entry.ArrivalsAndDepartures
+	out := make([]StopArrival, 0, len(entries))
+	for _, e := range entries {
+		j := e.JSON
+		present := func(f jsonField) bool { return !f.IsNull() && !f.IsInvalid() }
+		shortName := e.RouteShortName
+		if shortName == "" {
+			for _, r := range routes {
+				if r.ID == e.RouteID {
+					shortName = r.ShortName
+					if shortName == "" {
+						shortName = r.LongName
+					}
+					break
+				}
+			}
+		}
+		headsign := e.TripHeadsign
+		if headsign == "" {
+			for _, tr := range trips {
+				if tr.ID == e.TripID {
+					headsign = tr.TripHeadsign
+					break
+				}
+			}
+		}
+		out = append(out, StopArrival{
+			StopID: e.StopID, TripID: e.TripID, RouteID: e.RouteID,
+			ServiceDate: e.ServiceDate, StopSequence: e.StopSequence,
+			HasIdentity: present(j.StopID) && present(j.TripID) && present(j.RouteID) &&
+				present(j.ServiceDate) && present(j.StopSequence),
+			LastUpdateTime: e.LastUpdateTime,
+			RouteShortName: shortName, TripHeadsign: headsign,
+			Predicted:              e.Predicted,
+			ScheduledArrivalTime:   e.ScheduledArrivalTime,
+			PredictedArrivalTime:   e.PredictedArrivalTime,
+			ScheduledDepartureTime: e.ScheduledDepartureTime,
+			PredictedDepartureTime: e.PredictedDepartureTime,
+		})
+	}
+	return out, nil
+}
+
 // tripStatusKeys is OBACloud's STATUS_KEYS allow-list, verbatim: the
 // forensic subset of a trip-details status block worth storing per report.
 var tripStatusKeys = []string{
@@ -436,7 +555,10 @@ func resolveRouteID(reported string, trip map[string]any) string {
 	if reported != "" || trip == nil {
 		return reported
 	}
-	v, _ := trip["routeId"].(string)
+	v, ok := trip["routeId"].(string)
+	if !ok {
+		return ""
+	}
 	return v
 }
 

@@ -50,6 +50,10 @@ func (f *fakeAlarmsOBA) TripDetails(context.Context, regions.Region, obaapi.Trip
 	panic("fakeAlarmsOBA.TripDetails: unused by alarm tests")
 }
 
+func (f *fakeAlarmsOBA) ArrivalsAndDeparturesForStop(context.Context, regions.Region, obaapi.StopArrivalsQuery) ([]obaapi.StopArrival, error) {
+	panic("fakeAlarmsOBA.ArrivalsAndDeparturesForStop: unused by alarm tests")
+}
+
 // newAlarmsTestServer builds a router over a freshly migrated store with the
 // alarm routes registered, plus the repositories tests seed fixtures and
 // assert against directly.

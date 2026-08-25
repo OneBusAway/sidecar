@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -849,5 +850,177 @@ func TestSDKClientCacheSendsToTheRightServer(t *testing.T) {
 
 	if hitsB.Load() == beforeB {
 		t.Error("region B's server saw no request; its lookup went to region A's server")
+	}
+}
+
+// stopArrivalsServer stands in for arrivals-and-departures-for-stop. entries
+// is served verbatim so tests can omit or mistype fields; nullBody serves a
+// literal `null` 200.
+type stopArrivalsServer struct {
+	*httptest.Server
+	calls     atomic.Int64
+	lastQuery atomic.Value // url.Values
+	status    int
+	nullBody  bool
+	entries   []map[string]any
+	routes    []map[string]any
+	trips     []map[string]any
+}
+
+func newStopArrivalsServer(t *testing.T, entries []map[string]any) *stopArrivalsServer {
+	t.Helper()
+	s := &stopArrivalsServer{entries: entries}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/where/arrivals-and-departures-for-stop/", func(w http.ResponseWriter, r *http.Request) {
+		s.calls.Add(1)
+		s.lastQuery.Store(r.URL.Query())
+		if s.status != 0 {
+			w.WriteHeader(s.status)
+			return
+		}
+		if s.nullBody {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("null"))
+			return
+		}
+		routes, trips := s.routes, s.trips
+		if routes == nil {
+			routes = []map[string]any{}
+		}
+		if trips == nil {
+			trips = []map[string]any{}
+		}
+		entries := s.entries
+		if entries == nil {
+			entries = []map[string]any{}
+		}
+		writeOBA(w, map[string]any{
+			"entry":      map[string]any{"stopId": "1_570", "arrivalsAndDepartures": entries, "nearbyStopIds": []any{}, "situationIds": []any{}},
+			"references": map[string]any{"agencies": []any{}, "routes": routes, "situations": []any{}, "stops": []any{}, "stopTimes": []any{}, "trips": trips},
+		})
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+func fullStopEntry() map[string]any {
+	return map[string]any{
+		"stopId": "1_570", "tripId": "1_604370", "routeId": "1_100044", "serviceDate": 1754809200000,
+		"stopSequence": 3, "lastUpdateTime": 1754812000000, "routeShortName": "44", "tripHeadsign": "Ballard",
+		"predicted": true, "scheduledArrivalTime": 1754812800000, "predictedArrivalTime": 1754812860000,
+		"scheduledDepartureTime": 1754812800000, "predictedDepartureTime": 1754812860000,
+		"arrivalEnabled": true, "departureEnabled": true, "blockTripSequence": 0, "numberOfStopsAway": 2,
+		"totalStopsInTrip": 30, "vehicleId": "1_4361",
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_MapsEntries(t *testing.T) {
+	srv := newStopArrivalsServer(t, []map[string]any{fullStopEntry()})
+	got, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570", MinutesBefore: 5, MinutesAfter: 120})
+	if err != nil {
+		t.Fatalf("ArrivalsAndDeparturesForStop: %v", err)
+	}
+	want := []StopArrival{{
+		StopID: "1_570", TripID: "1_604370", RouteID: "1_100044", ServiceDate: 1754809200000, StopSequence: 3,
+		HasIdentity: true, LastUpdateTime: 1754812000000, RouteShortName: "44", TripHeadsign: "Ballard",
+		Predicted: true, ScheduledArrivalTime: 1754812800000, PredictedArrivalTime: 1754812860000,
+		ScheduledDepartureTime: 1754812800000, PredictedDepartureTime: 1754812860000,
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+	q := srv.lastQuery.Load().(url.Values)
+	if q.Get("minutesBefore") != "5" || q.Get("minutesAfter") != "120" {
+		t.Errorf("query = %v, want minutesBefore=5 minutesAfter=120", q)
+	}
+	if q.Get("key") != sentinelKey {
+		t.Errorf("key = %q", q.Get("key"))
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_ReferencesFallbackForNameAndHeadsign(t *testing.T) {
+	e := fullStopEntry()
+	delete(e, "routeShortName")
+	delete(e, "tripHeadsign")
+	srv := newStopArrivalsServer(t, []map[string]any{e})
+	srv.routes = []map[string]any{{"id": "1_100044", "shortName": "44", "agencyId": "1"}}
+	srv.trips = []map[string]any{{"id": "1_604370", "tripHeadsign": "Ballard", "routeId": "1_100044"}}
+	got, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got[0].RouteShortName != "44" || got[0].TripHeadsign != "Ballard" {
+		t.Errorf("fallback: shortName=%q headsign=%q", got[0].RouteShortName, got[0].TripHeadsign)
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_HasIdentityFalseWhenComponentMissingOrInvalid(t *testing.T) {
+	missing := fullStopEntry()
+	delete(missing, "stopSequence")
+	invalid := fullStopEntry()
+	invalid["serviceDate"] = "not-a-number"
+	zero := fullStopEntry()
+	zero["stopSequence"] = 0
+	srv := newStopArrivalsServer(t, []map[string]any{missing, invalid, zero})
+	got, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got[0].HasIdentity {
+		t.Error("missing stopSequence: HasIdentity should be false")
+	}
+	if got[1].HasIdentity {
+		t.Error("non-numeric serviceDate: HasIdentity should be false")
+	}
+	if !got[2].HasIdentity || got[2].StopSequence != 0 {
+		t.Errorf("stopSequence 0 is a real value: HasIdentity=%v seq=%d", got[2].HasIdentity, got[2].StopSequence)
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_EmptyListIsNotAnError(t *testing.T) {
+	srv := newStopArrivalsServer(t, nil)
+	got, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %v, %v; want empty, nil", got, err)
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_NullBodyAnd404AreErrNotFound(t *testing.T) {
+	srv := newStopArrivalsServer(t, nil)
+	srv.nullBody = true
+	_, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("null body: err = %v, want ErrNotFound", err)
+	}
+	srv.nullBody = false
+	srv.status = http.StatusNotFound
+	_, err = New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("404: err = %v, want ErrNotFound", err)
+	}
+	srv.status = http.StatusBadGateway
+	_, err = New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, sentinelKey), StopArrivalsQuery{StopID: "1_570"})
+	if err == nil || errors.Is(err, ErrNotFound) || errChainContains(err, sentinelKey) {
+		t.Errorf("502: err = %v, want redacted transient error", err)
+	}
+}
+
+func TestArrivalsAndDeparturesForStop_NoKeyIsErrNotConfigured(t *testing.T) {
+	srv := newStopArrivalsServer(t, nil)
+	_, err := New("", srv.Client(), nil).ArrivalsAndDeparturesForStop(context.Background(),
+		testRegion(srv.URL, ""), StopArrivalsQuery{StopID: "1_570"})
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Errorf("err = %v, want ErrNotConfigured", err)
+	}
+	if srv.calls.Load() != 0 {
+		t.Error("no request must be made without a key")
 	}
 }

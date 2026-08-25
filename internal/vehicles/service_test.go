@@ -48,6 +48,12 @@ func (f *fleetByRegion) TripDetails(context.Context, regions.Region, obaapi.Trip
 	return nil, nil
 }
 
+// ArrivalsAndDeparturesForStop is unused by these tests; it exists only so
+// fleetByRegion still satisfies obaapi.Client.
+func (f *fleetByRegion) ArrivalsAndDeparturesForStop(context.Context, regions.Region, obaapi.StopArrivalsQuery) ([]obaapi.StopArrival, error) {
+	return nil, nil
+}
+
 func newTestService(t *testing.T, oba obaapi.Client) *Service {
 	t.Helper()
 	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
