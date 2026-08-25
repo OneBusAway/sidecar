@@ -165,6 +165,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
+	store.SetLogger(logger)
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
 			logger.Error("sidecar: close database", "error", closeErr)

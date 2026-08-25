@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
@@ -94,7 +93,7 @@ func (r *liveActivityRepo) Upsert(ctx context.Context, in liveactivities.NewLive
 // the caller can retry once; every other error passes through wrapped only
 // with context.
 func mapInsertErr(err error, regionID int64) error {
-	if strings.Contains(err.Error(), "UNIQUE constraint failed: live_activities.region_id") {
+	if isUniqueViolation(err, "live_activities.region_id") {
 		return fmt.Errorf("sqlite: insert live activity (region %d): %w", regionID, liveactivities.ErrDuplicate)
 	}
 	return fmt.Errorf("sqlite: insert live activity (region %d): %w", regionID, err)

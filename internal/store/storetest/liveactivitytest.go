@@ -39,8 +39,10 @@ func fullLAIn(token, activityID string) liveactivities.NewLiveActivity {
 	}
 }
 
-//nolint:unparam // token is always "tok-a" across the current call sites, but this is a general List-and-find helper any subtest may reuse with a different token.
-func findLAByToken(t *testing.T, repo liveactivities.Repository, token string) liveactivities.LiveActivity {
+// findLAByToken reads back the "tok-a" row every subtest registers via List,
+// proving the store round trip rather than trusting Upsert's return value.
+func findLAByToken(t *testing.T, repo liveactivities.Repository) liveactivities.LiveActivity {
+	const token = "tok-a"
 	t.Helper()
 	list, err := repo.List(context.Background())
 	if err != nil {
@@ -64,7 +66,7 @@ func testLAUpsertInserts(t *testing.T, newStore newLiveActivityStoreFunc) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	got := findLAByToken(t, repo, "tok-a")
+	got := findLAByToken(t, repo)
 	if got.ID != created.ID || got.Token != "tok-a" || got.ActivityID != "act-a" || got.PushToken != "push-act-a" ||
 		!got.APNSSandbox || got.StopID != "1_570" || got.RouteShortName != "44" || got.TripHeadsign != "Ballard" ||
 		got.TripID != "1_604370" || got.ServiceDate != 1754809200000 || got.VehicleID != "1_4361" ||
@@ -107,7 +109,7 @@ func testLAUpsertUpdates(t *testing.T, newStore newLiveActivityStoreFunc) {
 	if second.ID != first.ID || second.Token != "tok-a" {
 		t.Errorf("update must keep id/token: first=%+v second=%+v", first, second)
 	}
-	got := findLAByToken(t, repo, "tok-a")
+	got := findLAByToken(t, repo)
 	if got.PushToken != "push-rotated" || got.APNSSandbox || got.StopSequence != nil {
 		t.Errorf("registration fields not rewritten: %+v", got)
 	}
@@ -213,7 +215,7 @@ func testLAFailureCounter(t *testing.T, newStore newLiveActivityStoreFunc) {
 	if err := repo.ResetFailures(ctx, la.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got := findLAByToken(t, repo, "tok-a"); got.ConsecutiveFailures != 0 {
+	if got := findLAByToken(t, repo); got.ConsecutiveFailures != 0 {
 		t.Errorf("after reset: %d", got.ConsecutiveFailures)
 	}
 	if _, err := repo.RecordFailure(ctx, 999999); !errors.Is(err, liveactivities.ErrNotFound) {
@@ -237,7 +239,7 @@ func testLARecordPush(t *testing.T, newStore newLiveActivityStoreFunc) {
 	if err := repo.RecordPush(ctx, la.ID, state, at); err != nil {
 		t.Fatal(err)
 	}
-	got := findLAByToken(t, repo, "tok-a")
+	got := findLAByToken(t, repo)
 	if got.LastPushedAt == nil || !got.LastPushedAt.Equal(at) {
 		t.Errorf("LastPushedAt = %v, want %v", got.LastPushedAt, at)
 	}

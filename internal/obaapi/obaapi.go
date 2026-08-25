@@ -336,6 +336,20 @@ func routeShortNameFallback(routes []shared.ReferencesRoute, routeID, override s
 	return ""
 }
 
+// tripHeadsignFallback is routeShortNameFallback's sibling for headsigns:
+// the entry value when present, else the referenced trip's tripHeadsign.
+func tripHeadsignFallback(trips []shared.ReferencesTrip, tripID, override string) string {
+	if override != "" {
+		return override
+	}
+	for _, trip := range trips {
+		if trip.ID == tripID {
+			return trip.TripHeadsign
+		}
+	}
+	return ""
+}
+
 func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
 	sdk, err := c.sdkFor(region)
 	if err != nil {
@@ -429,15 +443,7 @@ func (c *client) ArrivalsAndDeparturesForStop(ctx context.Context, region region
 	for _, e := range entries {
 		j := e.JSON
 		shortName := routeShortNameFallback(routes, e.RouteID, e.RouteShortName)
-		headsign := e.TripHeadsign
-		if headsign == "" {
-			for _, tr := range trips {
-				if tr.ID == e.TripID {
-					headsign = tr.TripHeadsign
-					break
-				}
-			}
-		}
+		headsign := tripHeadsignFallback(trips, e.TripID, e.TripHeadsign)
 		out = append(out, StopArrival{
 			StopID: e.StopID, TripID: e.TripID, RouteID: e.RouteID,
 			ServiceDate: e.ServiceDate, StopSequence: e.StopSequence,

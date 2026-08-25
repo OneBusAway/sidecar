@@ -31,17 +31,6 @@ func newLiveActivitiesServer(t *testing.T, limiter *ratelimit.Limiter) (http.Han
 	return httpapi.NewRouter(deps), store.LiveActivities(), store.Regions()
 }
 
-func laRequest(t *testing.T, h http.Handler, method, target, contentType, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequestWithContext(context.Background(), method, target, strings.NewReader(body))
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	return rec
-}
-
 const laForm = "activity_id=act-1&push_token=ptok-1&stop_id=1_570&route_short_name=44&trip_headsign=Ballard&apns_sandbox=1&trip_id=1_604370&service_date=1754809200000&stop_sequence=0"
 
 var laURLRe = regexp.MustCompile(`^https://sidecar\.example/api/v2/regions/1/live_activities/([A-Za-z0-9_-]{22})$`)
@@ -65,7 +54,7 @@ func TestLiveActivityCreateFormAndJSON(t *testing.T) {
 	h, repo, regionRepo := newLiveActivitiesServer(t, nil)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
 
-	url := createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	url := createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", laForm))
 	list, _ := repo.List(context.Background())
 	if len(list) != 1 {
@@ -80,7 +69,7 @@ func TestLiveActivityCreateFormAndJSON(t *testing.T) {
 	}
 
 	jsonBody := `{"activity_id":"act-2","push_token":"ptok-2","stop_id":"1_570","route_short_name":"44","trip_headsign":"Ballard","apns_sandbox":"true","stop_sequence":3}`
-	createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/json", jsonBody))
+	createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/json", jsonBody))
 	list, _ = repo.List(context.Background())
 	if len(list) != 2 {
 		t.Errorf("rows = %d", len(list))
@@ -90,11 +79,11 @@ func TestLiveActivityCreateFormAndJSON(t *testing.T) {
 func TestLiveActivityRePostIsUpsertWithSameURL(t *testing.T) {
 	h, repo, regionRepo := newLiveActivitiesServer(t, nil)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
-	first := createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	first := createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", laForm))
 	rotated := strings.Replace(laForm, "push_token=ptok-1", "push_token=ptok-rotated", 1)
 	rotated = strings.Replace(rotated, "apns_sandbox=1", "apns_sandbox=0", 1)
-	second := createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	second := createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", rotated))
 	if first != second {
 		t.Errorf("re-registration URL changed: %s -> %s", first, second)
@@ -108,7 +97,7 @@ func TestLiveActivityRePostIsUpsertWithSameURL(t *testing.T) {
 func TestLiveActivityCreateValidation(t *testing.T) {
 	h, _, regionRepo := newLiveActivitiesServer(t, nil)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
-	rec := laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/x-www-form-urlencoded", "")
+	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/x-www-form-urlencoded", "")
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -123,11 +112,11 @@ func TestLiveActivityCreateValidation(t *testing.T) {
 		t.Errorf("body = %+v", body)
 	}
 	long := strings.Replace(laForm, "push_token=ptok-1", "push_token="+strings.Repeat("x", 4097), 1)
-	rec = laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/x-www-form-urlencoded", long)
+	rec = alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities", "application/x-www-form-urlencoded", long)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "Push token is too long (maximum is 4096 characters)") {
 		t.Errorf("long token: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = laRequest(t, h, http.MethodPost, "/api/v2/regions/99/live_activities", "application/x-www-form-urlencoded", laForm)
+	rec = alarmRequest(t, h, http.MethodPost, "/api/v2/regions/99/live_activities", "application/x-www-form-urlencoded", laForm)
 	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Couldn't find Region") {
 		t.Errorf("unknown region: %d %s", rec.Code, rec.Body.String())
 	}
@@ -137,19 +126,19 @@ func TestLiveActivityDelete(t *testing.T) {
 	h, _, regionRepo := newLiveActivitiesServer(t, nil)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
 	putRegionWithBaseURL(t, regionRepo, 2, "https://sidecar.example")
-	url := createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	url := createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", laForm))
 	path := strings.TrimPrefix(url, "https://sidecar.example")
 	token := path[strings.LastIndex(path, "/")+1:]
 
-	if rec := laRequest(t, h, http.MethodDelete, "/api/v2/regions/2/live_activities/"+token, "", ""); rec.Code != http.StatusNotFound {
+	if rec := alarmRequest(t, h, http.MethodDelete, "/api/v2/regions/2/live_activities/"+token, "", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("wrong region: %d", rec.Code)
 	}
 	slug := "/api/v2/regions/1-puget-sound/live_activities/" + token
-	if rec := laRequest(t, h, http.MethodDelete, slug, "", ""); rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+	if rec := alarmRequest(t, h, http.MethodDelete, slug, "", ""); rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
 		t.Errorf("slug delete: %d %q", rec.Code, rec.Body.String())
 	}
-	if rec := laRequest(t, h, http.MethodDelete, path, "", ""); rec.Code != http.StatusNotFound {
+	if rec := alarmRequest(t, h, http.MethodDelete, path, "", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("second delete: %d", rec.Code)
 	}
 }
@@ -157,13 +146,13 @@ func TestLiveActivityDelete(t *testing.T) {
 func TestLiveActivityPostThrottledDeleteNot(t *testing.T) {
 	h, _, regionRepo := newLiveActivitiesServer(t, ratelimit.New(1, time.Minute))
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
-	url := createURL(t, laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	url := createURL(t, alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", laForm))
-	if rec := laRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
+	if rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/live_activities",
 		"application/x-www-form-urlencoded", laForm); rec.Code != http.StatusTooManyRequests {
 		t.Errorf("second POST: %d, want 429", rec.Code)
 	}
-	if rec := laRequest(t, h, http.MethodDelete, strings.TrimPrefix(url, "https://sidecar.example"), "", ""); rec.Code != http.StatusNoContent {
+	if rec := alarmRequest(t, h, http.MethodDelete, strings.TrimPrefix(url, "https://sidecar.example"), "", ""); rec.Code != http.StatusNoContent {
 		t.Errorf("DELETE must not be throttled: %d", rec.Code)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/auth"
@@ -68,7 +67,7 @@ func (r *authRepo) CreateUser(ctx context.Context, username, passwordHash string
 		// this specific to the username constraint. Mapping the violation is
 		// deliberate: a pre-check SELECT would race two concurrent creates and
 		// surface a raw driver error to whichever lost.
-		if strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
+		if isUniqueViolation(err, "users.username") {
 			return auth.User{}, fmt.Errorf("sqlite: create user %q: %w", username, auth.ErrUsernameTaken)
 		}
 		return auth.User{}, fmt.Errorf("sqlite: create user %q: %w", username, err)

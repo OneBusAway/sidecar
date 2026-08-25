@@ -155,14 +155,9 @@ func (c *clock) advance(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.U
 var base = time.Date(2026, 1, 9, 18, 0, 0, 0, time.UTC)
 
 func upcoming(offset time.Duration) obaapi.StopArrival {
-	e := entry(offset, 0) // from contentstate_test.go; measured against `now`
-	// entry() is relative to contentstate_test's `now`; rebase onto base.
-	shift := base.Sub(now)
-	e.ScheduledArrivalTime += shift.Milliseconds()
-	e.PredictedArrivalTime += shift.Milliseconds()
-	e.ScheduledDepartureTime += shift.Milliseconds()
-	e.PredictedDepartureTime += shift.Milliseconds()
-	return e
+	// entry() (contentstate_test.go) measures offsets from that file's `now`;
+	// folding the difference into the offset rebases the entry onto base.
+	return entry(base.Sub(now)+offset, 0)
 }
 
 func activity(id int64, stop string) liveactivities.LiveActivity {

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
@@ -87,7 +86,7 @@ func (r *alarmRepo) Create(ctx context.Context, in alarms.NewAlarm, now time.Tim
 		Now:             ts,
 	})
 	if err != nil {
-		if in.APIVersion == 1 && strings.Contains(err.Error(), "UNIQUE constraint failed: alarms.region_id") {
+		if in.APIVersion == 1 && isUniqueViolation(err, "alarms.region_id") {
 			return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d): %w", in.RegionID, alarms.ErrDuplicate)
 		}
 		return alarms.Alarm{}, fmt.Errorf("sqlite: create alarm (region %d): %w", in.RegionID, err)
