@@ -8,7 +8,8 @@ base="${1:-http://localhost:8080}"
 # status prints the HTTP status for a path. curl writes '000' via -w when
 # the connection fails and exits non-zero; || true keeps set -e from aborting.
 status() {
-  curl -s -o /dev/null -w '%{http_code}' "$base$1" || true
+  path="$1"
+  curl -s -o /dev/null -w '%{http_code}' "$base$path" || true
 }
 
 check() {

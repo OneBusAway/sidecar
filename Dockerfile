@@ -4,7 +4,7 @@
 FROM node:24-alpine AS web
 WORKDIR /src/web/admin
 COPY web/admin/package.json web/admin/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 COPY web/admin/ ./
 RUN npm run build
 

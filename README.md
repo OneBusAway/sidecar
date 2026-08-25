@@ -442,9 +442,12 @@ a private service. First deploy:
    the generated value from Dashboard → Environment Groups →
    `sidecar-shared`, then set `GORUSH_CORE_FEEDBACK_HEADER` to
    `authorization:` followed by that value, and
-   `GORUSH_CORE_FEEDBACK_HOOK_URL` to `http://` followed by the value Render
-   put in `GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT` on the gorush service (a
-   staging var gorush itself never reads) followed by `/webhooks/gorush`.
+   `GORUSH_CORE_FEEDBACK_HOOK_URL` to `http://` followed by the sidecar's
+   internal `host:port` followed by `/webhooks/gorush`. Take that `host:port`
+   from the `GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT` value Render populated on the
+   gorush service (a staging var gorush itself never reads); if you removed
+   that entry under the dependency-cycle fallback in step 1, read it instead
+   from Dashboard → sidecar → Connect → Internal.
 4. Wait for `/healthz` to go green, then `render ssh sidecar` and run
    `sidecar-admin region set …` and `sidecar-admin user create …`
    (`SIDECAR_DB` is already set in the image). Verify: if the sidecar

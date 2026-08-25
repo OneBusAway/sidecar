@@ -8,7 +8,7 @@ Go reference implementation of the OneBusAway *sidecar services*: the region-sco
 
 ## Commands
 
-Toolchain is pinned in `mise.toml` (Go latest, Node 24). golangci-lint is pinned to v2.12.2 (`make tools`).
+Toolchain is configured in `mise.toml` (Go `latest`, Node 24 — moving selectors, not exact pins). golangci-lint is pinned to v2.12.2 (`make tools`).
 
 ```sh
 make check              # everything CI runs: fmt-check vet lint test test-tz test-race web-check
