@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 // Platform uses gorush's wire codes so the adapter needs no translation
@@ -51,4 +52,30 @@ func IsTerminal(reason string) bool {
 		}
 	}
 	return false
+}
+
+// LiveActivityPush is one ActivityKit push to one Live Activity token
+// (spec §6.6). ContentState marshals to the §6.2 object; it is typed any
+// because the concrete type lives in internal/liveactivities, which imports
+// this package (design spec §2.7).
+type LiveActivityPush struct {
+	Token   string
+	Sandbox bool   // APNs sandbox routing (spec §2.7)
+	Event   string // "update" | "end"
+	// ContentState is the §6.2 content-state object.
+	ContentState any
+	// Timestamp is required and must advance on every push to one activity;
+	// APNs silently drops a push whose timestamp does not.
+	Timestamp time.Time
+	// StaleDate is sent on updates (~10 minutes out); zero omits it.
+	StaleDate time.Time
+	// DismissalDate is sent on end (~15 minutes out); zero omits it.
+	DismissalDate time.Time
+}
+
+// LiveActivitySender delivers Live Activity pushes. Send semantics match
+// Sender: nil means the transport accepted the push, not that the device
+// received it; terminal failures arrive via the feedback webhook (§6.5).
+type LiveActivitySender interface {
+	SendLiveActivity(ctx context.Context, p LiveActivityPush) error
 }

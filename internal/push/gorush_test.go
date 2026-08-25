@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -391,5 +393,117 @@ func TestGorushSendSetsAPNsTopicForIOSOnly(t *testing.T) {
 				t.Errorf("topic = %v, want %v (payload %v)", got, tc.want, captured())
 			}
 		})
+	}
+}
+
+func TestGorushSendLiveActivityPostsExpectedJSON(t *testing.T) {
+	server, captured := newCaptureServer(t)
+	g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
+
+	ts := time.Date(2026, 1, 9, 18, 0, 0, 0, time.UTC)
+	err := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token:        "la-tok",
+		Sandbox:      true,
+		Event:        "update",
+		ContentState: map[string]any{"arrivals": []any{}},
+		Timestamp:    ts,
+		StaleDate:    ts.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SendLiveActivity: %v", err)
+	}
+	got := captured()
+	want := map[string]any{
+		"tokens":        []any{"la-tok"},
+		"platform":      float64(1),
+		"push_type":     "liveactivity",
+		"priority":      "high",
+		"topic":         "org.onebusaway.iphone.push-type.liveactivity",
+		"development":   true,
+		"event":         "update",
+		"content-state": map[string]any{"arrivals": []any{}},
+		"timestamp":     float64(ts.Unix()),
+		"stale-date":    float64(ts.Add(10 * time.Minute).Unix()),
+	}
+	for k, v := range want {
+		if !reflect.DeepEqual(got[k], v) {
+			t.Errorf("%s = %#v, want %#v", k, got[k], v)
+		}
+	}
+	for _, absent := range []string{"dismissal-date", "message", "title", "data"} {
+		if _, ok := got[absent]; ok {
+			t.Errorf("%s should be omitted from an update push, got %#v", absent, got[absent])
+		}
+	}
+}
+
+func TestGorushSendLiveActivityEndCarriesDismissalDateOnly(t *testing.T) {
+	server, captured := newCaptureServer(t)
+	g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
+	ts := time.Date(2026, 1, 9, 18, 0, 0, 0, time.UTC)
+	err := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token: "la-tok", Event: "end", ContentState: map[string]any{"arrivals": []any{}},
+		Timestamp: ts, DismissalDate: ts.Add(15 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("SendLiveActivity: %v", err)
+	}
+	got := captured()
+	if got["dismissal-date"] != float64(ts.Add(15*time.Minute).Unix()) {
+		t.Errorf("dismissal-date = %#v", got["dismissal-date"])
+	}
+	if _, ok := got["stale-date"]; ok {
+		t.Errorf("stale-date should be omitted on end, got %#v", got["stale-date"])
+	}
+	if _, ok := got["development"]; ok {
+		t.Errorf("development should be omitted when Sandbox is false")
+	}
+}
+
+func TestGorushSendLiveActivityRejectsEmptyTopicWithoutSending(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	g := NewGorush(server.URL, "", server.Client())
+	err := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token: "la-tok", Event: "update", ContentState: map[string]any{}, Timestamp: time.Unix(1, 0),
+	})
+	if err == nil {
+		t.Fatal("expected error for empty APNs topic")
+	}
+	if calls.Load() != 0 {
+		t.Errorf("gorush was called %d times; an empty topic must not send", calls.Load())
+	}
+}
+
+func TestGorushSendLiveActivityRejectsZeroTimestamp(t *testing.T) {
+	server, _ := newCaptureServer(t)
+	g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
+	err := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token: "la-tok", Event: "update", ContentState: map[string]any{},
+	})
+	if err == nil {
+		t.Fatal("expected error for zero Timestamp")
+	}
+}
+
+func TestGorushSendLiveActivityNon2xxIsErrorWithoutBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"echo":"la-tok-SECRET"}`))
+	}))
+	defer server.Close()
+	g := NewGorush(server.URL, "org.onebusaway.iphone", server.Client())
+	err := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token: "la-tok-SECRET", Event: "update", ContentState: map[string]any{}, Timestamp: time.Unix(1, 0),
+	})
+	if err == nil || !strings.Contains(err.Error(), "status 400") {
+		t.Fatalf("err = %v, want status 400", err)
+	}
+	if strings.Contains(err.Error(), "SECRET") {
+		t.Errorf("error leaks response body/token: %v", err)
 	}
 }
