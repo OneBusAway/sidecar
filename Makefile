@@ -8,8 +8,9 @@ GO          ?= go
 WEB_DIR     := web/admin
 EMBED_DIR   := internal/httpapi/adminui/dist
 
-# Pin the linter so local runs and CI agree.
+# Pin generator and linter so local runs and CI agree.
 GOLANGCI_LINT_VERSION := v2.12.2
+SQLC_VERSION          := v1.31.1
 
 .DEFAULT_GOAL := help
 
@@ -165,6 +166,7 @@ require-golangci-lint:
 .PHONY: tools
 tools: ## Install pinned development tooling
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	$(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
 
 .PHONY: generate
 generate: ## Regenerate sqlc code
