@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Every job runs the same make target a developer runs locally, so CI and
+# `make check` cannot drift. Go comes from go.mod, Node from mise.toml
+# (24), and golangci-lint from the Makefile pin.
+jobs:
+  lint:
+    name: make lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install pinned golangci-lint
+        run: |
+          version="$(sed -n 's/^GOLANGCI_LINT_VERSION *:= *//p' Makefile)"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${version}"
+      - run: make lint
+
+  test:
+    name: make test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/admin/package-lock.json
+      - run: make test
+
+  test-race:
+    name: make test-race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/admin/package-lock.json
+      - run: make test-race

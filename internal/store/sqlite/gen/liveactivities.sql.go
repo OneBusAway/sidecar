@@ -23,11 +23,19 @@ func (q *Queries) DeleteLiveActivitiesByPushToken(ctx context.Context, pushToken
 }
 
 const deleteLiveActivityByID = `-- name: DeleteLiveActivityByID :execrows
-DELETE FROM live_activities WHERE id = ?1
+
+DELETE FROM live_activities WHERE id = ?1 AND revision = ?2
 `
 
-func (q *Queries) DeleteLiveActivityByID(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteLiveActivityByID, id)
+type DeleteLiveActivityByIDParams struct {
+	ID       int64
+	Revision int64
+}
+
+// DeleteLiveActivityByID is a compare-and-delete: the row is removed only if
+// its revision still matches the one the caller listed.
+func (q *Queries) DeleteLiveActivityByID(ctx context.Context, arg DeleteLiveActivityByIDParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteLiveActivityByID, arg.ID, arg.Revision)
 	if err != nil {
 		return 0, err
 	}
@@ -221,7 +229,7 @@ UPDATE live_activities SET
   push_token = ?1, apns_sandbox = ?2,
   stop_id = ?3, route_short_name = ?4, trip_headsign = ?5,
   trip_id = ?6, service_date = ?7, vehicle_id = ?8, stop_sequence = ?9,
-  updated_at = ?10
+  revision = revision + 1, updated_at = ?10
 WHERE region_id = ?11 AND activity_id = ?12
 RETURNING id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, revision, expires_at, created_at, updated_at
 `
@@ -244,6 +252,8 @@ type UpdateLiveActivityRegistrationParams struct {
 // UpdateLiveActivityRegistration rewrites only the registration fields
 // (design spec section 2.1): token, expires_at, last_content_state,
 // last_pushed_at and consecutive_failures are deliberately untouched.
+// revision is bumped so an in-flight sweep's DeleteLiveActivityByID, which
+// compares on it, cannot remove the refreshed registration.
 func (q *Queries) UpdateLiveActivityRegistration(ctx context.Context, arg UpdateLiveActivityRegistrationParams) (LiveActivity, error) {
 	row := q.db.QueryRowContext(ctx, updateLiveActivityRegistration,
 		arg.PushToken,

@@ -13,21 +13,26 @@ RETURNING *;
 -- UpdateLiveActivityRegistration rewrites only the registration fields
 -- (design spec section 2.1): token, expires_at, last_content_state,
 -- last_pushed_at and consecutive_failures are deliberately untouched.
+-- revision is bumped so an in-flight sweep's DeleteLiveActivityByID, which
+-- compares on it, cannot remove the refreshed registration.
 
 -- name: UpdateLiveActivityRegistration :one
 UPDATE live_activities SET
   push_token = @push_token, apns_sandbox = @apns_sandbox,
   stop_id = @stop_id, route_short_name = @route_short_name, trip_headsign = @trip_headsign,
   trip_id = @trip_id, service_date = @service_date, vehicle_id = @vehicle_id, stop_sequence = @stop_sequence,
-  updated_at = @now
+  revision = revision + 1, updated_at = @now
 WHERE region_id = @region_id AND activity_id = @activity_id
 RETURNING *;
 
 -- name: DeleteLiveActivityByToken :execrows
 DELETE FROM live_activities WHERE region_id = @region_id AND token = @token;
 
+-- DeleteLiveActivityByID is a compare-and-delete: the row is removed only if
+-- its revision still matches the one the caller listed.
+
 -- name: DeleteLiveActivityByID :execrows
-DELETE FROM live_activities WHERE id = @id;
+DELETE FROM live_activities WHERE id = @id AND revision = @revision;
 
 -- name: DeleteLiveActivitiesByPushToken :execrows
 DELETE FROM live_activities WHERE push_token = @push_token;
