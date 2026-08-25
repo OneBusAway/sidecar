@@ -262,8 +262,18 @@ func (u *Updater) end(ctx context.Context, la LiveActivity, reason string) {
 			u.Logger.Warn("liveactivities: best-effort end push failed", "region_id", la.RegionID, "err", err)
 		}
 	}
-	if err := u.Repo.DeleteByID(ctx, la.ID); err != nil {
+	// Compare-and-delete on the revision this sweep listed: a token
+	// rotation that re-registered the row since then must survive, or the
+	// phone's new token never hears from us again. The end push above went
+	// to the old token, which is what the rotation retired -- harmless.
+	deleted, err := u.Repo.DeleteByID(ctx, la.ID, la.Revision)
+	if err != nil {
 		u.Logger.Error("liveactivities: delete ended activity", "region_id", la.RegionID, "err", err)
+		return
+	}
+	if !deleted {
+		u.Logger.Info("liveactivities: ended row was re-registered mid-sweep; kept",
+			"region_id", la.RegionID, "stop_id", la.StopID, "reason", reason)
 	}
 }
 

@@ -28,6 +28,7 @@ func RunLiveActivityRepository(t *testing.T, newStore newLiveActivityStoreFunc) 
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testLADeleteByIDMissing(t, newStore) })
 	t.Run("ConcurrentFirstRegistrationRace", func(t *testing.T) { testLAConcurrentFirstRegistrationRace(t, newStore) })
 	t.Run("DeleteByIDRemovesExistingRow", func(t *testing.T) { testLADeleteByIDRemovesExistingRow(t, newStore) })
+	t.Run("DeleteByIDSkipsReRegisteredRow", func(t *testing.T) { testLADeleteByIDSkipsReRegisteredRow(t, newStore) })
 }
 
 func fullLAIn(token, activityID string) liveactivities.NewLiveActivity {
@@ -250,8 +251,8 @@ func testLARecordPush(t *testing.T, newStore newLiveActivityStoreFunc) {
 
 func testLADeleteByIDMissing(t *testing.T, newStore newLiveActivityStoreFunc) {
 	repo, _ := newStore(t)
-	if err := repo.DeleteByID(context.Background(), 424242); err != nil {
-		t.Errorf("DeleteByID(missing) = %v, want nil", err)
+	if deleted, err := repo.DeleteByID(context.Background(), 424242, 0); err != nil || deleted {
+		t.Errorf("DeleteByID(missing) = %v, %v; want false, nil", deleted, err)
 	}
 }
 
@@ -355,8 +356,8 @@ func testLADeleteByIDRemovesExistingRow(t *testing.T, newStore newLiveActivitySt
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	if deleteErr := repo.DeleteByID(ctx, created.ID); deleteErr != nil {
-		t.Fatalf("DeleteByID(known) = %v, want nil", deleteErr)
+	if deleted, deleteErr := repo.DeleteByID(ctx, created.ID, created.Revision); deleteErr != nil || !deleted {
+		t.Fatalf("DeleteByID(known) = %v, %v; want true, nil", deleted, deleteErr)
 	}
 
 	list, err := repo.List(ctx)
@@ -369,7 +370,39 @@ func testLADeleteByIDRemovesExistingRow(t *testing.T, newStore newLiveActivitySt
 		}
 	}
 
-	if secondErr := repo.DeleteByID(ctx, created.ID); secondErr != nil {
-		t.Errorf("DeleteByID(already gone) = %v, want nil", secondErr)
+	if deleted, secondErr := repo.DeleteByID(ctx, created.ID, created.Revision); secondErr != nil || deleted {
+		t.Errorf("DeleteByID(already gone) = %v, %v; want false, nil", deleted, secondErr)
+	}
+}
+
+// testLADeleteByIDSkipsReRegisteredRow pins the compare-and-delete contract:
+// a re-registration bumps Revision, so a delete carrying the pre-rotation
+// revision is a no-op and the refreshed row survives; the current revision
+// deletes it.
+func testLADeleteByIDSkipsReRegisteredRow(t *testing.T, newStore newLiveActivityStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+	first, err := repo.Upsert(ctx, fullLAIn("tok-a", "act-a"), base)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	rotated := fullLAIn("tok-IGNORED", "act-a")
+	rotated.PushToken = "push-rotated"
+	second, err := repo.Upsert(ctx, rotated, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Upsert (rotation): %v", err)
+	}
+	if second.Revision != first.Revision+1 {
+		t.Fatalf("Revision after rotation = %d, want %d", second.Revision, first.Revision+1)
+	}
+	if deleted, err := repo.DeleteByID(ctx, first.ID, first.Revision); err != nil || deleted {
+		t.Errorf("DeleteByID(stale revision) = %v, %v; want false, nil", deleted, err)
+	}
+	if got := findLAByToken(t, repo); got.PushToken != "push-rotated" {
+		t.Errorf("stale delete removed the refreshed row: %+v", got)
+	}
+	if deleted, err := repo.DeleteByID(ctx, first.ID, second.Revision); err != nil || !deleted {
+		t.Errorf("DeleteByID(current revision) = %v, %v; want true, nil", deleted, err)
 	}
 }

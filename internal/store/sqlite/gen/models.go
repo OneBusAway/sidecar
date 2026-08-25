@@ -102,6 +102,7 @@ type LiveActivity struct {
 	LastContentState    string
 	LastPushedAt        sql.NullInt64
 	ConsecutiveFailures int64
+	Revision            int64
 	ExpiresAt           int64
 	CreatedAt           int64
 	UpdatedAt           int64

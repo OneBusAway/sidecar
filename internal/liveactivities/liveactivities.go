@@ -70,8 +70,12 @@ type LiveActivity struct {
 	LastContentState    ContentState
 	LastPushedAt        *time.Time // nil = never pushed
 	ConsecutiveFailures int64
-	ExpiresAt           time.Time
-	CreatedAt           time.Time
+	// Revision counts re-registrations of this row. DeleteByID compares on
+	// it so the updater's sweep can never delete a registration that was
+	// refreshed after the sweep listed it.
+	Revision  int64
+	ExpiresAt time.Time
+	CreatedAt time.Time
 }
 
 // NewLiveActivity is the input to Repository.Upsert. Token and ExpiresAt
@@ -105,8 +109,11 @@ type Repository interface {
 	// Delete removes the activity matching regionID and token. ErrNotFound
 	// when no row matches (204 contract for a missing/expired activity).
 	Delete(ctx context.Context, regionID int64, token string) error
-	// DeleteByID removes the activity by primary key; a missing row is success.
-	DeleteByID(ctx context.Context, id int64) error
+	// DeleteByID removes the activity only if its stored revision still
+	// equals revision (the value the caller read). It reports whether a row
+	// was deleted; a missing row and a revision mismatch (re-registered since
+	// the read) are both false with a nil error.
+	DeleteByID(ctx context.Context, id, revision int64) (bool, error)
 	// DeleteByPushToken removes every activity registered with pushToken,
 	// returning the count removed (APNs feedback: token no longer valid).
 	DeleteByPushToken(ctx context.Context, pushToken string) (int64, error)

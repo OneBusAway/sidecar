@@ -273,7 +273,7 @@ derived from `SIDECAR_APNS_TOPIC`).
 
 ### Endpoints
 
-```
+```text
 POST   /api/v2/regions/{regionId}/live_activities          → 201 {"url": "…/live_activities/<token>"}
 DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
 ```

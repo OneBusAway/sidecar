@@ -19,6 +19,9 @@ import (
 type fakeRepo struct {
 	mu   sync.Mutex
 	rows map[int64]liveactivities.LiveActivity
+	// reregisterAfterList bumps every listed row's stored revision as List
+	// returns, modelling a re-registration racing the sweep.
+	reregisterAfterList bool
 }
 
 func newFakeRepo(rows ...liveactivities.LiveActivity) *fakeRepo {
@@ -33,19 +36,29 @@ func (r *fakeRepo) Upsert(context.Context, liveactivities.NewLiveActivity, time.
 	return liveactivities.LiveActivity{}, errors.New("not implemented")
 }
 func (r *fakeRepo) Delete(context.Context, int64, string) error { return liveactivities.ErrNotFound }
-func (r *fakeRepo) DeleteByID(_ context.Context, id int64) error {
+func (r *fakeRepo) DeleteByID(_ context.Context, id, revision int64) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	la, ok := r.rows[id]
+	if !ok || la.Revision != revision {
+		return false, nil
+	}
 	delete(r.rows, id)
-	return nil
+	return true, nil
 }
 func (r *fakeRepo) DeleteByPushToken(context.Context, string) (int64, error) { return 0, nil }
 func (r *fakeRepo) List(context.Context) ([]liveactivities.LiveActivity, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]liveactivities.LiveActivity, 0, len(r.rows))
-	for _, la := range r.rows {
+	for id, la := range r.rows {
 		out = append(out, la)
+		if r.reregisterAfterList {
+			// Simulate a token-rotation re-POST landing right after the
+			// sweep read this row: the stored revision moves on.
+			la.Revision++
+			r.rows[id] = la
+		}
 	}
 	return out, nil
 }
@@ -473,5 +486,24 @@ func TestQueryWindowIsLookbackAndLookahead(t *testing.T) {
 	h.cycle()
 	if got.StopID != "1_570" || got.MinutesBefore != liveactivities.LookbackMinutes || got.MinutesAfter != liveactivities.LookaheadMinutes {
 		t.Errorf("query = %+v", got)
+	}
+}
+
+func TestEndKeepsRowReRegisteredMidSweep(t *testing.T) {
+	s := &fakeSender{}
+	la := activity(1, "1_570")
+	la.ExpiresAt = base
+	h := newHarness(t, s, la)
+	h.repo.reregisterAfterList = true
+	h.cycle()
+	row, ok := h.repo.get(1)
+	if !ok {
+		t.Fatal("a row re-registered after the sweep listed it must survive end()")
+	}
+	if row.Revision != 1 {
+		t.Errorf("revision = %d, want 1 (the re-registration's)", row.Revision)
+	}
+	if p := s.pushes(); len(p) != 1 || p[0].Event != "end" {
+		t.Errorf("end push still goes to the token the sweep saw: %+v", p)
 	}
 }

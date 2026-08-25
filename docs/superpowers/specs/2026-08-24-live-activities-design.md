@@ -203,7 +203,10 @@ calls `end(reason)`.
 
 `end(reason)`: if a sender is configured, send a best-effort `end` push carrying the
 last stored content state (`{"arrivals":[]}` if none) with `dismissal-date = now +
-15m`; log any failure at Warn. Then **always** `DeleteByID`. Deleting regardless of
+15m`; log any failure at Warn. Then **always** `DeleteByID(id, revision)` — a
+compare-and-delete on the `revision` the sweep listed, so a token-rotation re-POST
+that refreshed the row since then survives (the row's `revision` moved on and the
+delete matches nothing; logged at Info). Deleting regardless of
 push outcome is the §6.4 requirement — a dead token must not keep the row being
 re-checked forever.
 
@@ -331,7 +334,7 @@ cell is treated as `{"arrivals":[]}` with a Warn log — one bad row must not fa
 type Repository interface {
     Upsert(ctx context.Context, in NewLiveActivity, now time.Time) (LiveActivity, error) // ErrDuplicate on the first-registration race
     Delete(ctx context.Context, regionID int64, token string) error                     // ErrNotFound; 204 contract
-    DeleteByID(ctx context.Context, id int64) error
+    DeleteByID(ctx context.Context, id, revision int64) (bool, error) // compare-and-delete; false when gone or re-registered
     DeleteByPushToken(ctx context.Context, pushToken string) (int64, error)             // feedback; rows deleted
     List(ctx context.Context) ([]LiveActivity, error)                                   // updater sweep, all regions
     RecordFailure(ctx context.Context, id int64) (int64, error)                         // ++consecutive_failures, returns streak

@@ -61,7 +61,7 @@ INSERT INTO live_activities (
   ?6, ?7, ?8, ?9, ?10, ?11, ?12,
   ?13, ?14, ?14
 )
-RETURNING id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, expires_at, created_at, updated_at
+RETURNING id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, revision, expires_at, created_at, updated_at
 `
 
 type InsertLiveActivityParams struct {
@@ -116,6 +116,7 @@ func (q *Queries) InsertLiveActivity(ctx context.Context, arg InsertLiveActivity
 		&i.LastContentState,
 		&i.LastPushedAt,
 		&i.ConsecutiveFailures,
+		&i.Revision,
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -124,7 +125,7 @@ func (q *Queries) InsertLiveActivity(ctx context.Context, arg InsertLiveActivity
 }
 
 const listLiveActivities = `-- name: ListLiveActivities :many
-SELECT id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, expires_at, created_at, updated_at FROM live_activities ORDER BY id
+SELECT id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, revision, expires_at, created_at, updated_at FROM live_activities ORDER BY id
 `
 
 func (q *Queries) ListLiveActivities(ctx context.Context) ([]LiveActivity, error) {
@@ -153,6 +154,7 @@ func (q *Queries) ListLiveActivities(ctx context.Context) ([]LiveActivity, error
 			&i.LastContentState,
 			&i.LastPushedAt,
 			&i.ConsecutiveFailures,
+			&i.Revision,
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -221,7 +223,7 @@ UPDATE live_activities SET
   trip_id = ?6, service_date = ?7, vehicle_id = ?8, stop_sequence = ?9,
   updated_at = ?10
 WHERE region_id = ?11 AND activity_id = ?12
-RETURNING id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, expires_at, created_at, updated_at
+RETURNING id, region_id, token, activity_id, push_token, apns_sandbox, stop_id, route_short_name, trip_headsign, trip_id, service_date, vehicle_id, stop_sequence, last_content_state, last_pushed_at, consecutive_failures, revision, expires_at, created_at, updated_at
 `
 
 type UpdateLiveActivityRegistrationParams struct {
@@ -275,6 +277,7 @@ func (q *Queries) UpdateLiveActivityRegistration(ctx context.Context, arg Update
 		&i.LastContentState,
 		&i.LastPushedAt,
 		&i.ConsecutiveFailures,
+		&i.Revision,
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,

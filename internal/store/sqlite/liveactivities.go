@@ -49,6 +49,7 @@ func (r *liveActivityRepo) fromRow(row gen.LiveActivity) liveactivities.LiveActi
 		LastContentState:    state,
 		LastPushedAt:        nullUnixToTime(row.LastPushedAt),
 		ConsecutiveFailures: row.ConsecutiveFailures,
+		Revision:            row.Revision,
 		ExpiresAt:           unixToTime(row.ExpiresAt),
 		CreatedAt:           unixToTime(row.CreatedAt),
 	}
@@ -112,11 +113,12 @@ func (r *liveActivityRepo) Delete(ctx context.Context, regionID int64, token str
 
 // DeleteByID treats zero rows as success: the updater may race a rider's
 // own DELETE, and either way the row being gone is the goal.
-func (r *liveActivityRepo) DeleteByID(ctx context.Context, id int64) error {
-	if _, err := r.q.DeleteLiveActivityByID(ctx, id); err != nil {
-		return fmt.Errorf("sqlite: delete live activity %d: %w", id, err)
+func (r *liveActivityRepo) DeleteByID(ctx context.Context, id, revision int64) (bool, error) {
+	n, err := r.q.DeleteLiveActivityByID(ctx, gen.DeleteLiveActivityByIDParams{ID: id, Revision: revision})
+	if err != nil {
+		return false, fmt.Errorf("sqlite: delete live activity %d: %w", id, err)
 	}
-	return nil
+	return n > 0, nil
 }
 
 func (r *liveActivityRepo) DeleteByPushToken(ctx context.Context, pushToken string) (int64, error) {

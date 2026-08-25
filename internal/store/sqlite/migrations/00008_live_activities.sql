@@ -25,6 +25,10 @@ CREATE TABLE live_activities (
   last_content_state   TEXT    NOT NULL DEFAULT '{"arrivals":[]}',
   last_pushed_at       INTEGER,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  -- Bumped on every re-registration (token rotation). The updater deletes
+  -- with a compare on this value, so a sweep that decided to end a row it
+  -- listed a moment ago cannot remove a registration refreshed since.
+  revision             INTEGER NOT NULL DEFAULT 0,
   expires_at           INTEGER NOT NULL,
   created_at           INTEGER NOT NULL,
   updated_at           INTEGER NOT NULL
