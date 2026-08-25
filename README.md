@@ -262,6 +262,44 @@ through the same formula-injection guard as `survey responses`: a leading
 apostrophe when a cell would otherwise open with `=`, `+`, `-`, `@`, a tab,
 or a carriage return.
 
+## Live Activities
+
+iOS Lock Screen widgets showing the next departures for one bookmarked route +
+headsign at one stop (spec §6). The sidecar owns the update cadence: once a
+minute per subscription it fetches the stop's arrivals from the region's OBA
+server, builds the §6.2 `content-state`, and pushes it through gorush as an
+APNs `liveactivity` push (priority 10, topic `<bundle id>.push-type.liveactivity`,
+derived from `SIDECAR_APNS_TOPIC`).
+
+### Endpoints
+
+```
+POST   /api/v2/regions/{regionId}/live_activities          → 201 {"url": "…/live_activities/<token>"}
+DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
+```
+
+- Registration is an **upsert on `(region, activity_id)`**: ActivityKit rotates
+  push tokens and the app re-POSTs the same activity with each one. The URL is
+  the same every time; every field, including `apns_sandbox`, is re-read.
+- Required: `activity_id`, `push_token` (≤ 4096 chars — a sidecar addition), `stop_id`,
+  `route_short_name`, `trip_headsign`. Optional trip metadata: `trip_id`,
+  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`.
+- `apns_sandbox` follows the §2.7 allow-list. The stakes are highest here: a
+  misrouted push bounces `BadDeviceToken`, which the feedback webhook treats as
+  terminal and deletes the subscription.
+- POST is throttled at 30/minute per TCP peer (a sidecar-specific addition —
+  every distinct stop costs one upstream call per minute for eight hours);
+  DELETE is not.
+- Subscriptions end at 8 hours, after 3 consecutive empty/error cycles, on
+  client DELETE, or on terminal APNs feedback. The first two send a best-effort
+  `end` push (dismissal 15 minutes out); the last two do not.
+- Without `SIDECAR_GORUSH_URL` the updater runs in store-only mode: rows expire
+  and reap but nothing is pushed.
+
+Deviations from OBACloud, all deliberate: route/headsign matching resolves
+names through the response `references` like the app does; the push-token
+length cap and the POST throttle are new.
+
 ## Weather and vehicle search
 
 The sidecar also serves two rider-facing lookups that proxy and cache an upstream
