@@ -3,6 +3,8 @@ package storetest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,8 @@ func RunLiveActivityRepository(t *testing.T, newStore newLiveActivityStoreFunc) 
 	t.Run("FailureCounterIncrementsAndResets", func(t *testing.T) { testLAFailureCounter(t, newStore) })
 	t.Run("RecordPushRoundTripsStateAndInstant", func(t *testing.T) { testLARecordPush(t, newStore) })
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testLADeleteByIDMissing(t, newStore) })
+	t.Run("ConcurrentFirstRegistrationRace", func(t *testing.T) { testLAConcurrentFirstRegistrationRace(t, newStore) })
+	t.Run("DeleteByIDRemovesExistingRow", func(t *testing.T) { testLADeleteByIDRemovesExistingRow(t, newStore) })
 }
 
 func fullLAIn(token, activityID string) liveactivities.NewLiveActivity {
@@ -246,5 +250,124 @@ func testLADeleteByIDMissing(t *testing.T, newStore newLiveActivityStoreFunc) {
 	repo, _ := newStore(t)
 	if err := repo.DeleteByID(context.Background(), 424242); err != nil {
 		t.Errorf("DeleteByID(missing) = %v, want nil", err)
+	}
+}
+
+// countLAByActivity counts the rows in list whose ActivityID matches
+// activityID -- the concurrent-race subtest needs to see exactly one
+// survivor for the activity every goroutine raced to register.
+func countLAByActivity(list []liveactivities.LiveActivity, activityID string) int {
+	n := 0
+	for _, la := range list {
+		if la.ActivityID == activityID {
+			n++
+		}
+	}
+	return n
+}
+
+// testLAConcurrentFirstRegistrationRace models
+// testGhostBusConcurrentDuplicate (ghostbustest.go): several goroutines race
+// Upsert on the same brand-new (region, activity_id) pair, each with a
+// distinct token/push token standing in for distinct ActivityKit
+// registrations of the same activity. Exactly the constraint-violation loser
+// side of the race must surface as ErrDuplicate -- never a bare error -- and
+// the winner's insert must leave exactly one row behind, matching Upsert's
+// documented single-retry contract (design spec §2.1). A follow-up
+// sequential Upsert against the same activity id must then hit the update
+// path and succeed, proving the row the race left behind is usable, not
+// wedged.
+func testLAConcurrentFirstRegistrationRace(t *testing.T, newStore newLiveActivityStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+
+	const n = 8
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		in := fullLAIn(fmt.Sprintf("tok-race-%d", i), "act-race")
+		in.PushToken = fmt.Sprintf("push-race-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := repo.Upsert(ctx, in, base)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	var okCount int
+	for err := range errs {
+		switch {
+		case err == nil:
+			okCount++
+		case errors.Is(err, liveactivities.ErrDuplicate):
+			// expected loser outcome
+		default:
+			t.Fatalf("racing Upsert err = %v, want nil or ErrDuplicate", err)
+		}
+	}
+	if okCount < 1 {
+		t.Fatalf("race outcome ok=%d, want at least one winner", okCount)
+	}
+
+	list, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := countLAByActivity(list, "act-race"); got != 1 {
+		t.Fatalf("List() has %d rows for act-race, want 1", got)
+	}
+
+	// The row the race left behind must still take a normal update: this
+	// Upsert must hit UpdateLiveActivityRegistration (the row already
+	// exists), not mint a second row.
+	if _, followupErr := repo.Upsert(ctx, fullLAIn("tok-race-followup", "act-race"), base); followupErr != nil {
+		t.Fatalf("follow-up Upsert (update path) = %v, want nil", followupErr)
+	}
+	list, err = repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := countLAByActivity(list, "act-race"); got != 1 {
+		t.Fatalf("List() after follow-up has %d rows for act-race, want 1", got)
+	}
+}
+
+// testLADeleteByIDRemovesExistingRow asserts DeleteByID actually removes a
+// known row (not just reporting success for a row that was never there,
+// which is all testLADeleteByIDMissing exercises), and that deleting the
+// same id a second time still reports no error.
+func testLADeleteByIDRemovesExistingRow(t *testing.T, newStore newLiveActivityStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+
+	created, err := repo.Upsert(ctx, fullLAIn("tok-delete-by-id", "act-delete-by-id"), base)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if deleteErr := repo.DeleteByID(ctx, created.ID); deleteErr != nil {
+		t.Fatalf("DeleteByID(known) = %v, want nil", deleteErr)
+	}
+
+	list, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, la := range list {
+		if la.ID == created.ID {
+			t.Fatalf("List() after DeleteByID still contains id %d: %+v", created.ID, list)
+		}
+	}
+
+	if secondErr := repo.DeleteByID(ctx, created.ID); secondErr != nil {
+		t.Errorf("DeleteByID(already gone) = %v, want nil", secondErr)
 	}
 }
