@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
@@ -155,6 +157,12 @@ func (s *Store) PushRegs() pushreg.Repository {
 // Alarms returns the alarms.Repository backed by this store.
 func (s *Store) Alarms() alarms.Repository {
 	return &alarmRepo{q: s.q}
+}
+
+// LiveActivities returns the liveactivities.Repository backed by this store
+// (spec §6).
+func (s *Store) LiveActivities() liveactivities.Repository {
+	return &liveActivityRepo{q: s.q, logger: slog.Default()}
 }
 
 // Surveys returns the surveys.Repository backed by this store.

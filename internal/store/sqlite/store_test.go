@@ -11,6 +11,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
@@ -111,6 +112,7 @@ func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
 		"sessions":           {"created_at", "expires_at"},
 		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
 		"alarms":             {"service_date", "created_at", "updated_at"},
+		"live_activities":    {"service_date", "last_pushed_at", "expires_at", "created_at", "updated_at"},
 		"studies":            {"created_at", "updated_at"},
 		"surveys":            {"start_time", "end_time", "created_at", "updated_at"},
 		"survey_questions":   {"created_at", "updated_at"},
@@ -382,6 +384,17 @@ func TestAlarmConformance(t *testing.T) {
 	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.Alarms(), s.Regions()
+	})
+}
+
+// TestLiveActivityRepositoryConformance runs the shared live activity suite
+// against the SQLite adapter (design spec §8).
+func TestLiveActivityRepositoryConformance(t *testing.T) {
+	t.Parallel()
+	storetest.RunLiveActivityRepository(t, func(t *testing.T) (liveactivities.Repository, regions.Repository) {
+		t.Helper()
+		store := sqlitetest.Open(t)
+		return store.LiveActivities(), store.Regions()
 	})
 }
 
