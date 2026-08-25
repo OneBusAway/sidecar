@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Supersede stale PR runs, but let every push to main finish so each merge
+  # commit ends up with a completed status.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# One job per `make check` target, so CI runs exactly what a developer runs
+# locally; keep this matrix in sync with the `check` prerequisites in the
+# Makefile. The whole toolchain (Go, Node, golangci-lint, sqlc) comes from
+# mise.toml.
+jobs:
+  check:
+    name: make ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fmt-check, vet, lint, generate-check, test, test-tz, test-race, web-check]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache: true
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/.cache/golangci-lint
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum', 'mise.toml') }}-${{ matrix.target }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ hashFiles('go.sum', 'mise.toml') }}-
+            go-${{ runner.os }}-
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/admin/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+      - run: make ${{ matrix.target }}
