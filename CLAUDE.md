@@ -8,7 +8,7 @@ Go reference implementation of the OneBusAway *sidecar services*: the region-sco
 
 ## Commands
 
-Toolchain is configured in `mise.toml`: Go `latest` and Node 24 are moving selectors; golangci-lint (2.12.2) and sqlc (1.31.1) are exact pins. `make tools` is `mise install`; CI installs from the same file. Keep the `check` prerequisites and the matrix in `.github/workflows/ci.yml` in sync.
+Toolchain is configured in `mise.toml`: Go 1.26 and Node 24 are major/minor selectors (Go must track go.mod and golangci-lint's own build — a newer stdlib breaks lint's typecheck); golangci-lint (2.12.2) and sqlc (1.31.1) are exact pins. `make tools` is `mise install`; CI installs from the same file. Keep the `check` prerequisites and the matrix in `.github/workflows/ci.yml` in sync.
 
 ```sh
 make check              # everything CI runs: fmt-check vet lint generate-check test test-tz test-race web-check

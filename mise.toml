@@ -1,5 +1,7 @@
 [tools]
-go = "latest"
+# Major.minor pinned to match go.mod and the golangci-lint build: a newer Go
+# stdlib than the linter was built with breaks its typecheck.
+go = "1.26"
 node = "24"
 # Pinned so local runs and CI agree; CI installs from this file via mise-action.
 golangci-lint = "2.12.2"

@@ -725,7 +725,7 @@ curl -s -X DELETE http://$IP:8080/api/v2/regions/1/live_activities/<token>
 
 ## Development
 
-Requires Go 1.26+, [golangci-lint](https://golangci-lint.run) 2.12+, [sqlc](https://sqlc.dev) 1.31+, and Node -- all declared in `mise.toml` (golangci-lint and sqlc as exact pins; Go and Node as moving selectors), so `mise install` (or `make tools`) sets up everything once mise is activated in your shell (Node is for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
+Requires Go 1.26+, [golangci-lint](https://golangci-lint.run) 2.12+, [sqlc](https://sqlc.dev) 1.31+, and Node -- all declared in `mise.toml` (golangci-lint and sqlc as exact pins; Go and Node as major/minor selectors), so `mise install` (or `make tools`) sets up everything once mise is activated in your shell (Node is for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).
 
 ```sh
 make tools     # install pinned dev tooling
