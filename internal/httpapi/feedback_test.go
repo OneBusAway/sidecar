@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/httpapi"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
+	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
@@ -455,5 +457,86 @@ func TestFeedbackAuthenticatedWebhookIsNotThrottled(t *testing.T) {
 		if got := authedFeedbackRequest(t, h, "Bearer "+secret, body).Code; got != http.StatusOK {
 			t.Fatalf("request %d: status = %d, want 200 (an authenticated webhook must never be throttled)", i, got)
 		}
+	}
+}
+
+func seedLiveActivity(t *testing.T, repo liveactivities.Repository, regionRepo regions.Repository, pushToken string) {
+	t.Helper()
+	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example")
+	_, err := repo.Upsert(context.Background(), liveactivities.NewLiveActivity{
+		RegionID: 1, Token: "la-" + pushToken, ExpiresAt: base.Add(time.Hour), ActivityID: "act-" + pushToken,
+		PushToken: pushToken, StopID: "1_570", RouteShortName: "44", TripHeadsign: "Ballard",
+	}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFeedbackTerminalDeletesLiveActivityAndRegistration(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	seedLiveActivity(t, store.LiveActivities(), store.Regions(), "dead-tok")
+	if err := store.PushRegs().Upsert(context.Background(), pushreg.Upsert{RegionID: 1, Token: "dead-tok", OperatingSystem: "ios"}, base); err != nil {
+		t.Fatal(err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs: store.PushRegs(), LiveActivities: store.LiveActivities(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler), FeedbackSecret: "s3",
+	})
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush",
+		strings.NewReader(`{"type":"failed-push","platform":"ios","token":"dead-tok","error":"Unregistered"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer s3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if list, _ := store.LiveActivities().List(context.Background()); len(list) != 0 {
+		t.Errorf("live activity survived terminal feedback: %+v", list)
+	}
+	if n, _ := store.PushRegs().DeleteByToken(context.Background(), "dead-tok"); n != 0 {
+		t.Errorf("registration survived: %d", n)
+	}
+}
+
+func TestFeedbackRegisteredWithLiveActivitiesOnly(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	seedLiveActivity(t, store.LiveActivities(), store.Regions(), "dead-tok")
+	h := httpapi.NewRouter(httpapi.Deps{
+		LiveActivities: store.LiveActivities(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler), FeedbackSecret: "s3",
+	})
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush",
+		strings.NewReader(`{"token":"dead-tok","error":"BadDeviceToken"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer s3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (webhook must exist without PushRegs)", rec.Code)
+	}
+	if list, _ := store.LiveActivities().List(context.Background()); len(list) != 0 {
+		t.Errorf("live activity survived: %+v", list)
+	}
+}
+
+func TestFeedbackNonTerminalKeepsLiveActivity(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	seedLiveActivity(t, store.LiveActivities(), store.Regions(), "ok-tok")
+	h := httpapi.NewRouter(httpapi.Deps{
+		LiveActivities: store.LiveActivities(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler), FeedbackSecret: "s3",
+	})
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/webhooks/gorush",
+		strings.NewReader(`{"token":"ok-tok","error":"ExpiredProviderToken"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer s3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if list, _ := store.LiveActivities().List(context.Background()); len(list) != 1 {
+		t.Errorf("non-terminal reason must not delete: %+v", list)
 	}
 }
