@@ -452,7 +452,7 @@ existing boot warning is extended to mention Live Activities.
   arrivals), non-2xx → error without body, zero `Timestamp` rejected, empty
   `apnsTopic` rejected without a request.
 - **HTTP:** each 422 message; JSON and form bodies; re-POST with a new `push_token`
-  returns the same URL and rewrites the token; sandbox flip logged; 201 on both paths;
+  returns the same URL and rewrites the token; 201 on both paths;
   DELETE 204/404 including a slug region path; POST 429 at the limit, DELETE
   unthrottled; feedback prunes registrations and live activities for the same token,
   and is registered (and works) with `LiveActivities` set and `PushRegs` nil; router

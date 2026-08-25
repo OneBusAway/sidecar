@@ -119,6 +119,11 @@ func arrivalInfo(e obaapi.StopArrival, nowSec int64) (ArrivalInfo, bool) {
 	var deviation int64
 	if predicted {
 		timeMs = predictedMs
+		// Computed even when scheduledMs == 0 (a feed gap), deliberately:
+		// OBAKitCore's ArrivalDeparture does the same unguarded subtraction,
+		// and §6.2 requires the pushed card and a local client refresh to
+		// agree on the same number. Do not add a scheduledMs > 0 guard here
+		// unilaterally -- that would desync from the client.
 		deviation = (predictedMs - scheduledMs) / 1000
 	}
 	timeSec := timeMs / 1000

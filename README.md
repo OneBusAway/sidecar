@@ -680,6 +680,48 @@ webhook (which prunes the dead token). Common APNs errors:
 | `BadDeviceToken` | `development` flag doesn't match the build's environment | `true` for a debug/sandbox build, `false` for TestFlight/release |
 | `TopicDisallowed` | the key isn't enabled for this topic | enable the key for the app in the Apple developer portal |
 
+### Live Activities
+
+The runbook above applies; a few things are specific to the Live Activity path
+(spec §6) and worth checking separately before assuming the credential is bad:
+
+- **The topic is derived, not sent by the client or configured in gorush.**
+  The sidecar appends `.push-type.liveactivity` to `SIDECAR_APNS_TOPIC` itself
+  on every push (gorush does not derive this suffix — a bare bundle id would
+  bounce `BadTopic`). An empty `SIDECAR_APNS_TOPIC` makes the sidecar refuse
+  the push *before it reaches gorush*, logged locally as
+  `liveactivities: update push failed` — that error never shows up in
+  `docker compose logs gorush` because no request was ever sent.
+- **The push token is not the device alert token.** ActivityKit hands the app
+  a separate token per Live Activity (from `Activity.pushTokenUpdates`), not
+  the `UNUserNotificationCenter` token used for `push_registrations`/alarms.
+  Registering the alert token by mistake bounces every push with
+  `BadDeviceToken`; the feedback webhook treats that as terminal and deletes
+  the subscription outright.
+- **Priority must be 10**, not 5: `SendLiveActivity` always sends gorush
+  `"priority": "high"` (APNs 10). At 5 an idle phone queues the push instead
+  of delivering it and the Lock Screen card visibly freezes.
+- **Watching it work:** register (below), then tail `docker compose logs -f
+  gorush` and the sidecar's own log for `liveactivities:` lines — one cycle
+  runs per minute, so expect an `update` push within about 60 seconds.
+  `TopicDisallowed` in the gorush log points at the topic (wrong bundle id,
+  or the key isn't enabled for this app); `BadDeviceToken` points at the
+  token (alert token used instead of the ActivityKit push token, or a
+  `apns_sandbox`/build mismatch).
+
+```sh
+IP=$(ipconfig getifaddr en0)
+curl -s -X POST http://$IP:8080/api/v2/regions/1/live_activities \
+  -d activity_id=<activitykit activity id> \
+  -d push_token=<activitykit push token, NOT the device alert token> \
+  -d apns_sandbox=1 \
+  -d stop_id=<stop> -d route_short_name=<route> -d trip_headsign=<headsign>
+# → 201 {"url": "http://.../live_activities/<token>"}
+
+curl -s -X DELETE http://$IP:8080/api/v2/regions/1/live_activities/<token>
+# → 204
+```
+
 ## Development
 
 Requires Go 1.26+ (`mise install` will set it up), [golangci-lint](https://golangci-lint.run) 2.12+, and Node (for the admin SPA in `web/admin`: `make web` and `make check` run `npm ci` there).

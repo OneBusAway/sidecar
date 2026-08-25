@@ -49,6 +49,10 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 	if h.deps.PushRegs != nil {
 		n, err := h.deps.PushRegs.DeleteByToken(r.Context(), fb.Token)
 		if err != nil {
+			// Returning 500 here without attempting the Live Activity delete
+			// below is safe: both deletes are idempotent (a second DELETE of
+			// an already-gone row is a no-op), and gorush retries webhook
+			// delivery on a non-2xx, so the skipped delete runs on the retry.
 			h.deps.Logger.Error("httpapi: delete registration from feedback", "err", sanitizeToken(err, fb.Token))
 			w.WriteHeader(http.StatusInternalServerError)
 			return

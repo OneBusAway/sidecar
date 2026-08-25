@@ -71,6 +71,11 @@ func (u *Updater) CheckAll(ctx context.Context) {
 		u.Logger.Error("liveactivities: list", "err", err)
 		return
 	}
+	// One region fetch per region per cycle, not per subscription. The
+	// failure is cached alongside the region: check has to tell "this region
+	// is gone" (count/reap the subscription) apart from "the store
+	// hiccuped" (leave it alone), so a nil region on its own is not enough
+	// information (mirrors alarms.Scheduler.CheckAll).
 	regionCache := make(map[int64]regionLookup)
 	var mu sync.Mutex
 	regionFor := func(id int64) regionLookup {
@@ -80,6 +85,12 @@ func (u *Updater) CheckAll(ctx context.Context) {
 		if ok {
 			return r
 		}
+		// Fetched with the lock released: checkConcurrency goroutines share
+		// this cache, and holding mu across the store round trip would make
+		// the first touch of two different regions serialize on the database
+		// instead of overlapping. A simultaneous first touch of the same
+		// region can now fetch twice, which is far cheaper than serializing
+		// every miss -- and both writers store the same value.
 		region, err := u.Regions.Get(ctx, id)
 		resolved := regionLookup{err: err}
 		if err == nil {
@@ -147,9 +158,10 @@ func (u *Updater) check(ctx context.Context, la LiveActivity, lookup regionLooku
 	if u.Sender == nil {
 		return // store-only mode
 	}
+	ts := pushTimestamp(la.LastPushedAt, now)
 	err = u.Sender.SendLiveActivity(ctx, push.LiveActivityPush{
 		Token: la.PushToken, Sandbox: la.APNSSandbox, Event: "update",
-		ContentState: state, Timestamp: pushTimestamp(la.LastPushedAt, now),
+		ContentState: state, Timestamp: ts,
 		StaleDate: now.Add(StaleAfter),
 	})
 	if err != nil {
@@ -158,7 +170,16 @@ func (u *Updater) check(ctx context.Context, la LiveActivity, lookup regionLooku
 		u.Logger.Error("liveactivities: update push failed", "region_id", la.RegionID, "err", err)
 		return
 	}
-	if err := u.Repo.RecordPush(ctx, la.ID, state, now); err != nil {
+	// Record the later of now and ts: when pushTimestamp bumped past now
+	// (the last+1s branch, clock stalled or moving slower than pushes), the
+	// stored watermark must not trail the timestamp APNs actually saw, or
+	// the next cycle could compute a pushTimestamp that repeats or goes
+	// backwards relative to what was delivered.
+	recordedAt := now
+	if ts.After(recordedAt) {
+		recordedAt = ts
+	}
+	if err := u.Repo.RecordPush(ctx, la.ID, state, recordedAt); err != nil {
 		u.Logger.Error("liveactivities: record push", "region_id", la.RegionID, "err", err)
 	}
 }

@@ -245,8 +245,15 @@ func TestKeepaliveBoundaryAndUnchangedState(t *testing.T) {
 	}
 	h.clk.advance(time.Second) // 55s since last push
 	h.u.CheckAll(context.Background())
-	if len(s.pushes()) != 2 {
-		t.Fatalf("keepalive at 55s must push; got %d", len(s.pushes()))
+	p := s.pushes()
+	if len(p) != 2 {
+		t.Fatalf("keepalive at 55s must push; got %d", len(p))
+	}
+	// Pins pushTimestamp's now-wins branch with a non-nil last: the clock
+	// has advanced past LastPushedAt, so the keepalive's timestamp must be
+	// exactly now, not last+1s.
+	if !p[1].Timestamp.Equal(h.clk.now()) {
+		t.Errorf("keepalive timestamp = %v, want now (%v)", p[1].Timestamp, h.clk.now())
 	}
 }
 
@@ -284,6 +291,12 @@ func TestTimestampAdvancesWhenClockDoesNot(t *testing.T) {
 	}
 	if !p[1].Timestamp.After(p[0].Timestamp) || !p[1].Timestamp.Equal(h.clk.now().Add(time.Second)) {
 		t.Errorf("timestamp must be last_pushed_at+1s when the clock has not moved: got %v (prev %v, now %v)", p[1].Timestamp, p[0].Timestamp, h.clk.now())
+	}
+	// The stored watermark must not trail the timestamp APNs actually saw:
+	// RecordPush must be called with ts (now+1s here), not the stalled now.
+	row, ok := h.repo.get(1)
+	if !ok || row.LastPushedAt == nil || !row.LastPushedAt.Equal(p[1].Timestamp) {
+		t.Errorf("RecordPush watermark = %v, want %v (the pushed timestamp, not now)", row.LastPushedAt, p[1].Timestamp)
 	}
 }
 

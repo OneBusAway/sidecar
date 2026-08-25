@@ -23,12 +23,22 @@ type liveActivityRepo struct {
 }
 
 func (r *liveActivityRepo) fromRow(row gen.LiveActivity) liveactivities.LiveActivity {
+	// One corrupt cell must not fail List for every subscription; the next
+	// successful push overwrites it (design spec §3). The two ways a cell can
+	// be unusable get distinct messages: a parse failure (err != nil) versus
+	// valid JSON that decoded to a null "arrivals" (err == nil, Arrivals ==
+	// nil) -- the latter should never be written by this adapter (RecordPush
+	// and Upsert both normalize to an empty slice), so seeing it means
+	// something else wrote the row.
 	state := liveactivities.EmptyContentState()
-	if err := json.Unmarshal([]byte(row.LastContentState), &state); err != nil || state.Arrivals == nil {
-		// One corrupt cell must not fail List for every subscription; the
-		// next successful push overwrites it (design spec §3).
-		r.logger.Warn("sqlite: unparseable live activity content state; treating as empty",
+	switch err := json.Unmarshal([]byte(row.LastContentState), &state); {
+	case err != nil:
+		r.logger.Warn("sqlite: live activity content state failed to parse; treating as empty",
 			"id", row.ID, "region_id", row.RegionID, "err", err)
+		state = liveactivities.EmptyContentState()
+	case state.Arrivals == nil:
+		r.logger.Warn("sqlite: live activity content state had a null arrivals list; treating as empty",
+			"id", row.ID, "region_id", row.RegionID)
 		state = liveactivities.EmptyContentState()
 	}
 	return liveactivities.LiveActivity{
@@ -73,12 +83,21 @@ func (r *liveActivityRepo) Upsert(ctx context.Context, in liveactivities.NewLive
 		ExpiresAt:    in.ExpiresAt.Unix(), Now: ts,
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed: live_activities.region_id") {
-			return liveactivities.LiveActivity{}, fmt.Errorf("sqlite: insert live activity (region %d): %w", in.RegionID, liveactivities.ErrDuplicate)
-		}
-		return liveactivities.LiveActivity{}, fmt.Errorf("sqlite: insert live activity (region %d): %w", in.RegionID, err)
+		return liveactivities.LiveActivity{}, mapInsertErr(err, in.RegionID)
 	}
 	return r.fromRow(row), nil
+}
+
+// mapInsertErr wraps an InsertLiveActivity error, translating the
+// live_activities_activity_idx UNIQUE violation (two concurrent first
+// registrations racing Upsert -- see Upsert's comment) into ErrDuplicate so
+// the caller can retry once; every other error passes through wrapped only
+// with context.
+func mapInsertErr(err error, regionID int64) error {
+	if strings.Contains(err.Error(), "UNIQUE constraint failed: live_activities.region_id") {
+		return fmt.Errorf("sqlite: insert live activity (region %d): %w", regionID, liveactivities.ErrDuplicate)
+	}
+	return fmt.Errorf("sqlite: insert live activity (region %d): %w", regionID, err)
 }
 
 func (r *liveActivityRepo) Delete(ctx context.Context, regionID int64, token string) error {
