@@ -33,6 +33,12 @@ help: ## Show this help
 build: web ## Build the sidecar binary into bin/ (SPA first, so it is embedded)
 	$(GO) build -o $(BIN_DIR)/$(BINARY) $(CMD)
 
+IMAGE ?= sidecar:local
+
+.PHONY: image
+image: ## Build the container image (SPA + both binaries)
+	docker build -t $(IMAGE) .
+
 # Shared by web and web-check so a single make invocation installs once:
 # make builds a phony target at most once, and npm ci wipes and reinstalls
 # the whole tree every time it runs.
@@ -57,6 +63,28 @@ run: ## Run the sidecar server (make run ARGS="--addr :8080")
 .PHONY: tidy
 tidy: ## Sync go.mod/go.sum
 	$(GO) mod tidy
+
+## --- Local stack -----------------------------------------------------------
+
+.PHONY: up
+up: ## Start sidecar + gorush in Docker (reads .env)
+	docker compose up --build -d
+
+.PHONY: up-gorush
+up-gorush: ## Start only gorush; run the sidecar on the host with `make run`
+	FEEDBACK_HOOK_HOST=host.docker.internal docker compose up -d gorush
+
+.PHONY: down
+down: ## Stop the local stack (data volume is kept)
+	docker compose down
+
+.PHONY: logs
+logs: ## Follow local stack logs
+	docker compose logs -f
+
+.PHONY: admin
+admin: ## Run sidecar-admin inside the container (make admin ARGS="region list")
+	docker compose exec sidecar sidecar-admin $(ARGS)
 
 ## --- Tests -----------------------------------------------------------------
 

@@ -1,0 +1,61 @@
+# Local stack: the sidecar beside a real gorush. `make up` starts both;
+# `make up-gorush` starts only gorush so the sidecar can run on the host via
+# `make run`. Ports match production (Render) exactly: 8080 and 8088.
+name: sidecar
+
+services:
+  sidecar:
+    build: .
+    image: ${IMAGE:-sidecar:local}   # same default as the Makefile's IMAGE
+    ports:
+      - "8080:8080"
+    volumes:
+      - sidecar-data:/data
+    # Listed explicitly rather than via env_file so the APNs signing key and
+    # FCM credential in .env reach only gorush, and so the host-oriented
+    # SIDECAR_DB / SIDECAR_GORUSH_URL values there cannot leak in. Compose
+    # interpolates ${...} from .env.
+    environment:
+      SIDECAR_DB: /data/sidecar.db
+      SIDECAR_GORUSH_URL: http://gorush:8088
+      SIDECAR_OBA_API_KEY: ${SIDECAR_OBA_API_KEY:-}
+      SIDECAR_PIRATE_WEATHER_KEY: ${SIDECAR_PIRATE_WEATHER_KEY:-}
+      SIDECAR_GORUSH_WEBHOOK_SECRET: ${SIDECAR_GORUSH_WEBHOOK_SECRET:-}
+      SIDECAR_APNS_TOPIC: ${SIDECAR_APNS_TOPIC:-}
+    depends_on:
+      gorush:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gorush:
+    image: appleboy/gorush:1.22.0
+    ports:
+      # gorush has no auth and holds the APNs signing key; only the
+      # host-run sidecar needs it, via localhost. Not exposed on the LAN.
+      - "127.0.0.1:8088:8088"
+    environment:
+      GORUSH_CORE_PORT: "8088"
+      GORUSH_IOS_ENABLED: ${GORUSH_IOS_ENABLED:-true}
+      GORUSH_IOS_KEY_TYPE: p8
+      GORUSH_IOS_KEY_BASE64: ${GORUSH_IOS_KEY_BASE64}
+      GORUSH_IOS_KEY_ID: ${GORUSH_IOS_KEY_ID}
+      GORUSH_IOS_TEAM_ID: ${GORUSH_IOS_TEAM_ID}
+      # Production is the default route; the sidecar flips individual pushes
+      # to the sandbox with the per-notification `development` flag.
+      GORUSH_IOS_PRODUCTION: "true"
+      GORUSH_ANDROID_ENABLED: ${GORUSH_ANDROID_ENABLED:-false}
+      GORUSH_ANDROID_CREDENTIAL: ${GORUSH_ANDROID_CREDENTIAL:-}
+      # Feedback webhook. FEEDBACK_HOOK_HOST is overridden by `make up-gorush`
+      # so a host-run sidecar still receives prune signals.
+      GORUSH_CORE_FEEDBACK_HOOK_URL: http://${FEEDBACK_HOOK_HOST:-sidecar}:8080/webhooks/gorush
+      GORUSH_CORE_FEEDBACK_HEADER: authorization:${SIDECAR_GORUSH_WEBHOOK_SECRET}
+    # `make up-gorush` points the feedback hook at host.docker.internal; Docker
+    # Desktop resolves that name on its own, Docker Engine on Linux only with
+    # this mapping (a no-op where it already resolves).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The image ships its own HEALTHCHECK (gorush --ping); nothing to add.
+    restart: unless-stopped
+
+volumes:
+  sidecar-data:

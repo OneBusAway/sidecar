@@ -1,0 +1,15 @@
+.git
+bin/
+*.db
+*.db-wal
+*.db-shm
+coverage.out
+.env
+docs/
+.superpowers/
+.claude/
+web/admin/node_modules/
+web/admin/build/
+web/admin/.svelte-kit/
+internal/httpapi/adminui/dist/*
+!internal/httpapi/adminui/dist/.gitkeep

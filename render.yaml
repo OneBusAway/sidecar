@@ -1,0 +1,98 @@
+# Render Blueprint: the same two services compose.yaml runs locally.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Secrets marked `sync: false` are entered in the dashboard on first deploy.
+# Ports are 8080 (sidecar) and 8088 (gorush) on the private network, same as
+# local; Render forbids 10000 there.
+
+envVarGroups:
+  - name: sidecar-shared
+    envVars:
+      # Render ignores sync: false inside an env group (Blueprint spec:
+      # "You can't define an environment variable with sync: false in an
+      # environment group. If you do this, Render ignores the environment
+      # variable."), so this is auto-generated instead: base64, no ':' or
+      # whitespace, which satisfies gorush's header split. After the first
+      # deploy, copy the generated value from Dashboard -> Environment
+      # Groups -> sidecar-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
+      # as "authorization:<value>" (see the comment block below).
+      - key: SIDECAR_GORUSH_WEBHOOK_SECRET
+        generateValue: true
+
+services:
+  - type: web
+    name: sidecar
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    region: oregon
+    healthCheckPath: /healthz
+    disk:
+      name: sidecar-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - fromGroup: sidecar-shared
+      - key: PORT
+        value: "8080"
+      - key: SIDECAR_DB
+        value: /data/sidecar.db
+      - key: SIDECAR_GORUSH_URL
+        fromService:
+          name: gorush
+          type: pserv
+          property: hostport
+      - key: SIDECAR_APNS_TOPIC
+        sync: false
+      - key: SIDECAR_OBA_API_KEY
+        sync: false
+      - key: SIDECAR_PIRATE_WEATHER_KEY
+        sync: false
+
+  - type: pserv
+    name: gorush
+    runtime: image
+    image:
+      url: docker.io/appleboy/gorush:1.22.0
+    plan: starter
+    region: oregon
+    envVars:
+      - fromGroup: sidecar-shared
+      - key: GORUSH_CORE_PORT
+        value: "8088"
+      # gorush ignores PORT, but setting it makes Render's port detection
+      # deterministic and keeps it off the forbidden private port 10000
+      # (same reasoning as the sidecar's PORT).
+      - key: PORT
+        value: "8088"
+      - key: GORUSH_IOS_ENABLED
+        value: "true"
+      - key: GORUSH_IOS_KEY_TYPE
+        value: p8
+      - key: GORUSH_IOS_PRODUCTION
+        value: "true"
+      - key: GORUSH_IOS_KEY_BASE64
+        sync: false
+      - key: GORUSH_IOS_KEY_ID
+        sync: false
+      - key: GORUSH_IOS_TEAM_ID
+        sync: false
+      # Staging value only -- gorush never reads
+      # GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT itself. It exists only to expose
+      # the sidecar's private host:port here so it can be copied into
+      # GORUSH_CORE_FEEDBACK_HOOK_URL below.
+      - key: GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT
+        fromService:
+          name: sidecar
+          type: web
+          property: hostport
+      # Blueprint cannot concatenate values, so the two derived settings
+      # below are entered by hand on first deploy (see README):
+      #   GORUSH_CORE_FEEDBACK_HOOK_URL = http://<GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT>/webhooks/gorush
+      #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<value auto-generated for
+      #     SIDECAR_GORUSH_WEBHOOK_SECRET -- Dashboard -> Environment Groups ->
+      #     sidecar-shared>
+      - key: GORUSH_CORE_FEEDBACK_HOOK_URL
+        sync: false
+      - key: GORUSH_CORE_FEEDBACK_HEADER
+        sync: false
