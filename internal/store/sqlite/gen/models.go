@@ -85,6 +85,29 @@ type GhostBusReport struct {
 	UpdatedAt                int64
 }
 
+type LiveActivity struct {
+	ID                  int64
+	RegionID            int64
+	Token               string
+	ActivityID          string
+	PushToken           string
+	ApnsSandbox         bool
+	StopID              string
+	RouteShortName      string
+	TripHeadsign        string
+	TripID              string
+	ServiceDate         int64
+	VehicleID           string
+	StopSequence        sql.NullInt64
+	LastContentState    string
+	LastPushedAt        sql.NullInt64
+	ConsecutiveFailures int64
+	Revision            int64
+	ExpiresAt           int64
+	CreatedAt           int64
+	UpdatedAt           int64
+}
+
 type PushRegistration struct {
 	ID              int64
 	RegionID        int64

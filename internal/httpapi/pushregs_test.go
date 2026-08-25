@@ -416,7 +416,7 @@ func TestThrottle(t *testing.T) {
 // with an error that contains the token it was asked to write -- the
 // worst case a store driver could hand back, and the one sanitizeToken
 // exists for.
-type erroringPushRepo struct{ upsertErr error }
+type erroringPushRepo struct{ upsertErr, deleteErr error }
 
 func (erroringPushRepo) Get(context.Context, int64, string) (pushreg.Registration, error) {
 	return pushreg.Registration{}, pushreg.ErrNotFound
@@ -425,8 +425,8 @@ func (s erroringPushRepo) Upsert(context.Context, pushreg.Upsert, time.Time) err
 	return s.upsertErr
 }
 func (erroringPushRepo) Delete(context.Context, int64, string) error { return nil }
-func (erroringPushRepo) DeleteByToken(context.Context, string) (int64, error) {
-	return 0, nil
+func (s erroringPushRepo) DeleteByToken(context.Context, string) (int64, error) {
+	return 0, s.deleteErr
 }
 func (erroringPushRepo) Prune(context.Context, time.Time) (int64, error) { return 0, nil }
 

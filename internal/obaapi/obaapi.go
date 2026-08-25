@@ -21,6 +21,7 @@ import (
 
 	oba "github.com/OneBusAway/go-sdk"
 	"github.com/OneBusAway/go-sdk/option"
+	"github.com/OneBusAway/go-sdk/shared"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/OneBusAway/sidecar/internal/httpx"
@@ -68,6 +69,39 @@ type Departure struct {
 	Predicted              bool
 }
 
+// StopArrivalsQuery selects arrivals-and-departures-for-stop's window
+// around now, in minutes.
+type StopArrivalsQuery struct {
+	StopID        string
+	MinutesBefore int64
+	MinutesAfter  int64
+}
+
+// StopArrival is one arrivalsAndDepartures entry (design spec §2.4a). Times
+// are epoch ms with 0 meaning absent. HasIdentity reports whether all five
+// visit-identity fields (StopID, TripID, RouteID, ServiceDate, StopSequence)
+// were present and well-typed upstream: the SDK zero-fills absent fields, and
+// StopSequence 0 is a real value (the trip's first stop), so presence has to
+// travel separately (design spec §2.4).
+type StopArrival struct {
+	StopID       string
+	TripID       string
+	RouteID      string
+	ServiceDate  int64
+	StopSequence int64
+	HasIdentity  bool
+
+	LastUpdateTime int64
+	RouteShortName string // entry value, else references.routes shortName/longName
+	TripHeadsign   string // entry value, else references.trips tripHeadsign
+	Predicted      bool
+
+	ScheduledArrivalTime   int64
+	PredictedArrivalTime   int64
+	ScheduledDepartureTime int64
+	PredictedDepartureTime int64
+}
+
 // TripDetailsQuery identifies the trip instance a ghost bus report named,
 // plus the report's own route/stop ids used to resolve display names.
 type TripDetailsQuery struct {
@@ -90,6 +124,12 @@ type Client interface {
 	// trip/stop/date combination, and ErrNotConfigured when the region has
 	// no API key.
 	ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error)
+
+	// ArrivalsAndDeparturesForStop lists every arrival/departure at a stop
+	// inside the query window. ErrNotFound on a 404 or a null/absent body;
+	// an empty list is not an error. ErrNotConfigured when the region has
+	// no API key.
+	ArrivalsAndDeparturesForStop(ctx context.Context, region regions.Region, q StopArrivalsQuery) ([]StopArrival, error)
 
 	// TripDetails fetches trip-details for one trip instance and returns the
 	// pruned spec-§2.6 snapshot document. ErrNotFound on a definitive miss
@@ -276,6 +316,40 @@ func (c *client) Fleet(ctx context.Context, region regions.Region) ([]Vehicle, e
 	return fleet, nil
 }
 
+// routeShortNameFallback resolves a route's display short name: the entry's
+// own override when it has one, else the matching references.routes entry's
+// shortName, else its longName. Shared by ArrivalAndDeparture and
+// ArrivalsAndDeparturesForStop, whose responses both carry a
+// shared.References with the same routes shape.
+func routeShortNameFallback(routes []shared.ReferencesRoute, routeID, override string) string {
+	if override != "" {
+		return override
+	}
+	for _, route := range routes {
+		if route.ID == routeID {
+			if route.ShortName != "" {
+				return route.ShortName
+			}
+			return route.LongName
+		}
+	}
+	return ""
+}
+
+// tripHeadsignFallback is routeShortNameFallback's sibling for headsigns:
+// the entry value when present, else the referenced trip's tripHeadsign.
+func tripHeadsignFallback(trips []shared.ReferencesTrip, tripID, override string) string {
+	if override != "" {
+		return override
+	}
+	for _, trip := range trips {
+		if trip.ID == tripID {
+			return trip.TripHeadsign
+		}
+	}
+	return ""
+}
+
 func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region, q DepartureQuery) (Departure, error) {
 	sdk, err := c.sdkFor(region)
 	if err != nil {
@@ -317,25 +391,74 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 		return Departure{}, ErrNotFound
 	}
 
-	shortName := entry.RouteShortName
-	if shortName == "" {
-		for _, route := range resp.Data.References.Routes {
-			if route.ID == entry.RouteID {
-				shortName = route.ShortName
-				if shortName == "" {
-					shortName = route.LongName
-				}
-				break
-			}
-		}
-	}
 	return Departure{
-		RouteShortName:         shortName,
+		RouteShortName:         routeShortNameFallback(resp.Data.References.Routes, entry.RouteID, entry.RouteShortName),
 		TripHeadsign:           entry.TripHeadsign,
 		ScheduledDepartureTime: entry.ScheduledDepartureTime,
 		PredictedDepartureTime: entry.PredictedDepartureTime,
 		Predicted:              entry.Predicted,
 	}, nil
+}
+
+// jsonField is the subset of the SDK's internal apijson.Field that this
+// package needs to tell "absent/null" apart from "present but zero". The SDK
+// keeps apijson.Field in an internal package that cannot be imported, but
+// every generated entry struct exposes one JSON metadata field per data
+// field with these two methods, so a local interface reaches the same
+// information without the import.
+type jsonField interface {
+	IsNull() bool
+	IsInvalid() bool
+}
+
+func (c *client) ArrivalsAndDeparturesForStop(ctx context.Context, region regions.Region, q StopArrivalsQuery) ([]StopArrival, error) {
+	sdk, err := c.sdkFor(region)
+	if err != nil {
+		return nil, err
+	}
+	params := oba.ArrivalAndDepartureListParams{}
+	if q.MinutesBefore != 0 {
+		params.MinutesBefore = oba.F(q.MinutesBefore)
+	}
+	if q.MinutesAfter != 0 {
+		params.MinutesAfter = oba.F(q.MinutesAfter)
+	}
+	resp, err := sdk.ArrivalAndDeparture.List(ctx, q.StopID, params)
+	if err != nil {
+		if statusOf(err) == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("obaapi: arrivals-and-departures-for-stop in region %d: %w", region.ID, redact(err))
+	}
+	// Same `null` body hazard as ArrivalAndDeparture: a nil response with a
+	// nil error, so this check precedes any field access.
+	if resp == nil {
+		return nil, ErrNotFound
+	}
+	routes := resp.Data.References.Routes
+	trips := resp.Data.References.Trips
+	entries := resp.Data.Entry.ArrivalsAndDepartures
+	present := func(f jsonField) bool { return !f.IsNull() && !f.IsInvalid() }
+	out := make([]StopArrival, 0, len(entries))
+	for _, e := range entries {
+		j := e.JSON
+		shortName := routeShortNameFallback(routes, e.RouteID, e.RouteShortName)
+		headsign := tripHeadsignFallback(trips, e.TripID, e.TripHeadsign)
+		out = append(out, StopArrival{
+			StopID: e.StopID, TripID: e.TripID, RouteID: e.RouteID,
+			ServiceDate: e.ServiceDate, StopSequence: e.StopSequence,
+			HasIdentity: present(j.StopID) && present(j.TripID) && present(j.RouteID) &&
+				present(j.ServiceDate) && present(j.StopSequence),
+			LastUpdateTime: e.LastUpdateTime,
+			RouteShortName: shortName, TripHeadsign: headsign,
+			Predicted:              e.Predicted,
+			ScheduledArrivalTime:   e.ScheduledArrivalTime,
+			PredictedArrivalTime:   e.PredictedArrivalTime,
+			ScheduledDepartureTime: e.ScheduledDepartureTime,
+			PredictedDepartureTime: e.PredictedDepartureTime,
+		})
+	}
+	return out, nil
 }
 
 // tripStatusKeys is OBACloud's STATUS_KEYS allow-list, verbatim: the
@@ -436,7 +559,10 @@ func resolveRouteID(reported string, trip map[string]any) string {
 	if reported != "" || trip == nil {
 		return reported
 	}
-	v, _ := trip["routeId"].(string)
+	v, ok := trip["routeId"].(string)
+	if !ok {
+		return ""
+	}
 	return v
 }
 

@@ -28,6 +28,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/push"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
@@ -164,6 +165,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
+	store.SetLogger(logger)
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
 			logger.Error("sidecar: close database", "error", closeErr)
@@ -198,13 +200,22 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// branch and 3-strike reaping are what bound the alarms table (spec
 	// §13); only the fire step needs a sender.
 	var sender push.Sender
+	var laSender push.LiveActivitySender
 	if *gorushURL == "" {
-		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms will be stored and reaped but never fire")
+		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms and Live Activities will be stored and reaped but never pushed")
 	} else {
+		g := push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
+		sender = g
 		if *apnsTopic == "" {
-			logger.Warn("no --apns-topic/SIDECAR_APNS_TOPIC set; iOS pushes will be rejected by APNs with MissingTopic")
+			// Gorush.SendLiveActivity refuses every call without a topic, and
+			// the updater treats a refused send as a transport blip it must
+			// retry next minute -- one Error log line per subscription per
+			// minute for eight hours. Run store-only instead (design spec
+			// §2.5): rows still expire and reap, nothing is attempted.
+			logger.Warn("no --apns-topic/SIDECAR_APNS_TOPIC set; iOS alarm pushes will be rejected by APNs with MissingTopic and Live Activities will be stored and reaped but never pushed")
+		} else {
+			laSender = g
 		}
-		sender = push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
 	}
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),
@@ -215,6 +226,12 @@ func run(stdout, stderr io.Writer, args []string) error {
 		Logger:  logger,
 	}
 	go sched.RunLoop(ctx, alarmCheckInterval)
+
+	// Live Activities share the alarm cadence (spec §6.3: once per minute)
+	// and the same store-only rule: without a sender, rows still expire and
+	// reap (design spec §2.5).
+	updater := liveactivities.NewUpdater(store.LiveActivities(), store.Regions(), deps.OBA, laSender, time.Now, logger)
+	go updater.RunLoop(ctx, alarmCheckInterval)
 
 	// Always runs, mirroring the alarm scheduler above: a region that
 	// resolves no OBA key just yields per-report 'unavailable' snapshots
@@ -297,6 +314,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, w
 		FeedbackSecret:   webhookSecret,
 		Surveys:          store.Surveys(),
 		GhostBus:         store.GhostBus(),
+		LiveActivities:   store.LiveActivities(),
 	}
 }
 

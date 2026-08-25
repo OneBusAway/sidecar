@@ -13,6 +13,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
+	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite/gen"
@@ -56,7 +59,11 @@ func configureGoose() error {
 // is safe for concurrent use.
 type Store struct {
 	db *sql.DB
-	q  *gen.Queries
+	// logger receives adapter-level warnings (a corrupt row that was
+	// tolerated rather than failing a read). SetLogger threads the process
+	// logger in; until then the default logger stands in.
+	logger *slog.Logger
+	q      *gen.Queries
 }
 
 // Open connects with the pragmas this design depends on:
@@ -78,7 +85,16 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
-	return &Store{db: db, q: gen.New(db)}, nil
+	return &Store{db: db, q: gen.New(db), logger: slog.Default()}, nil
+}
+
+// SetLogger routes the store's own log lines through logger, so adapter
+// warnings share the process's structured handler instead of slog's global
+// default. A nil logger keeps the current one.
+func (s *Store) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.logger = logger
+	}
 }
 
 // Migrate runs the embedded goose migrations.
@@ -157,6 +173,12 @@ func (s *Store) Alarms() alarms.Repository {
 	return &alarmRepo{q: s.q}
 }
 
+// LiveActivities returns the liveactivities.Repository backed by this store
+// (spec §6).
+func (s *Store) LiveActivities() liveactivities.Repository {
+	return &liveActivityRepo{q: s.q, logger: s.logger}
+}
+
 // Surveys returns the surveys.Repository backed by this store.
 func (s *Store) Surveys() surveys.Repository {
 	return &surveyRepo{db: s.db, q: s.q}
@@ -165,6 +187,15 @@ func (s *Store) Surveys() surveys.Repository {
 // GhostBus returns the ghostbus.Repository backed by this store (spec §8).
 func (s *Store) GhostBus() ghostbus.Repository {
 	return &ghostBusRepo{q: s.q}
+}
+
+// isUniqueViolation reports whether err is modernc sqlite's UNIQUE
+// constraint failure on the named "<table>.<column>" (the first column of
+// the index for a composite one). Every adapter that maps a race-lost
+// insert to a domain sentinel goes through here, so the driver's message
+// format is matched in exactly one place.
+func isUniqueViolation(err error, constraint string) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: "+constraint)
 }
 
 // unixToTime converts a stored epoch-seconds value to an absolute instant in

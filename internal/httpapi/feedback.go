@@ -25,10 +25,11 @@ type gorushFeedback struct {
 
 type feedbackHandler struct{ deps Deps }
 
-// receive consumes async delivery feedback (spec §6.5). Deleting a
-// registration requires only knowing its token -- exactly the power the
-// public opt-out DELETE already grants -- so this endpoint being
-// unauthenticated adds no new capability.
+// receive consumes async delivery feedback (spec §6.5) and prunes both the
+// push registration and the Live Activity subscription tables, whichever are
+// configured. Deleting either requires only knowing its token -- exactly the
+// power the public opt-out DELETE endpoints already grant -- so this
+// endpoint being unauthenticated adds no new capability.
 func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		// No body is read and nothing is looked up: an unauthorized caller
@@ -45,15 +46,40 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	n, err := h.deps.PushRegs.DeleteByToken(r.Context(), fb.Token)
-	if err != nil {
-		h.deps.Logger.Error("httpapi: delete registration from feedback", "err", sanitizeToken(err, fb.Token))
+	// Every configured table is pruned even when an earlier delete fails:
+	// gorush's feedback dispatch is a single fire-and-forget POST (it logs a
+	// non-2xx and moves on, no retry), so a delete skipped here is a delete
+	// that never happens -- and a Live Activity row left behind is pushed to
+	// every minute until it expires. The response is 500 if any delete
+	// failed so the failure is at least visible in gorush's log.
+	failed := false
+	if h.deps.PushRegs != nil {
+		n, err := h.deps.PushRegs.DeleteByToken(r.Context(), fb.Token)
+		switch {
+		case err != nil:
+			h.deps.Logger.Error("httpapi: delete registration from feedback", "err", sanitizeToken(err, fb.Token))
+			failed = true
+		case n > 0:
+			h.deps.Logger.Info("httpapi: pruned dead push token",
+				"platform", fb.Platform, "reason", fb.Error, "registrations", n)
+		}
+	}
+	if h.deps.LiveActivities != nil {
+		// A terminal ActivityKit token means every future update would
+		// bounce: delete the subscription, no end push (spec §6.4/§6.5).
+		n, err := h.deps.LiveActivities.DeleteByPushToken(r.Context(), fb.Token)
+		switch {
+		case err != nil:
+			h.deps.Logger.Error("httpapi: delete live activity from feedback", "err", sanitizeToken(err, fb.Token))
+			failed = true
+		case n > 0:
+			h.deps.Logger.Info("httpapi: retired live activity for dead token",
+				"platform", fb.Platform, "reason", fb.Error, "live_activities", n)
+		}
+	}
+	if failed {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
-	}
-	if n > 0 {
-		h.deps.Logger.Info("httpapi: pruned dead push token",
-			"platform", fb.Platform, "reason", fb.Error, "registrations", n)
 	}
 	w.WriteHeader(http.StatusOK)
 }

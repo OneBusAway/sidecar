@@ -1,13 +1,14 @@
-// Package push sends alarm and alert notifications to devices through
-// gorush, the sidecar's push gateway (spec §5.4/§6). It also defines the
-// terminal-failure classification (§6.5) the feedback webhook uses to prune
-// dead tokens.
+// Package push sends alarm, alert, and Live Activity notifications to
+// devices through gorush, the sidecar's push gateway (spec §5.4/§6). It also
+// defines the terminal-failure classification (§6.5) the feedback webhook
+// uses to prune dead tokens.
 package push
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -97,7 +98,13 @@ func (g *Gorush) Send(ctx context.Context, n Notification) error {
 		gn.Development = n.Sandbox
 		gn.Topic = g.apnsTopic
 	}
-	body, err := json.Marshal(map[string]any{"notifications": []gorushNotification{gn}})
+	return g.post(ctx, map[string]any{"notifications": []gorushNotification{gn}})
+}
+
+// post submits one /api/push batch. Never include the response body in the
+// error: gorush error bodies echo the notification, tokens included.
+func (g *Gorush) post(ctx context.Context, batch any) error {
+	body, err := json.Marshal(batch)
 	if err != nil {
 		return fmt.Errorf("push: marshal notification: %w", err)
 	}
@@ -106,22 +113,69 @@ func (g *Gorush) Send(ctx context.Context, n Notification) error {
 		return fmt.Errorf("push: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := g.http.Do(req)
 	if err != nil {
-		// The transport error can embed the gateway URL; that is
-		// operator-configured and not secret, but tokens never appear in it,
-		// so it is safe to wrap as-is.
 		return fmt.Errorf("push: gorush request: %w", err)
 	}
 	defer resp.Body.Close()
-	// Draining lets the connection be reused; a drain failure doesn't
-	// change the outcome, which StatusCode below already determines.
-	_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain, see comment above
+	_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain so the connection is reused
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		// Never include the response body: gorush error bodies echo the
-		// notification, tokens included.
 		return fmt.Errorf("push: gorush returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// liveActivityTopicSuffix is appended to the app bundle id to form the APNs
+// topic for Live Activity pushes (spec §6.6). gorush does not derive it.
+const liveActivityTopicSuffix = ".push-type.liveactivity"
+
+// gorushLiveActivity is gorush's Live Activity request shape. The date keys
+// and content-state are HYPHENATED because they map 1:1 onto APNs aps keys;
+// gorush's unmarshaller silently drops snake_case variants and the activity
+// then never updates. No title/message: a Live Activity push has no alert.
+type gorushLiveActivity struct {
+	Tokens        []string `json:"tokens"`
+	Platform      int      `json:"platform"`
+	PushType      string   `json:"push_type"`
+	Priority      string   `json:"priority"`
+	Topic         string   `json:"topic"`
+	Development   bool     `json:"development,omitempty"`
+	Event         string   `json:"event"`
+	ContentState  any      `json:"content-state"`
+	Timestamp     int64    `json:"timestamp"`
+	StaleDate     int64    `json:"stale-date,omitempty"`
+	DismissalDate int64    `json:"dismissal-date,omitempty"`
+}
+
+// SendLiveActivity posts p as a liveactivity push at APNs priority 10
+// (gorush "high"); at priority 5 an idle phone holds every push and the
+// Lock Screen freezes (spec §6.6). An empty APNs topic is refused without a
+// request: unlike Send, where gorush's own config might supply a topic, a
+// bare ".push-type.liveactivity" would bounce BadTopic every minute for
+// eight hours (design spec §2.7).
+func (g *Gorush) SendLiveActivity(ctx context.Context, p LiveActivityPush) error {
+	if g.apnsTopic == "" {
+		return errors.New("push: live activity push requires an APNs topic (--apns-topic)")
+	}
+	if p.Timestamp.IsZero() {
+		return errors.New("push: live activity push requires a timestamp")
+	}
+	n := gorushLiveActivity{
+		Tokens:       []string{p.Token},
+		Platform:     int(PlatformIOS),
+		PushType:     "liveactivity",
+		Priority:     "high",
+		Topic:        g.apnsTopic + liveActivityTopicSuffix,
+		Development:  p.Sandbox,
+		Event:        p.Event,
+		ContentState: p.ContentState,
+		Timestamp:    p.Timestamp.Unix(),
+	}
+	if !p.StaleDate.IsZero() {
+		n.StaleDate = p.StaleDate.Unix()
+	}
+	if !p.DismissalDate.IsZero() {
+		n.DismissalDate = p.DismissalDate.Unix()
+	}
+	return g.post(ctx, map[string]any{"notifications": []gorushLiveActivity{n}})
 }

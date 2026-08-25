@@ -262,6 +262,44 @@ through the same formula-injection guard as `survey responses`: a leading
 apostrophe when a cell would otherwise open with `=`, `+`, `-`, `@`, a tab,
 or a carriage return.
 
+## Live Activities
+
+iOS Lock Screen widgets showing the next departures for one bookmarked route +
+headsign at one stop (spec §6). The sidecar owns the update cadence: once a
+minute per subscription it fetches the stop's arrivals from the region's OBA
+server, builds the §6.2 `content-state`, and pushes it through gorush as an
+APNs `liveactivity` push (priority 10, topic `<bundle id>.push-type.liveactivity`,
+derived from `SIDECAR_APNS_TOPIC`).
+
+### Endpoints
+
+```text
+POST   /api/v2/regions/{regionId}/live_activities          → 201 {"url": "…/live_activities/<token>"}
+DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
+```
+
+- Registration is an **upsert on `(region, activity_id)`**: ActivityKit rotates
+  push tokens and the app re-POSTs the same activity with each one. The URL is
+  the same every time; every field, including `apns_sandbox`, is re-read.
+- Required: `activity_id`, `push_token` (≤ 4096 chars — a sidecar addition), `stop_id`,
+  `route_short_name`, `trip_headsign`. Optional trip metadata: `trip_id`,
+  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`.
+- `apns_sandbox` follows the §2.7 allow-list. The stakes are highest here: a
+  misrouted push bounces `BadDeviceToken`, which the feedback webhook treats as
+  terminal and deletes the subscription.
+- POST is throttled at 30/minute per TCP peer (a sidecar-specific addition —
+  every distinct stop costs one upstream call per minute for eight hours);
+  DELETE is not.
+- Subscriptions end at 8 hours, after 3 consecutive empty/error cycles, on
+  client DELETE, or on terminal APNs feedback. The first two send a best-effort
+  `end` push (dismissal 15 minutes out); the last two do not.
+- Without `SIDECAR_GORUSH_URL` the updater runs in store-only mode: rows expire
+  and reap but nothing is pushed.
+
+Deviations from OBACloud, all deliberate: route/headsign matching resolves
+names through the response `references` like the app does; the push-token
+length cap and the POST throttle are new.
+
 ## Weather and vehicle search
 
 The sidecar also serves two rider-facing lookups that proxy and cache an upstream
@@ -641,6 +679,49 @@ webhook (which prunes the dead token). Common APNs errors:
 | `DeviceTokenNotForTopic` | topic ≠ the build's bundle id | set the topic to the installed build's exact bundle id |
 | `BadDeviceToken` | `development` flag doesn't match the build's environment | `true` for a debug/sandbox build, `false` for TestFlight/release |
 | `TopicDisallowed` | the key isn't enabled for this topic | enable the key for the app in the Apple developer portal |
+
+### Live Activities
+
+The runbook above applies; a few things are specific to the Live Activity path
+(spec §6) and worth checking separately before assuming the credential is bad:
+
+- **The topic is derived, not sent by the client or configured in gorush.**
+  The sidecar appends `.push-type.liveactivity` to `SIDECAR_APNS_TOPIC` itself
+  on every push (gorush does not derive this suffix — a bare bundle id would
+  bounce `BadTopic`). With `SIDECAR_GORUSH_URL` set but `SIDECAR_APNS_TOPIC`
+  empty, the sidecar runs Live Activities in store-only mode (rows expire and
+  reap, nothing is pushed) and says so in a boot warning — nothing ever shows
+  up in `docker compose logs gorush` because no request was sent. Alarms
+  still go out, and APNs rejects them with `MissingTopic`.
+- **The push token is not the device alert token.** ActivityKit hands the app
+  a separate token per Live Activity (from `Activity.pushTokenUpdates`), not
+  the `UNUserNotificationCenter` token used for `push_registrations`/alarms.
+  Registering the alert token by mistake bounces every push with
+  `BadDeviceToken`; the feedback webhook treats that as terminal and deletes
+  the subscription outright.
+- **Priority must be 10**, not 5: `SendLiveActivity` always sends gorush
+  `"priority": "high"` (APNs 10). At 5 an idle phone queues the push instead
+  of delivering it and the Lock Screen card visibly freezes.
+- **Watching it work:** register (below), then tail `docker compose logs -f
+  gorush` and the sidecar's own log for `liveactivities:` lines — one cycle
+  runs per minute, so expect an `update` push within about 60 seconds.
+  `TopicDisallowed` in the gorush log points at the topic (wrong bundle id,
+  or the key isn't enabled for this app); `BadDeviceToken` points at the
+  token (alert token used instead of the ActivityKit push token, or a
+  `apns_sandbox`/build mismatch).
+
+```sh
+IP=$(ipconfig getifaddr en0)
+curl -s -X POST http://$IP:8080/api/v2/regions/1/live_activities \
+  -d activity_id=<activitykit activity id> \
+  -d push_token=<activitykit push token, NOT the device alert token> \
+  -d apns_sandbox=1 \
+  -d stop_id=<stop> -d route_short_name=<route> -d trip_headsign=<headsign>
+# → 201 {"url": "http://.../live_activities/<token>"}
+
+curl -s -X DELETE http://$IP:8080/api/v2/regions/1/live_activities/<token>
+# → 204
+```
 
 ## Development
 
