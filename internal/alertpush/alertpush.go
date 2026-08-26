@@ -182,7 +182,9 @@ type Repository interface {
 	AdvanceCursor(ctx context.Context, id, prevCursor, newCursor, submitted int64, now time.Time) (bool, error)
 	// RecordFailure stores one (push, sha256(token)) failure and increments
 	// failed_count; a replay of the same token is ignored and returns false.
-	// The token itself is never stored (design spec §2.8).
+	// The token itself is never stored (design spec §2.8). `now` timestamps
+	// the failure row only: updated_at belongs to the dispatcher's stuck
+	// clock and asynchronous webhook feedback must not reset it (§2.6).
 	RecordFailure(ctx context.Context, id int64, token, reason string, now time.Time) (bool, error)
 	// RecordAttempt increments attempts, stores errMsg as last_error, stamps
 	// updated_at (so the stuck clock measures from the last attempt), and

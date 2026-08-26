@@ -64,7 +64,13 @@ INSERT OR IGNORE INTO alert_push_failures (push_id, token_sha256, reason, create
 VALUES (sqlc.arg(push_id), sqlc.arg(token_sha256), sqlc.arg(reason), sqlc.arg(created_at));
 
 -- name: IncrementAlertPushFailed :execrows
-UPDATE alert_pushes SET failed_count = failed_count + 1, updated_at = sqlc.arg(now)
+-- updated_at is deliberately NOT stamped here. It means "the dispatcher last
+-- touched this row", and ClaimAlertPushes reads it to decide a send is stuck.
+-- Feedback from the gorush webhook arrives asynchronously for pages already
+-- submitted, so restamping it would let a trickle of bounces push a stalled
+-- send's reclaim out by another StuckAfter, over and over (design spec
+-- section 2.6). The failure row's own created_at carries the feedback time.
+UPDATE alert_pushes SET failed_count = failed_count + 1
 WHERE id = sqlc.arg(id);
 
 -- name: ListAlertPushFailureReasons :many

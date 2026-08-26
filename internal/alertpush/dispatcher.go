@@ -37,6 +37,9 @@ type Dispatcher struct {
 
 	once sync.Once
 	wake chan struct{}
+
+	// adopt fires on the first RunOnce only; see there.
+	adopt sync.Once
 }
 
 func (d *Dispatcher) wakeCh() chan struct{} {
@@ -72,9 +75,23 @@ func (d *Dispatcher) RunLoop(ctx context.Context, interval time.Duration) {
 
 // RunOnce claims every push that is due and sends each in turn. Exported
 // so tests drive cycles without a ticker.
+//
+// The FIRST cycle after construction adopts every sending row outright
+// rather than only those idle for StuckAfter (design spec §2.6). A deploy is
+// a SIGTERM, not a crash: the previous process stopped between pages and
+// left its in-flight rows sending with a fresh updated_at, so waiting out
+// the stuck clock would stall the send for 15 minutes. Only a crash leaves a
+// stale updated_at, which the later cycles' now-StuckAfter window is for.
+// Adoption is safe because the sidecar is a single process: at boot no other
+// worker owns those rows.
 func (d *Dispatcher) RunOnce(ctx context.Context) {
 	now := d.Now()
-	claimed, err := d.Repo.Claim(ctx, now, now.Add(-StuckAfter))
+	stuckBefore := now.Add(-StuckAfter)
+	// Claim's window is exclusive (updated_at < stuckBefore) over whole
+	// epoch seconds, so adopting a row stamped in this very second -- the
+	// process that died a moment ago -- needs one second of slack.
+	d.adopt.Do(func() { stuckBefore = now.Add(time.Second) })
+	claimed, err := d.Repo.Claim(ctx, now, stuckBefore)
 	if err != nil {
 		d.Logger.Error("alertpush: claim", "err", err)
 		return
@@ -120,7 +137,10 @@ func (d *Dispatcher) send(ctx context.Context, p Push) {
 			return
 		}
 		if err := d.Repo.SetDeviceCount(ctx, p.ID, count.Total, d.Now()); err != nil {
-			log.Warn("alertpush: set device count", "err", err)
+			// A store write failure counts as an attempt, like a transport
+			// one: a store that never accepts this write would otherwise
+			// restart the same send on every reclaim forever (spec §2.6).
+			d.recordAttempt(ctx, log, p.ID, err)
 			return
 		}
 	}
@@ -144,7 +164,11 @@ func (d *Dispatcher) send(ctx context.Context, p Push) {
 		last := page[len(page)-1].ID
 		ok, err := d.Repo.AdvanceCursor(ctx, p.ID, cursor, last, submitted, d.Now())
 		if err != nil {
-			log.Warn("alertpush: advance cursor", "err", err)
+			// The page went out but its progress did not land, so the next
+			// reclaim re-sends it. Count it as an attempt so MaxAttempts
+			// bounds those duplicates instead of letting a write-failing
+			// store re-send this page every StuckAfter forever (spec §2.6).
+			d.recordAttempt(ctx, log.With("from_cursor", cursor, "to_cursor", last), p.ID, err)
 			return
 		}
 		if !ok {
@@ -214,12 +238,16 @@ func (d *Dispatcher) sendPage(ctx context.Context, p Push, page []pushreg.Regist
 	return submitted, nil
 }
 
-// recordAttempt counts one transport failure and gives up at MaxAttempts
-// (design spec §2.7). The push keeps its cursor either way.
+// recordAttempt counts one failed attempt -- a transport error, or a store
+// write that lost a sent page's progress -- and gives up at MaxAttempts
+// (design spec §2.7). The push keeps its cursor either way. Counting is
+// best-effort: if the counter write fails too (the same broken store, most
+// likely), the attempt is only logged, at Error, with whatever context the
+// caller put on log -- the page's cursor range for a failed cursor commit.
 func (d *Dispatcher) recordAttempt(ctx context.Context, log *slog.Logger, id int64, sendErr error) {
 	attempts, err := d.Repo.RecordAttempt(ctx, id, sendErr.Error(), d.Now())
 	if err != nil {
-		log.Error("alertpush: record attempt", "err", err)
+		log.Error("alertpush: record attempt", "err", err, "attempt_err", sendErr)
 		return
 	}
 	if attempts >= MaxAttempts {

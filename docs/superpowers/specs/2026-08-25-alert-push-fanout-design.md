@@ -214,6 +214,16 @@ Grouping normalizes `apns_sandbox` to `false` off iOS: registration writes it fo
 platform (spec §4), so an Android row can carry `true`, and honoring it would split one FCM
 batch into two identical calls.
 
+**Graceful restart.** A deploy is a SIGTERM, not a crash: the cycle stops between pushes
+(or mid-page on a canceled context), leaving rows `sending` with a fresh `updated_at`. The
+sidecar is a single process, so the dispatcher's **first** cycle after boot adopts every
+`sending` row immediately (`stuckBefore = now`) instead of waiting out `StuckAfter`; later
+cycles use `now - StuckAfter`. `updated_at` is stamped only by the dispatcher's own writes —
+the feedback webhook's failure accounting must not touch it, or a trickle of bounces from
+already-submitted pages would keep pushing a paused send's retry out. A store *write* failure
+after a page was sent (`AdvanceCursor`, `SetDeviceCount`) counts as an attempt like a transport
+error, so a persistently write-failing store cannot re-send the same page every reclaim forever.
+
 Pushes are sent sequentially and `RunLoop` drops ticks while a cycle runs, so a push queued
 for alert B during a 100k-device send of alert A starts after A finishes. `Wake()` starts a
 send "at once" only when the loop is idle; that is acceptable for a rare, operator-initiated
@@ -241,8 +251,11 @@ letting an operator queue a push that will fail.
   cycle sees it as stuck only after 15 minutes. That is deliberately slow: a gorush outage
   should not be hammered every 15 seconds, and OBACloud's polynomial backoff lands in the same
   range by the third attempt. The push resumes from its cursor.
-- **Store error** while sending: logged; the row stays `sending` and is reclaimed as stuck.
-  Store failures are not counted as attempts — they say nothing about the transport.
+- **Store read error** while sending (`Get`, `ListAudience`, `CountAudience`): logged; the row
+  stays `sending` and is reclaimed as stuck. Read failures are not counted as attempts — they
+  say nothing about the transport and nothing was sent. A store **write** failure after a page
+  went out (`AdvanceCursor`, `SetDeviceCount`) *is* counted (§2.6), because each reclaim would
+  otherwise re-send that page.
 - **Alert deleted or unpublished** between creation and send: `Alerts.Get` returns
   `ErrNotFound` (cascade) or an unpublished alert → the push is marked `canceled` (via
   `MarkCompleted`) with `last_error` naming the cause. Copy was snapshotted, so a deleted alert's row is only

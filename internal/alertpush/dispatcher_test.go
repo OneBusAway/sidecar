@@ -398,3 +398,101 @@ func TestDispatcherWakeTriggersRunWithoutTick(t *testing.T) {
 	d2.Wake()
 	d2.Wake()
 }
+
+// failingSender always errors and counts its calls, standing in for a
+// transport that is down for the whole test.
+type failingSender struct{ calls int }
+
+func (s *failingSender) SendBatch(context.Context, push.Notification, string) (push.BatchResult, error) {
+	s.calls++
+	return push.BatchResult{}, errors.New("down")
+}
+
+func TestDispatcherFirstCycleAdoptsOrphanedSends(t *testing.T) {
+	f := newFixture(t)
+	a := f.alert(t, true, false)
+	f.register(t, "tok", false)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A process that claimed the push and then died leaves the row `sending`
+	// with a fresh updated_at -- exactly what a SIGTERM mid-cycle produces.
+	crashed := &failingSender{}
+	now := base
+	d1 := newDispatcher(f, crashed, &now)
+	d1.RunOnce(context.Background())
+	orphan, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if orphan.Status != alertpush.StatusSending || !orphan.UpdatedAt.Equal(now) {
+		t.Fatalf("orphan = status %s updated %v, want sending at %v", orphan.Status, orphan.UpdatedAt, now)
+	}
+
+	// A second cycle of the SAME dispatcher must not re-adopt: adoption is
+	// first-cycle-only, and this row is not yet stuck.
+	d1.RunOnce(context.Background())
+	if crashed.calls != 1 {
+		t.Errorf("sends by the same dispatcher = %d, want 1 (a fresh sending row is not re-adopted)", crashed.calls)
+	}
+
+	// The restarted process adopts it at once -- no StuckAfter wait, and the
+	// clock has not moved.
+	sender := &fakeSender{}
+	d2 := newDispatcher(f, sender, &now)
+	d2.RunOnce(context.Background())
+	if len(sender.calls) != 1 {
+		t.Fatalf("sends after restart = %d, want 1 (first cycle adopts every sending row)", len(sender.calls))
+	}
+	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if final.Status != alertpush.StatusSent || final.SubmittedCount != 1 {
+		t.Errorf("final = %+v, want sent with 1 submitted", final)
+	}
+}
+
+// cursorFailRepo is a real repository whose cursor commit always fails,
+// standing in for a store that has gone read-only mid-send.
+type cursorFailRepo struct {
+	alertpush.Repository
+	err error
+}
+
+func (r cursorFailRepo) AdvanceCursor(context.Context, int64, int64, int64, int64, time.Time) (bool, error) {
+	return false, r.err
+}
+
+func TestDispatcherCursorWriteFailureCountsAsAttempt(t *testing.T) {
+	f := newFixture(t)
+	a := f.alert(t, true, false)
+	f.register(t, "tok", false)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeSender{}
+	now := base
+	d := newDispatcher(f, sender, &now)
+	d.Repo = cursorFailRepo{Repository: f.store.AlertPushes(), err: errors.New("disk full")}
+
+	d.RunOnce(context.Background())
+	mid, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if mid.Attempts != 1 || mid.Status != alertpush.StatusSending {
+		t.Fatalf("after a failed cursor commit: attempts %d status %s, want 1 and sending", mid.Attempts, mid.Status)
+	}
+	if mid.LastError != "disk full" {
+		t.Errorf("LastError = %q, want the store error verbatim", mid.LastError)
+	}
+
+	// Without the attempt count this page would be re-sent on every reclaim
+	// forever; MaxAttempts bounds the duplicates instead.
+	for i := 1; i < alertpush.MaxAttempts; i++ {
+		now = now.Add(alertpush.StuckAfter + time.Minute)
+		d.RunOnce(context.Background())
+	}
+	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if final.Status != alertpush.StatusFailed || final.Attempts != alertpush.MaxAttempts {
+		t.Errorf("final = status %s attempts %d, want failed and %d", final.Status, final.Attempts, alertpush.MaxAttempts)
+	}
+	if len(sender.calls) != alertpush.MaxAttempts {
+		t.Errorf("batches = %d, want %d (one duplicate per attempt, then no more)", len(sender.calls), alertpush.MaxAttempts)
+	}
+}

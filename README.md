@@ -206,12 +206,17 @@ cascade-delete with their push, and the pushes cascade with the alert.
 The dispatcher ticks every 15 seconds and commits a cursor after each page of
 500 registrations, so a crash mid-send resumes at the last committed page and
 re-sends at most that one page. A row left `sending` and untouched for 15 minutes
-is treated as stuck and reclaimed by the next cycle — which is also what paces
+is treated as stuck and reclaimed by the next cycle. (A restart does not wait
+that out: the server's first cycle after boot adopts every in-flight row at
+once, so a deploy mid-send resumes in seconds.) The stuck clock is also what paces
 retries: a transport error leaves the push `sending` with its attempt counted and
 its cursor where it was, and after five *consecutive* failures the push is marked
 `failed`. A page that succeeds resets the counter, so a long send is not killed
-by five scattered errors over its lifetime. Store errors are not counted as
-attempts; they say nothing about the transport.
+by five scattered errors over its lifetime. Store read errors are not counted as
+attempts; they say nothing about the transport. A store *write* failure after a
+page has gone out — the cursor commit that records it — does count, because
+otherwise a store that never accepts that write would re-send the same page on
+every reclaim forever.
 
 Canceling a `queued` push stops it before it starts. Canceling one mid-send stops
 it at the next page boundary — batches already handed to gorush are on their way

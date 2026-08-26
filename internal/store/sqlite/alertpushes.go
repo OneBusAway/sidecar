@@ -220,9 +220,9 @@ func (r *alertPushRepo) RecordFailure(ctx context.Context, id int64, token, reas
 		// A replayed feedback row: already counted, so failed_count stands.
 		return false, nil
 	}
-	if _, err := q.IncrementAlertPushFailed(ctx, gen.IncrementAlertPushFailedParams{
-		Now: now.Unix(), ID: id,
-	}); err != nil {
+	// Note the missing `now`: the counter moves, updated_at does not. See the
+	// query's comment -- it is the dispatcher's stuck clock, not this path's.
+	if _, err := q.IncrementAlertPushFailed(ctx, id); err != nil {
 		return false, fmt.Errorf("sqlite: record alert push %d failure: increment: %w", id, err)
 	}
 	if err := tx.Commit(); err != nil {

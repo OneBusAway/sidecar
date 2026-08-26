@@ -336,6 +336,13 @@ func testAlertPushRecordFailure(t *testing.T, newStore newAlertPushStoreFunc) {
 	if got.FailedCount != 3 {
 		t.Errorf("FailedCount = %d, want 3 (replay not double-counted)", got.FailedCount)
 	}
+	// updated_at means "the dispatcher last touched this row", and Claim reads
+	// it to decide a send is stuck. Webhook feedback for an already-submitted
+	// page must not restamp it, or a trickle of bounces would push a stalled
+	// send's reclaim out indefinitely (design spec §2.6).
+	if !got.UpdatedAt.Equal(base) {
+		t.Errorf("UpdatedAt = %v, want %v (RecordFailure must not touch the dispatcher's stuck clock)", got.UpdatedAt, base)
+	}
 	want := []alertpush.FailureReason{{Reason: "Unregistered", Count: 2}, {Reason: "BadDeviceToken", Count: 1}}
 	if len(got.FailureReasons) != 2 || got.FailureReasons[0] != want[0] || got.FailureReasons[1] != want[1] {
 		t.Errorf("FailureReasons = %v, want %v (by count desc)", got.FailureReasons, want)

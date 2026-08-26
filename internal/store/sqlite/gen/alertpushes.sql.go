@@ -263,17 +263,18 @@ func (q *Queries) GetAlertPush(ctx context.Context, id int64) (AlertPush, error)
 }
 
 const incrementAlertPushFailed = `-- name: IncrementAlertPushFailed :execrows
-UPDATE alert_pushes SET failed_count = failed_count + 1, updated_at = ?1
-WHERE id = ?2
+UPDATE alert_pushes SET failed_count = failed_count + 1
+WHERE id = ?1
 `
 
-type IncrementAlertPushFailedParams struct {
-	Now int64
-	ID  int64
-}
-
-func (q *Queries) IncrementAlertPushFailed(ctx context.Context, arg IncrementAlertPushFailedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, incrementAlertPushFailed, arg.Now, arg.ID)
+// updated_at is deliberately NOT stamped here. It means "the dispatcher last
+// touched this row", and ClaimAlertPushes reads it to decide a send is stuck.
+// Feedback from the gorush webhook arrives asynchronously for pages already
+// submitted, so restamping it would let a trickle of bounces push a stalled
+// send's reclaim out by another StuckAfter, over and over (design spec
+// section 2.6). The failure row's own created_at carries the feedback time.
+func (q *Queries) IncrementAlertPushFailed(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, incrementAlertPushFailed, id)
 	if err != nil {
 		return 0, err
 	}
