@@ -507,3 +507,89 @@ func TestGorushSendLiveActivityNon2xxIsErrorWithoutBody(t *testing.T) {
 		t.Errorf("error leaks response body/token: %v", err)
 	}
 }
+
+func TestGorushSendBatchPostsNotifIDAndParsesRejections(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("unmarshal: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		captured = req["notifications"].([]any)[0].(map[string]any)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":"ok","counts":3,"logs":[
+			{"type":"succeeded-push","platform":"ios","token":"tok-a","message":"Hi","error":""},
+			{"type":"failed-push","platform":"ios","token":"tok-b","message":"Hi","error":"BadDeviceToken"},
+			{"type":"failed-push","platform":"ios","token":"","message":"Hi","error":"NoToken"},
+			{"type":"failed-push","platform":"ios","token":"tok-c","message":"Hi","error":"PayloadTooLarge"}]}`))
+	}))
+	defer server.Close()
+
+	g := NewGorush(server.URL, "org.example.app", server.Client())
+	res, err := g.SendBatch(context.Background(), Notification{
+		Tokens: []string{"tok-a", "tok-b", "tok-c"}, Platform: PlatformIOS, Sandbox: true,
+		Title: "Route 44", Message: "Detour this weekend",
+	}, "alertpush:7")
+	if err != nil {
+		t.Fatalf("SendBatch: %v", err)
+	}
+	if got := captured["notif_id"]; got != "alertpush:7" {
+		t.Errorf("notif_id = %v, want alertpush:7", got)
+	}
+	if got := captured["development"]; got != true {
+		t.Errorf("development = %v, want true", got)
+	}
+	if got := captured["topic"]; got != "org.example.app" {
+		t.Errorf("topic = %v, want org.example.app", got)
+	}
+	if _, present := captured["data"]; present {
+		t.Errorf("data present in alert push; want none")
+	}
+	// Only failed-push entries with a token: a succeeded-push row (gorush can
+	// log those too) or a token-less row must never become a rejection.
+	want := []Rejection{{Token: "tok-b", Reason: "BadDeviceToken"}, {Token: "tok-c", Reason: "PayloadTooLarge"}}
+	if !reflect.DeepEqual(res.Rejected, want) {
+		t.Errorf("Rejected = %+v, want %+v", res.Rejected, want)
+	}
+}
+
+func TestGorushSendBatchToleratesEmptyAndNonJSONBodies(t *testing.T) {
+	for _, body := range []string{"", "not json", `{"success":"ok"}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		g := NewGorush(server.URL, "", server.Client())
+		res, err := g.SendBatch(context.Background(), Notification{Tokens: []string{"t"}, Platform: PlatformAndroid, Message: "m"}, "x")
+		server.Close()
+		if err != nil {
+			t.Errorf("body %q: SendBatch error = %v, want nil (async mode returns no logs)", body, err)
+		}
+		if len(res.Rejected) != 0 {
+			t.Errorf("body %q: Rejected = %v, want empty", body, res.Rejected)
+		}
+	}
+}
+
+func TestGorushSendBatchErrorNeverEchoesBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad","tokens":["SECRET-TOKEN"]}`))
+	}))
+	defer server.Close()
+	g := NewGorush(server.URL, "", server.Client())
+	_, err := g.SendBatch(context.Background(), Notification{Tokens: []string{"SECRET-TOKEN"}, Platform: PlatformAndroid, Message: "m"}, "x")
+	if err == nil {
+		t.Fatal("SendBatch error = nil, want non-nil for 400")
+	}
+	if strings.Contains(err.Error(), "SECRET-TOKEN") {
+		t.Errorf("error %q echoes the response body", err)
+	}
+}
