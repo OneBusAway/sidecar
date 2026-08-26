@@ -247,9 +247,38 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	f.seedRegistration(t, regionPuget, "tok-1", false)
 	f.seedRegistration(t, regionPuget, "qa", true)
 
-	aud := object(t, f.do(http.MethodGet, fmt.Sprintf("/api/admin/v1/alerts/%d/push_audience", id), ""), http.StatusOK)
+	assertPushAudienceReport(t, f, id)
+	pushID := assertPushListIsPerAlert(t, f, id, other)
+	assertPushCancelScoping(t, f, id, other, pushID)
+}
+
+// assertStatus issues one admin request and pins only its status code, which
+// is all the scoping rules in these tests are about.
+func (f *adminFixture) assertStatus(t *testing.T, method, target, body string, want int, what string) {
+	t.Helper()
+	if res := f.do(method, target, body); res.Code != want {
+		t.Errorf("%s: status = %d, want %d (%s)", what, res.Code, want, res.Body)
+	}
+}
+
+// audiencePath is GET /alerts/{id}/push_audience.
+func audiencePath(alertID int64) string {
+	return fmt.Sprintf("/api/admin/v1/alerts/%d/push_audience", alertID)
+}
+
+// cancelPath is DELETE /alerts/{id}/pushes/{pushId}.
+func cancelPath(alertID, pushID int64) string {
+	return fmt.Sprintf("/api/admin/v1/alerts/%d/pushes/%d", alertID, pushID)
+}
+
+// assertPushAudienceReport pins the reach preview: both audience sizes split
+// by platform, forced_test off for a normal alert, and a 404 for an alert
+// that does not exist.
+func assertPushAudienceReport(t *testing.T, f *adminFixture, id int64) {
+	t.Helper()
+	aud := object(t, f.do(http.MethodGet, audiencePath(id), ""), http.StatusOK)
 	assertKeys(t, "audienceJSON", aud, []string{"all", "test", "forced_test"})
-	body := f.do(http.MethodGet, fmt.Sprintf("/api/admin/v1/alerts/%d/push_audience", id), "").Body.String()
+	body := f.do(http.MethodGet, audiencePath(id), "").Body.String()
 	if !strings.Contains(body, `"all":{"total":2,"ios":2,"android":0}`) {
 		t.Errorf("audience all = %s, want total 2 / ios 2 / android 0", body)
 	}
@@ -259,10 +288,15 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	if boolean(t, aud, "forced_test") {
 		t.Errorf("forced_test = true for a non-test alert")
 	}
-	if res := f.do(http.MethodGet, "/api/admin/v1/alerts/9999/push_audience", ""); res.Code != http.StatusNotFound {
-		t.Errorf("audience of an unknown alert: status = %d, want 404", res.Code)
-	}
+	f.assertStatus(t, http.MethodGet, audiencePath(9999), "", http.StatusNotFound,
+		"audience of an unknown alert")
+}
 
+// assertPushListIsPerAlert queues one push on id and pins that the list is
+// scoped to its own alert, empty (never null) for an alert with no pushes,
+// and a 404 for an alert that does not exist. It returns the queued push id.
+func assertPushListIsPerAlert(t *testing.T, f *adminFixture, id, other int64) int64 {
+	t.Helper()
 	created := object(t, f.do(http.MethodPost, pushesPath(id), `{}`), http.StatusAccepted)
 	pushID := jsonID(t, created)
 
@@ -280,19 +314,22 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	}
 	// An unknown alert is a 404, not an empty list: "no pushes" and "no such
 	// alert" are different answers and the SPA renders them differently.
-	if res := f.do(http.MethodGet, pushesPath(9999), ""); res.Code != http.StatusNotFound {
-		t.Errorf("list for an unknown alert: status = %d, want 404 (%s)", res.Code, res.Body)
-	}
+	f.assertStatus(t, http.MethodGet, pushesPath(9999), "", http.StatusNotFound,
+		"list for an unknown alert")
+	return pushID
+}
 
-	cancelPath := func(alert, push int64) string {
-		return fmt.Sprintf("/api/admin/v1/alerts/%d/pushes/%d", alert, push)
-	}
-	if res := f.do(http.MethodDelete, cancelPath(other, pushID), ""); res.Code != http.StatusNotFound {
-		t.Errorf("cross-alert cancel: status = %d, want 404", res.Code)
-	}
-	if res := f.do(http.MethodDelete, cancelPath(id, 9999), ""); res.Code != http.StatusNotFound {
-		t.Errorf("cancel of an unknown push: status = %d, want 404", res.Code)
-	}
+// assertPushCancelScoping pins the cancel route: another alert's id cannot
+// cancel this push, an unknown push is a 404, a non-numeric pushId is a 400,
+// the real cancel is a 204, and a second cancel is a 409 carrying the
+// sentinel's own text.
+func assertPushCancelScoping(t *testing.T, f *adminFixture, id, other, pushID int64) {
+	t.Helper()
+	f.assertStatus(t, http.MethodDelete, cancelPath(other, pushID), "", http.StatusNotFound,
+		"cross-alert cancel")
+	f.assertStatus(t, http.MethodDelete, cancelPath(id, 9999), "", http.StatusNotFound,
+		"cancel of an unknown push")
+
 	// A non-numeric pushId is a malformed request, not a missing push: 400
 	// tells the caller their URL is wrong, where 404 would send them looking
 	// for a push that was never named.
@@ -302,9 +339,8 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	}
 	assertContains(t, "non-numeric pushId error", errorText(t, bad, http.StatusBadRequest),
 		"invalid pushId", "not-a-number")
-	if res := f.do(http.MethodDelete, cancelPath(id, pushID), ""); res.Code != http.StatusNoContent {
-		t.Errorf("cancel: status = %d, want 204 (%s)", res.Code, res.Body)
-	}
+
+	f.assertStatus(t, http.MethodDelete, cancelPath(id, pushID), "", http.StatusNoContent, "cancel")
 	twice := f.do(http.MethodDelete, cancelPath(id, pushID), "")
 	if twice.Code != http.StatusConflict {
 		t.Errorf("cancel twice: status = %d, want 409", twice.Code)
@@ -330,7 +366,7 @@ func TestAdminPushAudienceForcedTest(t *testing.T) {
 
 	f := newAdminFixture(t)
 	id := f.seedPublishedAlert(t, regionPuget, true)
-	aud := object(t, f.do(http.MethodGet, fmt.Sprintf("/api/admin/v1/alerts/%d/push_audience", id), ""), http.StatusOK)
+	aud := object(t, f.do(http.MethodGet, audiencePath(id), ""), http.StatusOK)
 	if !boolean(t, aud, "forced_test") {
 		t.Errorf("forced_test = false for a test alert")
 	}
