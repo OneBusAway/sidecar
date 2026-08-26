@@ -12,7 +12,7 @@ import (
 const countPushAudience = `-- name: CountPushAudience :many
 SELECT operating_system, COUNT(*) AS n FROM push_registrations
 WHERE region_id = ?1
-  AND (test_device = TRUE OR NOT CAST(?2 AS BOOLEAN))
+  AND (test_device OR NOT CAST(?2 AS BOOLEAN))
 GROUP BY operating_system
 `
 
@@ -134,7 +134,7 @@ const listPushAudience = `-- name: ListPushAudience :many
 SELECT id, region_id, token, operating_system, apns_sandbox, locale, test_device, description, last_seen_at, created_at, updated_at FROM push_registrations
 WHERE region_id = ?1
   AND id > ?2
-  AND (test_device = TRUE OR NOT CAST(?3 AS BOOLEAN))
+  AND (test_device OR NOT CAST(?3 AS BOOLEAN))
 ORDER BY id
 LIMIT ?4
 `
@@ -147,7 +147,7 @@ type ListPushAudienceParams struct {
 }
 
 // Pages a region's registrations by id (design spec section 2.3). The
-// predicate (test_device = TRUE OR NOT test_only) selects everyone when
+// predicate (test_device OR NOT test_only) selects everyone when
 // test_only is false and only test devices when it is true.
 func (q *Queries) ListPushAudience(ctx context.Context, arg ListPushAudienceParams) ([]PushRegistration, error) {
 	rows, err := q.db.QueryContext(ctx, listPushAudience,

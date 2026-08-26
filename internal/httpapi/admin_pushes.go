@@ -12,6 +12,10 @@ import (
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 )
 
+// pushNotFoundMessage is the client-facing 404 body for every alert-push
+// lookup: the push id is unknown, or it belongs to a different alert.
+const pushNotFoundMessage = "alert push not found"
+
 // pushJSON is the admin wire shape of one alert push (design spec §2.9).
 //
 // LastError is a plain string rather than a pointer because "no error yet"
@@ -174,7 +178,7 @@ func (h *adminPushesHandler) cancel(w http.ResponseWriter, r *http.Request) {
 			serverErrorJSON(w, h.deps.Logger, "get alert push", err)
 			return
 		}
-		writeJSONError(w, h.deps.Logger, http.StatusNotFound, "alert push not found")
+		writeJSONError(w, h.deps.Logger, http.StatusNotFound, pushNotFoundMessage)
 		return
 	}
 
@@ -182,7 +186,7 @@ func (h *adminPushesHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, alertpush.ErrNotFound):
-		writeJSONError(w, h.deps.Logger, http.StatusNotFound, "alert push not found")
+		writeJSONError(w, h.deps.Logger, http.StatusNotFound, pushNotFoundMessage)
 	case errors.Is(err, alertpush.ErrTerminal):
 		// The sentinel's own text, not err.Error(): the repository wraps its
 		// sentinels with the statement that failed, and that wrapper is for
@@ -234,7 +238,7 @@ func (h *adminPushesHandler) enqueueError(w http.ResponseWriter, err error) {
 // region not-found mapping with the rest of the admin API.
 func (h *adminPushesHandler) storeError(w http.ResponseWriter, op string, err error) {
 	if errors.Is(err, alertpush.ErrNotFound) {
-		writeJSONError(w, h.deps.Logger, http.StatusNotFound, "alert push not found")
+		writeJSONError(w, h.deps.Logger, http.StatusNotFound, pushNotFoundMessage)
 		return
 	}
 	writeStoreError(w, h.deps.Logger, op, err)

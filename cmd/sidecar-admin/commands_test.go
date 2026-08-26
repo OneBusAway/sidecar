@@ -51,6 +51,17 @@ func cli(t *testing.T, dbPath string, args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
+// cliErrContains runs the CLI and fails the test unless it returned an error
+// whose message contains want -- the shape every rejection assertion in the
+// alert-push tests takes, where "any error at all" would be too weak.
+func cliErrContains(t *testing.T, dbPath, want string, args ...string) {
+	t.Helper()
+	_, stderr, err := cli(t, dbPath, args...)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("%v err = %v (stderr %q), want an error containing %q", args, err, stderr, want)
+	}
+}
+
 // parseCreatedID extracts the id `alert create` prints on success.
 func parseCreatedID(t *testing.T, stdout string) int64 {
 	t.Helper()
@@ -926,46 +937,38 @@ func TestAlertPushEnqueuesAndLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := parseCreatedID(t, out)
+	idArg := strconv.FormatInt(id, 10)
 
-	if emptyOut, _, listErr := cli(t, dbPath, "alert", "pushes", strconv.FormatInt(id, 10)); listErr != nil || !strings.Contains(emptyOut, "no pushes") {
+	if emptyOut, _, listErr := cli(t, dbPath, "alert", "pushes", idArg); listErr != nil || !strings.Contains(emptyOut, "no pushes") {
 		t.Fatalf("pushes before any push: out %q err %v", emptyOut, listErr)
 	}
-	if _, _, listErr := cli(t, dbPath, "alert", "pushes", "999"); listErr == nil || !strings.Contains(listErr.Error(), "not found") {
-		t.Errorf("pushes for unknown alert err = %v, want not found", listErr)
-	}
-	if _, stderr, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10)); pushErr == nil || !strings.Contains(pushErr.Error(), "not published") {
-		t.Fatalf("push unpublished: err %v stderr %s", pushErr, stderr)
-	}
-	if _, _, pubErr := cli(t, dbPath, "alert", "publish", strconv.FormatInt(id, 10)); pubErr != nil {
+	cliErrContains(t, dbPath, "not found", "alert", "pushes", "999")
+	cliErrContains(t, dbPath, "not published", "alert", "push", idArg)
+
+	if _, _, pubErr := cli(t, dbPath, "alert", "publish", idArg); pubErr != nil {
 		t.Fatal(pubErr)
 	}
-	out, _, err = cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10))
+	out, _, err = cli(t, dbPath, "alert", "push", idArg)
 	if err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	if !strings.HasPrefix(out, "queued push 1 for alert") || !strings.Contains(out, "audience all") {
 		t.Errorf("stdout = %q", out)
 	}
-	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10)); pushErr == nil || !strings.Contains(pushErr.Error(), "already queued") {
-		t.Errorf("second push err = %v, want in-flight error", pushErr)
-	}
-	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10), "--audience", "test"); pushErr == nil || !strings.Contains(pushErr.Error(), "already queued") {
-		t.Errorf("in-flight check must run before the audience check: %v", pushErr)
-	}
-	out, _, err = cli(t, dbPath, "alert", "pushes", strconv.FormatInt(id, 10))
+	cliErrContains(t, dbPath, "already queued", "alert", "push", idArg)
+	// The in-flight check must run before the audience check.
+	cliErrContains(t, dbPath, "already queued", "alert", "push", idArg, "--audience", "test")
+
+	out, _, err = cli(t, dbPath, "alert", "pushes", idArg)
 	if err != nil {
 		t.Fatalf("pushes: %v", err)
 	}
 	if !strings.Contains(out, "queued") || !strings.Contains(out, "all") {
 		t.Errorf("pushes stdout = %q", out)
 	}
-	if _, _, pushErr := cli(t, dbPath, "alert", "push", "999"); pushErr == nil || !strings.Contains(pushErr.Error(), "not found") {
-		t.Errorf("unknown alert err = %v", pushErr)
-	}
+	cliErrContains(t, dbPath, "not found", "alert", "push", "999")
 	// The audience must be rejected on its own terms: a push is in flight
 	// here, so a bare "err != nil" would pass even if an unknown value were
 	// silently coerced to "all".
-	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10), "--audience", "everyone"); pushErr == nil || !strings.Contains(pushErr.Error(), "audience must be") {
-		t.Errorf("bad audience err = %v, want an audience rejection", pushErr)
-	}
+	cliErrContains(t, dbPath, "audience must be", "alert", "push", idArg, "--audience", "everyone")
 }

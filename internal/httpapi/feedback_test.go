@@ -590,7 +590,11 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 	putRegion(t, store.Regions(), 1)
 	alertID := publishAlert(t, store.Alerts(), 1, "Route 40 detour", false)
 
-	for _, token := range []string{"tok", "tok2"} {
+	// tok3 and tok4 exist so the unknown-notif_id and no-notif_id cases each
+	// carry a token this push has never recorded a failure for: RecordFailure
+	// deduplicates on (push_id, token), so reusing tok2 there would hold
+	// failed_count at 2 even if the handler wrongly recorded the bounce.
+	for _, token := range []string{"tok", "tok2", "tok3", "tok4"} {
 		if err := store.PushRegs().Upsert(ctx, pushreg.Upsert{
 			RegionID: 1, Token: token, OperatingSystem: "ios",
 		}, base); err != nil {
@@ -612,24 +616,11 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 		Logger:      slog.New(slog.DiscardHandler),
 	})
 
-	failedCount := func() int64 {
-		t.Helper()
-		got, getErr := store.AlertPushes().Get(ctx, p.ID)
-		if getErr != nil {
-			t.Fatalf("get push %d: %v", p.ID, getErr)
-		}
-		return got.FailedCount
-	}
-
 	notifID := alertpush.NotifID(p.ID)
 	terminal := fmt.Sprintf(
 		`{"type":"failed-push","platform":"ios","token":"tok","error":"Unregistered","notif_id":%q}`, notifID)
-	if rec := feedbackRequest(t, h, terminal); rec.Code != http.StatusOK {
-		t.Fatalf("terminal feedback: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
-	}
-	if got := failedCount(); got != 1 {
-		t.Errorf("failed_count after one terminal bounce = %d, want 1", got)
-	}
+	feedbackOK(t, h, "terminal feedback", terminal)
+	assertPushFailedCount(t, store.AlertPushes(), p.ID, 1, "after one terminal bounce")
 	// The accounting is additional to the prune, not instead of it.
 	if _, getErr := store.PushRegs().Get(ctx, 1, "tok"); !errors.Is(getErr, pushreg.ErrNotFound) {
 		t.Errorf("registration survived a terminal bounce: err = %v, want ErrNotFound", getErr)
@@ -637,23 +628,15 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 
 	// gorush can replay its feedback; a replayed token must not be counted
 	// twice or the failure total would drift above the audience size.
-	if rec := feedbackRequest(t, h, terminal); rec.Code != http.StatusOK {
-		t.Fatalf("replayed feedback: status = %d, want 200", rec.Code)
-	}
-	if got := failedCount(); got != 1 {
-		t.Errorf("failed_count after a replay = %d, want 1", got)
-	}
+	feedbackOK(t, h, "replayed feedback", terminal)
+	assertPushFailedCount(t, store.AlertPushes(), p.ID, 1, "after a replay")
 
 	// A non-terminal reason still counts against the push, and still leaves
 	// the registration alone: the token is alive, the delivery is not.
 	nonTerminal := fmt.Sprintf(
 		`{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests","notif_id":%q}`, notifID)
-	if rec := feedbackRequest(t, h, nonTerminal); rec.Code != http.StatusOK {
-		t.Fatalf("non-terminal feedback: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
-	}
-	if got := failedCount(); got != 2 {
-		t.Errorf("failed_count after a non-terminal bounce = %d, want 2", got)
-	}
+	feedbackOK(t, h, "non-terminal feedback", nonTerminal)
+	assertPushFailedCount(t, store.AlertPushes(), p.ID, 2, "after a non-terminal bounce")
 	if _, getErr := store.PushRegs().Get(ctx, 1, "tok2"); getErr != nil {
 		t.Errorf("non-terminal bounce deleted the registration: %v", getErr)
 	}
@@ -661,21 +644,34 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 	// A stale or foreign notif_id is a dead end, not a 500: gorush does not
 	// retry, so answering 500 would only lose the prune signal in the same
 	// payload.
-	unknown := `{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests","notif_id":"alertpush:999999"}`
-	if rec := feedbackRequest(t, h, unknown); rec.Code != http.StatusOK {
-		t.Fatalf("unknown notif_id: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
-	}
-	if got := failedCount(); got != 2 {
-		t.Errorf("failed_count after an unknown notif_id = %d, want 2 (nothing recorded)", got)
-	}
+	unknown := `{"type":"failed-push","platform":"ios","token":"tok3","error":"TooManyRequests","notif_id":"alertpush:999999"}`
+	feedbackOK(t, h, "unknown notif_id", unknown)
+	assertPushFailedCount(t, store.AlertPushes(), p.ID, 2, "after an unknown notif_id (nothing recorded)")
 
 	// Feedback with no notif_id behaves exactly as it did before §2.8.
-	plain := `{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests"}`
-	if rec := feedbackRequest(t, h, plain); rec.Code != http.StatusOK {
-		t.Fatalf("no notif_id: status = %d, want 200", rec.Code)
+	plain := `{"type":"failed-push","platform":"ios","token":"tok4","error":"TooManyRequests"}`
+	feedbackOK(t, h, "no notif_id", plain)
+	assertPushFailedCount(t, store.AlertPushes(), p.ID, 2, "after feedback with no notif_id")
+}
+
+// feedbackOK posts one gorush feedback payload and fails the test unless the
+// webhook answered 200 -- the webhook contract every case below shares.
+func feedbackOK(t *testing.T, h http.Handler, what, body string) {
+	t.Helper()
+	if rec := feedbackRequest(t, h, body); rec.Code != http.StatusOK {
+		t.Fatalf("%s: status = %d, want 200; body = %s", what, rec.Code, rec.Body.String())
 	}
-	if got := failedCount(); got != 2 {
-		t.Errorf("failed_count after feedback with no notif_id = %d, want 2", got)
+}
+
+// assertPushFailedCount reads a push back and pins its failure total.
+func assertPushFailedCount(t *testing.T, repo alertpush.Repository, id, want int64, what string) {
+	t.Helper()
+	got, err := repo.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get push %d: %v", id, err)
+	}
+	if got.FailedCount != want {
+		t.Errorf("failed_count %s = %d, want %d", what, got.FailedCount, want)
 	}
 }
 

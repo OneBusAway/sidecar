@@ -68,4 +68,11 @@ func TestBuildMessagesClamps(t *testing.T) {
 	if s := alertpush.Clamp(strings.Repeat("x", 48), 48); s != strings.Repeat("x", 48) {
 		t.Errorf("Clamp at exactly the limit must not truncate: %q", s)
 	}
+	// A non-positive limit has no room for the ellipsis: the empty string,
+	// never a panic on runes[:limit-1].
+	for _, limit := range []int{0, -1} {
+		if s := alertpush.Clamp("short", limit); s != "" {
+			t.Errorf("Clamp(short, %d) = %q, want the empty string", limit, s)
+		}
+	}
 }

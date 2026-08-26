@@ -241,6 +241,18 @@ func str(t *testing.T, m map[string]any, key string) string {
 	return v
 }
 
+// num reads a JSON number field, failing if it is absent or the wrong type.
+// JSON numbers decode as float64, so every count assertion goes through this
+// rather than repeating the type switch inline.
+func num(t *testing.T, m map[string]any, key string) float64 {
+	t.Helper()
+	v, ok := m[key].(float64)
+	if !ok {
+		t.Fatalf("%s = %v (%T), want a number", key, m[key], m[key])
+	}
+	return v
+}
+
 func boolean(t *testing.T, m map[string]any, key string) bool {
 	t.Helper()
 	v, ok := m[key].(bool)
@@ -1515,34 +1527,11 @@ func TestParseInstantJSON(t *testing.T) {
 	region := regions.Region{ID: 7, Timezone: "America/Los_Angeles"}
 
 	t.Run("an explicit offset is required", func(t *testing.T) {
-		for _, in := range []string{
-			"2026-08-15T14:00:00",
-			"2026-08-15 14:00:00-07:00",
-			"2026-08-15",
-			"",
-			"tomorrow",
-		} {
-			got, err := parseInstantJSON(in, region)
-			if err == nil {
-				t.Errorf("parseInstantJSON(%q) = %v, nil; want an error naming the region timezone", in, got)
-				continue
-			}
-			assertContains(t, fmt.Sprintf("parseInstantJSON(%q) error", in), err.Error(),
-				"RFC 3339", "explicit offset", "region 7", "America/Los_Angeles")
-		}
+		assertNaiveInstantsRejected(t, region)
 	})
 
 	t.Run("offsets are normalized to UTC", func(t *testing.T) {
-		got, err := parseInstantJSON("2026-08-15T14:00:00-07:00", region)
-		if err != nil {
-			t.Fatalf("parseInstantJSON: %v", err)
-		}
-		if want := time.Date(2026, 8, 15, 21, 0, 0, 0, time.UTC); !got.Equal(want) {
-			t.Errorf("= %v, want %v", got, want)
-		}
-		if got.Location() != time.UTC {
-			t.Errorf("location = %v, want UTC", got.Location())
-		}
+		assertOffsetNormalizedToUTC(t, region)
 	})
 
 	t.Run("Z counts as an explicit offset", func(t *testing.T) {
@@ -1555,14 +1544,59 @@ func TestParseInstantJSON(t *testing.T) {
 	// :" -- a sentence that stops mid-clause and reads like a bug in the error
 	// message rather than the fact it is reporting.
 	t.Run("an unconfigured timezone reads as a sentence", func(t *testing.T) {
-		_, err := parseInstantJSON("2026-08-15T14:00:00", regions.Region{ID: 16})
-		if err == nil {
-			t.Fatal("parseInstantJSON accepted a naive datetime")
-		}
-		assertContains(t, "unconfigured-zone error", err.Error(),
-			"RFC 3339", "explicit offset", "region 16 has no configured timezone")
-		if strings.Contains(err.Error(), "configured as :") {
-			t.Errorf("error still has the truncated clause: %v", err)
-		}
+		assertUnconfiguredZoneReadsAsSentence(t)
 	})
+}
+
+// assertNaiveInstantsRejected walks every input that lacks an explicit
+// offset and pins both halves of the contract: the parse fails, and the
+// error names the region timezone the author would otherwise have guessed.
+func assertNaiveInstantsRejected(t *testing.T, region regions.Region) {
+	t.Helper()
+	for _, in := range []string{
+		"2026-08-15T14:00:00",
+		"2026-08-15 14:00:00-07:00",
+		"2026-08-15",
+		"",
+		"tomorrow",
+	} {
+		got, err := parseInstantJSON(in, region)
+		if err == nil {
+			t.Errorf("parseInstantJSON(%q) = %v, nil; want an error naming the region timezone", in, got)
+			continue
+		}
+		assertContains(t, fmt.Sprintf("parseInstantJSON(%q) error", in), err.Error(),
+			"RFC 3339", "explicit offset", "region 7", "America/Los_Angeles")
+	}
+}
+
+// assertOffsetNormalizedToUTC pins that an accepted instant comes back as
+// the same moment expressed in UTC.
+func assertOffsetNormalizedToUTC(t *testing.T, region regions.Region) {
+	t.Helper()
+	got, err := parseInstantJSON("2026-08-15T14:00:00-07:00", region)
+	if err != nil {
+		t.Fatalf("parseInstantJSON: %v", err)
+	}
+	if want := time.Date(2026, 8, 15, 21, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("= %v, want %v", got, want)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC", got.Location())
+	}
+}
+
+// assertUnconfiguredZoneReadsAsSentence pins the wording of the rejection
+// for a region whose timezone was never synced.
+func assertUnconfiguredZoneReadsAsSentence(t *testing.T) {
+	t.Helper()
+	_, err := parseInstantJSON("2026-08-15T14:00:00", regions.Region{ID: 16})
+	if err == nil {
+		t.Fatal("parseInstantJSON accepted a naive datetime")
+	}
+	assertContains(t, "unconfigured-zone error", err.Error(),
+		"RFC 3339", "explicit offset", "region 16 has no configured timezone")
+	if strings.Contains(err.Error(), "configured as :") {
+		t.Errorf("error still has the truncated clause: %v", err)
+	}
 }

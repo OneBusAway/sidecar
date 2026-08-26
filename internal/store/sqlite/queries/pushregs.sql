@@ -33,12 +33,12 @@ DELETE FROM push_registrations WHERE last_seen_at < @cutoff;
 
 -- name: ListPushAudience :many
 -- Pages a region's registrations by id (design spec section 2.3). The
--- predicate (test_device = TRUE OR NOT test_only) selects everyone when
+-- predicate (test_device OR NOT test_only) selects everyone when
 -- test_only is false and only test devices when it is true.
 SELECT * FROM push_registrations
 WHERE region_id = sqlc.arg(region_id)
   AND id > sqlc.arg(after_id)
-  AND (test_device = TRUE OR NOT CAST(sqlc.arg(test_only) AS BOOLEAN))
+  AND (test_device OR NOT CAST(sqlc.arg(test_only) AS BOOLEAN))
 ORDER BY id
 LIMIT sqlc.arg(limit);
 
@@ -48,5 +48,5 @@ LIMIT sqlc.arg(limit);
 -- section 2.3).
 SELECT operating_system, COUNT(*) AS n FROM push_registrations
 WHERE region_id = sqlc.arg(region_id)
-  AND (test_device = TRUE OR NOT CAST(sqlc.arg(test_only) AS BOOLEAN))
+  AND (test_device OR NOT CAST(sqlc.arg(test_only) AS BOOLEAN))
 GROUP BY operating_system;

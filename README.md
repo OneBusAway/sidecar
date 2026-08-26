@@ -141,7 +141,7 @@ against the languages in the snapshot; anything that does not match gets English
 
 #### Admin API
 
-```
+```text
 POST   /api/admin/v1/alerts/{id}/pushes            {"audience":"all"|"test"}
 GET    /api/admin/v1/alerts/{id}/pushes
 DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}

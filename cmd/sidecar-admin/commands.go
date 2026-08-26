@@ -21,6 +21,10 @@ import (
 const (
 	defaultDB         = "./sidecar.db"
 	defaultRegionsURL = "https://regions.onebusaway.org/regions-v3.json"
+
+	// alertPushCmd names the `alert push` subcommand in its flag set and in
+	// every error it returns, so the operator sees the command they typed.
+	alertPushCmd = "alert push"
 )
 
 // run holds main's logic so tests can supply their own streams, arguments,
@@ -805,12 +809,12 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 // first, as it does for every other alert subcommand: `alert push 3
 // --audience test`.
 func alertPush(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
-	id, err := parseAlertIDArg("alert push", args)
+	id, err := parseAlertIDArg(alertPushCmd, args)
 	if err != nil {
 		return err
 	}
 
-	fs := flag.NewFlagSet("alert push", flag.ContinueOnError)
+	fs := flag.NewFlagSet(alertPushCmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	audienceFlag := fs.String("audience", string(alertpush.AudienceAll),
 		"who receives it: all (every registered device in the region) or test (admin-marked test devices only); a test alert always uses test")
@@ -826,7 +830,7 @@ func alertPush(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
 	p, err := enq.Enqueue(ctx, id, audience, now)
 	if err != nil {
-		return wrapAlertErr("alert push", id, err)
+		return wrapAlertErr(alertPushCmd, id, err)
 	}
 	fmt.Fprintf(stdout, "queued push %d for alert %d (audience %s); the sidecar server sends it on its next dispatcher tick (within 15s), or marks it failed if no push transport is configured\n", p.ID, id, p.Audience)
 	return nil

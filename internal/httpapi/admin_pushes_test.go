@@ -100,17 +100,17 @@ func TestAdminCreatePushQueuesAndWakes(t *testing.T) {
 	if v := str(t, got, "audience"); v != "all" {
 		t.Errorf("audience = %q, want %q", v, "all")
 	}
-	if v, ok := got["alert_id"].(float64); !ok || int64(v) != id {
-		t.Errorf("alert_id = %v, want %d", got["alert_id"], id)
+	if v := int64(num(t, got, "alert_id")); v != id {
+		t.Errorf("alert_id = %v, want %d", v, id)
 	}
-	if v, ok := got["region_id"].(float64); !ok || int64(v) != regionPuget {
-		t.Errorf("region_id = %v, want %d", got["region_id"], regionPuget)
+	if v := int64(num(t, got, "region_id")); v != regionPuget {
+		t.Errorf("region_id = %v, want %d", v, regionPuget)
 	}
 	// device_count is the audience size at *send* start, which has not
 	// happened yet: reporting the preview count here would make the SPA claim
 	// devices were reached before a single batch was submitted.
-	if v, ok := got["device_count"].(float64); !ok || v != 0 {
-		t.Errorf("device_count = %v, want 0", got["device_count"])
+	if v := num(t, got, "device_count"); v != 0 {
+		t.Errorf("device_count = %v, want 0", v)
 	}
 	if v := str(t, got, "last_error"); v != "" {
 		t.Errorf("last_error = %q, want the empty string (never null)", v)
@@ -122,6 +122,20 @@ func TestAdminCreatePushQueuesAndWakes(t *testing.T) {
 		t.Errorf("created_at = %q, want the injected clock", v)
 	}
 
+	assertEnglishMessages(t, got)
+	// A push with no failures yet must still be an array, not null: the SPA
+	// iterates it unconditionally.
+	assertEmptyJSONArray(t, got, "failure_reasons")
+
+	if f.waker.calls != 1 {
+		t.Errorf("Wake calls = %d, want 1", f.waker.calls)
+	}
+}
+
+// assertEnglishMessages fails unless the push body carries a messages object
+// with the English copy every push must have.
+func assertEnglishMessages(t *testing.T, got map[string]any) {
+	t.Helper()
 	messages, ok := got["messages"].(map[string]any)
 	if !ok {
 		t.Fatalf("messages = %v (%T), want an object", got["messages"], got["messages"])
@@ -129,14 +143,18 @@ func TestAdminCreatePushQueuesAndWakes(t *testing.T) {
 	if _, ok := messages["en"].(map[string]any); !ok {
 		t.Errorf("messages lacks en: %v", messages)
 	}
-	// A push with no failures yet must still be an array, not null: the SPA
-	// iterates it unconditionally.
-	if reasons, ok := got["failure_reasons"].([]any); !ok || len(reasons) != 0 {
-		t.Errorf("failure_reasons = %v (%T), want []", got["failure_reasons"], got["failure_reasons"])
-	}
+}
 
-	if f.waker.calls != 1 {
-		t.Errorf("Wake calls = %d, want 1", f.waker.calls)
+// assertEmptyJSONArray fails unless key holds an empty JSON array -- never
+// null, which the SPA would not survive iterating.
+func assertEmptyJSONArray(t *testing.T, got map[string]any, key string) {
+	t.Helper()
+	arr, ok := got[key].([]any)
+	if !ok {
+		t.Fatalf("%s = %v (%T), want an array", key, got[key], got[key])
+	}
+	if len(arr) != 0 {
+		t.Errorf("%s = %v, want []", key, arr)
 	}
 }
 
@@ -338,53 +356,72 @@ func TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker(t *testing.T) {
 
 	t.Run("absent without a waker", func(t *testing.T) {
 		t.Parallel()
-		f := newAdminFixtureWithDeps(t, func(d *Deps) { d.AlertPushWaker = nil })
-
-		for _, pattern := range adminRoutes(f.deps) {
-			for _, want := range pushRoutePatterns {
-				if pattern.pattern == want {
-					t.Errorf("route %q is in the table with no waker configured", want)
-				}
-			}
-		}
-		// Not merely unlisted: not reachable either, even with a valid
-		// session, so a hand-written request cannot queue an unsendable push.
-		for _, pattern := range pushRoutePatterns {
-			method, target := concreteRoute(t, pattern)
-			if res := f.do(method, target, "{}"); res.Code != http.StatusNotFound {
-				t.Errorf("%s %s with no waker: status = %d, want 404 (%s)", method, target, res.Code, res.Body)
-			}
-		}
+		assertPushRoutesAbsentWithoutWaker(t)
 	})
 
 	t.Run("listed and session-required when fully wired", func(t *testing.T) {
 		t.Parallel()
-		f := newAdminFixture(t)
-
-		// Membership only. What each route then *does* about a missing
-		// session and a cross-site write is proven for all eighteen routes by
-		// TestAdminRoutes_EveryRouteRequiresASession and
-		// TestAdminRoutes_EveryWriteIsCrossSiteGuarded, which now walk this
-		// same table; the one thing those sweeps cannot notice is a route
-		// quietly dropping out of it, which is what this half pins.
-		listed := map[string]bool{}
-		for _, rt := range adminRoutes(f.deps) {
-			for _, want := range pushRoutePatterns {
-				if rt.pattern != want {
-					continue
-				}
-				listed[want] = true
-				if !rt.requiresSession {
-					t.Errorf("route %q: requiresSession = false, want true", want)
-				}
-			}
-		}
-		for _, want := range pushRoutePatterns {
-			if !listed[want] {
-				t.Errorf("route %q is missing from the table with both deps set", want)
-			}
-		}
+		assertPushRoutesListedAndSessionRequired(t)
 	})
+}
+
+// assertPushRoutesAbsentWithoutWaker pins that a sidecar with no dispatcher
+// neither lists nor serves the push routes: a hand-written request must not
+// be able to queue a push nothing would ever send.
+func assertPushRoutesAbsentWithoutWaker(t *testing.T) {
+	t.Helper()
+	f := newAdminFixtureWithDeps(t, func(d *Deps) { d.AlertPushWaker = nil })
+
+	wanted := pushRoutePatternSet()
+	for _, pattern := range adminRoutes(f.deps) {
+		if wanted[pattern.pattern] {
+			t.Errorf("route %q is in the table with no waker configured", pattern.pattern)
+		}
+	}
+	// Not merely unlisted: not reachable either, even with a valid session.
+	for _, pattern := range pushRoutePatterns {
+		method, target := concreteRoute(t, pattern)
+		if res := f.do(method, target, "{}"); res.Code != http.StatusNotFound {
+			t.Errorf("%s %s with no waker: status = %d, want 404 (%s)", method, target, res.Code, res.Body)
+		}
+	}
+}
+
+// assertPushRoutesListedAndSessionRequired pins membership only. What each
+// route then *does* about a missing session and a cross-site write is proven
+// for all eighteen routes by TestAdminRoutes_EveryRouteRequiresASession and
+// TestAdminRoutes_EveryWriteIsCrossSiteGuarded, which walk this same table;
+// the one thing those sweeps cannot notice is a route quietly dropping out of
+// it, which is what this half pins.
+func assertPushRoutesListedAndSessionRequired(t *testing.T) {
+	t.Helper()
+	f := newAdminFixture(t)
+
+	wanted := pushRoutePatternSet()
+	listed := map[string]bool{}
+	for _, rt := range adminRoutes(f.deps) {
+		if !wanted[rt.pattern] {
+			continue
+		}
+		listed[rt.pattern] = true
+		if !rt.requiresSession {
+			t.Errorf("route %q: requiresSession = false, want true", rt.pattern)
+		}
+	}
+	for _, want := range pushRoutePatterns {
+		if !listed[want] {
+			t.Errorf("route %q is missing from the table with both deps set", want)
+		}
+	}
+}
+
+// pushRoutePatternSet indexes pushRoutePatterns for membership tests.
+func pushRoutePatternSet() map[string]bool {
+	set := make(map[string]bool, len(pushRoutePatterns))
+	for _, p := range pushRoutePatterns {
+		set[p] = true
+	}
+	return set
 }
 
 // TestNewRouter_AlertPushRoutesRequirePushRegs: the enqueue counts the

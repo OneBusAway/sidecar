@@ -11,6 +11,14 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
+// Literals repeated across the alert-push suite: the seeded alert's body,
+// and the two failure formats every fixture step shares.
+const (
+	pushAlertBody    = "Buses skip 3rd Ave."
+	cancelFailFmt    = "Cancel: %v"
+	recordFailureFmt = "RecordFailure: %v"
+)
+
 type newAlertPushStoreFunc func(*testing.T) (alertpush.Repository, alerts.Repository, regions.Repository)
 
 // RunAlertPushRepository exercises an alertpush.Repository against the
@@ -34,7 +42,7 @@ func seedPushAlert(t *testing.T, alertsRepo alerts.Repository, regionsRepo regio
 	putStoretestRegion(t, regionsRepo, regionID)
 	a, err := alertsRepo.Create(context.Background(), alerts.NewAlert{
 		RegionID: regionID, AgencyID: "1", HeaderText: "Route 44 detour",
-		DescriptionText: "Buses skip 3rd Ave.", Cause: "CONSTRUCTION", Effect: "DETOUR",
+		DescriptionText: pushAlertBody, Cause: "CONSTRUCTION", Effect: "DETOUR",
 		Severity: "WARNING", StartTime: base,
 	}, base)
 	if err != nil {
@@ -45,7 +53,7 @@ func seedPushAlert(t *testing.T, alertsRepo alerts.Repository, regionsRepo regio
 
 func newPushFor(a alerts.Alert) alertpush.NewPush {
 	return alertpush.NewPush{AlertID: a.ID, RegionID: a.RegionID, Audience: alertpush.AudienceAll,
-		Messages: alertpush.Messages{"en": {Title: "Route 44 detour", Body: "Buses skip 3rd Ave."}, "es": {Title: "Desvío", Body: "Buses skip 3rd Ave."}}}
+		Messages: alertpush.Messages{"en": {Title: "Route 44 detour", Body: pushAlertBody}, "es": {Title: "Desvío", Body: pushAlertBody}}}
 }
 
 // idsOf projects a push slice down to its ids, so an ordering assertion can
@@ -104,6 +112,40 @@ func completePush(t *testing.T, repo alertpush.Repository, id int64) {
 	}
 }
 
+// advanceCursor runs one AdvanceCursor call, failing the test on a
+// repository error and returning only the conditional-update verdict, which
+// is what every assertion in the suite is actually about.
+func advanceCursor(t *testing.T, repo alertpush.Repository, id, prev, next, submitted int64, now time.Time) bool {
+	t.Helper()
+	ok, err := repo.AdvanceCursor(context.Background(), id, prev, next, submitted, now)
+	if err != nil {
+		t.Fatalf("AdvanceCursor(%d: %d->%d): %v", id, prev, next, err)
+	}
+	return ok
+}
+
+// recordAttempt records one failed send attempt, failing the test on a
+// repository error and returning the new attempt count.
+func recordAttempt(t *testing.T, repo alertpush.Repository, id int64, errMsg string, now time.Time) int64 {
+	t.Helper()
+	n, err := repo.RecordAttempt(context.Background(), id, errMsg, now)
+	if err != nil {
+		t.Fatalf("RecordAttempt(%d, %q): %v", id, errMsg, err)
+	}
+	return n
+}
+
+// markCompleted attempts one terminal transition, failing the test on a
+// repository error and returning whether the row moved.
+func markCompleted(t *testing.T, repo alertpush.Repository, id int64, status alertpush.Status, lastError string, now time.Time) bool {
+	t.Helper()
+	ok, err := repo.MarkCompleted(context.Background(), id, status, lastError, now)
+	if err != nil {
+		t.Fatalf("MarkCompleted(%d, %s): %v", id, status, err)
+	}
+	return ok
+}
+
 func testAlertPushCreateGetRoundTrip(t *testing.T, newStore newAlertPushStoreFunc) {
 	repo, alertsRepo, regionsRepo := newStore(t)
 	ctx := context.Background()
@@ -145,7 +187,7 @@ func testAlertPushCreateRejectsInFlight(t *testing.T, newStore newAlertPushStore
 		t.Errorf("second Create = %v, want ErrInFlight", err)
 	}
 	if err := repo.Cancel(ctx, first.ID, base.Add(time.Minute)); err != nil {
-		t.Fatalf("Cancel: %v", err)
+		t.Fatalf(cancelFailFmt, err)
 	}
 	inflight, inflightErr = repo.InFlightForAlert(ctx, a.ID)
 	if inflightErr != nil {
@@ -171,7 +213,7 @@ func testAlertPushListByAlert(t *testing.T, newStore newAlertPushStoreFunc) {
 	createPush(t, repo, b, base)
 
 	if _, err := repo.RecordFailure(ctx, p2.ID, "tok", "Unregistered", base); err != nil {
-		t.Fatalf("RecordFailure: %v", err)
+		t.Fatalf(recordFailureFmt, err)
 	}
 	list, listErr := repo.ListByAlert(ctx, a.ID)
 	if listErr != nil {
@@ -207,7 +249,7 @@ func testAlertPushClaim(t *testing.T, newStore newAlertPushStoreFunc) {
 	// canceling and recreating so the claim below sees one queued row.
 	claimPushes(t, repo, base, base.Add(-time.Hour))
 	if err := repo.Cancel(ctx, queued.ID, base); err != nil {
-		t.Fatalf("Cancel: %v", err)
+		t.Fatalf(cancelFailFmt, err)
 	}
 	queued = createPush(t, repo, a, base.Add(time.Minute))
 	// Touch `fresh` so it is not stuck.
@@ -217,7 +259,7 @@ func testAlertPushClaim(t *testing.T, newStore newAlertPushStoreFunc) {
 	// A failure on `stale` gives the FailureReasons assertion below something
 	// to find if Claim ever starts attaching the rollup.
 	if _, err := repo.RecordFailure(ctx, stale.ID, "tok", "Unregistered", base); err != nil {
-		t.Fatalf("RecordFailure: %v", err)
+		t.Fatalf(recordFailureFmt, err)
 	}
 
 	now := base.Add(21 * time.Minute)
@@ -263,24 +305,20 @@ func testAlertPushAdvanceCursor(t *testing.T, newStore newAlertPushStoreFunc) {
 	p := createPush(t, repo, a, base)
 
 	// Not sending yet: refused.
-	ok, advanceErr := repo.AdvanceCursor(ctx, p.ID, 0, 10, 5, base)
-	if advanceErr != nil || ok {
-		t.Fatalf("AdvanceCursor on queued = %v, %v; want false", ok, advanceErr)
+	if advanceCursor(t, repo, p.ID, 0, 10, 5, base) {
+		t.Fatal("AdvanceCursor on queued = true, want false")
 	}
 	claimPushes(t, repo, base, base)
 
-	ok, advanceErr = repo.AdvanceCursor(ctx, p.ID, 0, 10, 5, base.Add(time.Second))
-	if advanceErr != nil || !ok {
-		t.Fatalf("AdvanceCursor(0->10) = %v, %v; want true", ok, advanceErr)
+	if !advanceCursor(t, repo, p.ID, 0, 10, 5, base.Add(time.Second)) {
+		t.Fatal("AdvanceCursor(0->10) = false, want true")
 	}
 	// Wrong previous cursor: refused, nothing changes.
-	ok, advanceErr = repo.AdvanceCursor(ctx, p.ID, 0, 20, 5, base.Add(2*time.Second))
-	if advanceErr != nil || ok {
-		t.Fatalf("AdvanceCursor with stale prev = %v, %v; want false", ok, advanceErr)
+	if advanceCursor(t, repo, p.ID, 0, 20, 5, base.Add(2*time.Second)) {
+		t.Fatal("AdvanceCursor with stale prev = true, want false")
 	}
-	ok, advanceErr = repo.AdvanceCursor(ctx, p.ID, 10, 20, 7, base.Add(3*time.Second))
-	if advanceErr != nil || !ok {
-		t.Fatalf("AdvanceCursor(10->20) = %v, %v; want true", ok, advanceErr)
+	if !advanceCursor(t, repo, p.ID, 10, 20, 7, base.Add(3*time.Second)) {
+		t.Fatal("AdvanceCursor(10->20) = false, want true")
 	}
 	got := getPush(t, repo, p.ID)
 	if got.BatchCursor != 20 || got.SubmittedCount != 12 || !got.UpdatedAt.Equal(base.Add(3*time.Second)) {
@@ -288,12 +326,9 @@ func testAlertPushAdvanceCursor(t *testing.T, newStore newAlertPushStoreFunc) {
 	}
 
 	// A committed page resets the failure streak (design spec section 2.6).
-	if _, err := repo.RecordAttempt(ctx, p.ID, "blip", base.Add(3*time.Second)); err != nil {
-		t.Fatalf("RecordAttempt: %v", err)
-	}
-	ok, advanceErr = repo.AdvanceCursor(ctx, p.ID, 20, 25, 1, base.Add(4*time.Second))
-	if advanceErr != nil || !ok {
-		t.Fatalf("AdvanceCursor(20->25) = %v, %v; want true", ok, advanceErr)
+	recordAttempt(t, repo, p.ID, "blip", base.Add(3*time.Second))
+	if !advanceCursor(t, repo, p.ID, 20, 25, 1, base.Add(4*time.Second)) {
+		t.Fatal("AdvanceCursor(20->25) = false, want true")
 	}
 	if got = getPush(t, repo, p.ID); got.Attempts != 0 || got.LastError != "" {
 		t.Errorf("after progress: attempts %d last_error %q, want 0 and empty", got.Attempts, got.LastError)
@@ -301,11 +336,10 @@ func testAlertPushAdvanceCursor(t *testing.T, newStore newAlertPushStoreFunc) {
 
 	// Canceled mid-send: refused, and the cursor stands.
 	if err := repo.Cancel(ctx, p.ID, base.Add(4*time.Second)); err != nil {
-		t.Fatalf("Cancel: %v", err)
+		t.Fatalf(cancelFailFmt, err)
 	}
-	ok, advanceErr = repo.AdvanceCursor(ctx, p.ID, 25, 30, 1, base.Add(5*time.Second))
-	if advanceErr != nil || ok {
-		t.Errorf("AdvanceCursor after cancel = %v, %v; want false", ok, advanceErr)
+	if advanceCursor(t, repo, p.ID, 25, 30, 1, base.Add(5*time.Second)) {
+		t.Error("AdvanceCursor after cancel = true, want false")
 	}
 	if got = getPush(t, repo, p.ID); got.BatchCursor != 25 {
 		t.Errorf("cursor after a refused advance = %d, want 25 (unchanged)", got.BatchCursor)
@@ -362,13 +396,11 @@ func testAlertPushAttemptsAndCompletion(t *testing.T, newStore newAlertPushStore
 	p := createPush(t, repo, a, base)
 	claimPushes(t, repo, base, base)
 
-	n, attemptErr := repo.RecordAttempt(ctx, p.ID, "gorush: 502", base.Add(time.Second))
-	if attemptErr != nil || n != 1 {
-		t.Fatalf("RecordAttempt = %d, %v; want 1", n, attemptErr)
+	if n := recordAttempt(t, repo, p.ID, "gorush: 502", base.Add(time.Second)); n != 1 {
+		t.Fatalf("RecordAttempt = %d, want 1", n)
 	}
-	n, attemptErr = repo.RecordAttempt(ctx, p.ID, "gorush: 503", base.Add(2*time.Second))
-	if attemptErr != nil || n != 2 {
-		t.Errorf("second RecordAttempt = %d, %v; want 2", n, attemptErr)
+	if n := recordAttempt(t, repo, p.ID, "gorush: 503", base.Add(2*time.Second)); n != 2 {
+		t.Errorf("second RecordAttempt = %d, want 2", n)
 	}
 	if _, err := repo.RecordAttempt(ctx, 999, "gorush: 502", base.Add(time.Second)); !errors.Is(err, alertpush.ErrNotFound) {
 		t.Errorf("RecordAttempt(999) = %v, want ErrNotFound", err)
@@ -380,32 +412,28 @@ func testAlertPushAttemptsAndCompletion(t *testing.T, newStore newAlertPushStore
 
 	// Only a terminal status completes a push: a caller bug must never move a
 	// sending row back to queued with completed_at stamped.
-	nonTerminal, nonTerminalErr := repo.MarkCompleted(ctx, p.ID, alertpush.StatusQueued, "", base.Add(3*time.Second))
-	if nonTerminalErr != nil || nonTerminal {
-		t.Errorf("MarkCompleted(queued) = %v, %v; want false", nonTerminal, nonTerminalErr)
+	if markCompleted(t, repo, p.ID, alertpush.StatusQueued, "", base.Add(3*time.Second)) {
+		t.Error("MarkCompleted(queued) = true, want false")
 	}
 	if still := getPush(t, repo, p.ID); still.Status != alertpush.StatusSending || still.CompletedAt != nil {
 		t.Errorf("after a refused MarkCompleted: status %s completed %v, want sending and nil", still.Status, still.CompletedAt)
 	}
 
-	ok, completeErr := repo.MarkCompleted(ctx, p.ID, alertpush.StatusSent, "", base.Add(3*time.Second))
-	if completeErr != nil || !ok {
-		t.Fatalf("MarkCompleted = %v, %v; want true", ok, completeErr)
+	if !markCompleted(t, repo, p.ID, alertpush.StatusSent, "", base.Add(3*time.Second)) {
+		t.Fatal("MarkCompleted = false, want true")
 	}
 	got = getPush(t, repo, p.ID)
 	if got.Status != alertpush.StatusSent || got.CompletedAt == nil || !got.CompletedAt.Equal(base.Add(3*time.Second)) || got.LastError != "" {
 		t.Errorf("after MarkCompleted: %+v", got)
 	}
 	// Terminal rows are never re-completed.
-	ok, completeErr = repo.MarkCompleted(ctx, p.ID, alertpush.StatusFailed, "late", base.Add(4*time.Second))
-	if completeErr != nil || ok {
-		t.Errorf("MarkCompleted on sent row = %v, %v; want false", ok, completeErr)
+	if markCompleted(t, repo, p.ID, alertpush.StatusFailed, "late", base.Add(4*time.Second)) {
+		t.Error("MarkCompleted on sent row = true, want false")
 	}
 	// A queued (not sending) row is not completable either.
 	q := createPush(t, repo, a, base.Add(5*time.Second))
-	ok, completeErr = repo.MarkCompleted(ctx, q.ID, alertpush.StatusFailed, "x", base.Add(6*time.Second))
-	if completeErr != nil || ok {
-		t.Errorf("MarkCompleted on queued row = %v, %v; want false", ok, completeErr)
+	if markCompleted(t, repo, q.ID, alertpush.StatusFailed, "x", base.Add(6*time.Second)) {
+		t.Error("MarkCompleted on queued row = true, want false")
 	}
 }
 
@@ -443,7 +471,7 @@ func testAlertPushCascade(t *testing.T, newStore newAlertPushStoreFunc) {
 	p := createPush(t, repo, a, base)
 
 	if _, err := repo.RecordFailure(ctx, p.ID, "t", "Unregistered", base); err != nil {
-		t.Fatalf("RecordFailure: %v", err)
+		t.Fatalf(recordFailureFmt, err)
 	}
 	if err := alertsRepo.Delete(ctx, a.ID); err != nil {
 		t.Fatalf("Delete alert: %v", err)
