@@ -90,19 +90,9 @@ func NewGorush(baseURL, apnsTopic string, httpClient *http.Client) *Gorush {
 // delivery failures come back asynchronously via the feedback webhook
 // (§6.5).
 func (g *Gorush) Send(ctx context.Context, n Notification) error {
-	gn := gorushNotification{
-		Tokens:   n.Tokens,
-		Platform: int(n.Platform),
-		Title:    n.Title,
-		Message:  n.Message,
-		Priority: "high",
-		Data:     n.Data,
-	}
-	if n.Platform == PlatformIOS {
-		gn.Development = n.Sandbox
-		gn.Topic = g.apnsTopic
-	}
-	_, err := g.post(ctx, map[string]any{"notifications": []gorushNotification{gn}})
+	// Same request as a batch send with no notif_id; the field is omitempty,
+	// so the wire format is unchanged and the inline logs are simply unused.
+	_, err := g.SendBatch(ctx, n, "")
 	return err
 }
 

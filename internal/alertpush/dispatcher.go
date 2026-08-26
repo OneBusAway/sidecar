@@ -156,7 +156,7 @@ func (d *Dispatcher) send(ctx context.Context, p Push) {
 		if len(page) == 0 {
 			break
 		}
-		submitted, err := d.sendPage(ctx, p, page, catalog)
+		submitted, err := d.sendPage(ctx, log, p, page, catalog)
 		if err != nil {
 			d.recordAttempt(ctx, log, p.ID, err)
 			return
@@ -192,7 +192,7 @@ type groupKey struct {
 // error aborts the page; groups already sent in it are re-sent on resume
 // (a bounded duplicate, design spec §2.6). The error is returned undecorated
 // because it is stored verbatim as the operator-visible last_error.
-func (d *Dispatcher) sendPage(ctx context.Context, p Push, page []pushreg.Registration, catalog []string) (int64, error) {
+func (d *Dispatcher) sendPage(ctx context.Context, log *slog.Logger, p Push, page []pushreg.Registration, catalog []string) (int64, error) {
 	groups := make(map[groupKey][]string)
 	var order []groupKey // deterministic send order for logs and tests
 	for _, reg := range page {
@@ -230,7 +230,7 @@ func (d *Dispatcher) sendPage(ctx context.Context, p Push, page []pushreg.Regist
 			// The error names only the push id; RecordFailure never puts a
 			// token in its error strings (design spec §2.8).
 			if _, err := d.Repo.RecordFailure(ctx, p.ID, rej.Token, rej.Reason, d.Now()); err != nil {
-				d.Logger.Warn("alertpush: record inline rejection", "push_id", p.ID, "err", err)
+				log.Warn("alertpush: record inline rejection", "err", err)
 			}
 		}
 		submitted += int64(len(tokens) - len(res.Rejected))
