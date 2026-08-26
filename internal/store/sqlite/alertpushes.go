@@ -249,12 +249,17 @@ func (r *alertPushRepo) MarkCompleted(ctx context.Context, id int64, status aler
 		Status: string(status), LastError: lastError,
 		CompletedAt: sql.NullInt64{Int64: now.Unix(), Valid: true},
 		Now:         now.Unix(), ID: id,
+		// The same value the SET writes, re-bound for the query's
+		// terminal-status allowlist (sqlc types a parameter compared only
+		// against literals as interface{}).
+		TerminalStatus: string(status),
 	})
 	if err != nil {
 		return false, fmt.Errorf("sqlite: complete alert push %d: %w", id, err)
 	}
 	// Zero rows means the push was not sending -- an operator canceled it
-	// mid-flight, or another worker already finished it. Not an error.
+	// mid-flight, or another worker already finished it -- or the caller
+	// asked for a non-terminal status, which the query refuses. Not an error.
 	return rows == 1, nil
 }
 

@@ -170,7 +170,8 @@ type Repository interface {
 	// updated_at is before stuckBefore, to sending (stamping started_at if
 	// unset and updated_at = now) and returns them ascending by id.
 	Claim(ctx context.Context, now, stuckBefore time.Time) ([]Push, error)
-	// SetDeviceCount records the audience size at send start.
+	// SetDeviceCount records the audience size at send start; ErrNotFound if
+	// the push does not exist.
 	SetDeviceCount(ctx context.Context, id, n int64, now time.Time) error
 	// AdvanceCursor moves batch_cursor from prevCursor to newCursor, adds
 	// submitted to submitted_count, and resets attempts/last_error (a page
@@ -185,10 +186,11 @@ type Repository interface {
 	RecordFailure(ctx context.Context, id int64, token, reason string, now time.Time) (bool, error)
 	// RecordAttempt increments attempts, stores errMsg as last_error, stamps
 	// updated_at (so the stuck clock measures from the last attempt), and
-	// returns the new attempt count.
+	// returns the new attempt count; ErrNotFound if the push does not exist.
 	RecordAttempt(ctx context.Context, id int64, errMsg string, now time.Time) (int64, error)
 	// MarkCompleted moves a sending push to a terminal status, stamping
-	// completed_at; false if the push was not sending (already canceled).
+	// completed_at; false if the push was not sending (already canceled) or
+	// status is not one of StatusSent, StatusFailed, or StatusCanceled.
 	MarkCompleted(ctx context.Context, id int64, status Status, lastError string, now time.Time) (bool, error)
 	// Cancel moves a queued or sending push to canceled. ErrNotFound if
 	// absent, ErrTerminal if already completed.

@@ -126,16 +126,25 @@ UPDATE alert_pushes SET
   status = ?1, last_error = ?2,
   completed_at = ?3, updated_at = ?4
 WHERE id = ?5 AND status = 'sending'
+  AND (?6 = 'sent'
+       OR ?6 = 'failed'
+       OR ?6 = 'canceled')
 `
 
 type CompleteAlertPushParams struct {
-	Status      string
-	LastError   string
-	CompletedAt sql.NullInt64
-	Now         int64
-	ID          int64
+	Status         string
+	LastError      string
+	CompletedAt    sql.NullInt64
+	Now            int64
+	ID             int64
+	TerminalStatus interface{}
 }
 
+// Only a terminal status may be written here: the guard makes a caller bug
+// (MarkCompleted with 'queued' or 'sending') a no-op rather than a row that
+// is back in flight with completed_at stamped. The status value is named
+// twice because sqlc's SQLite engine binds each sqlc.arg occurrence
+// separately; the adapter passes the same value to both.
 func (q *Queries) CompleteAlertPush(ctx context.Context, arg CompleteAlertPushParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, completeAlertPush,
 		arg.Status,
@@ -143,6 +152,7 @@ func (q *Queries) CompleteAlertPush(ctx context.Context, arg CompleteAlertPushPa
 		arg.CompletedAt,
 		arg.Now,
 		arg.ID,
+		arg.TerminalStatus,
 	)
 	if err != nil {
 		return 0, err
@@ -186,6 +196,13 @@ type CreateAlertPushParams struct {
 // sqlc.arg() by byte offset into each statement's text, and a multi-byte rune
 // anywhere in a preceding comment shifts those offsets, emitting garbage SQL.
 // Cite the design spec as "section N", not with the section sign.
+//
+// sqlc 1.31.1 also does not extract a parameter written inside an IN (...)
+// list: `sqlc.arg(x) IN ('a', 'b')` compiles, diffs clean, and leaves the
+// literal text "sqlc.arg(x)" in the SQL handed to the driver, which then
+// fails at execution. Spell such an allowlist out as OR comparisons (see
+// CompleteAlertPush) -- the same class of silent bug as the ON CONFLICT one
+// documented at the top of pushregs.sql.
 func (q *Queries) CreateAlertPush(ctx context.Context, arg CreateAlertPushParams) (AlertPush, error) {
 	row := q.db.QueryRowContext(ctx, createAlertPush,
 		arg.AlertID,

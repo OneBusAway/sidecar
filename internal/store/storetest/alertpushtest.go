@@ -240,9 +240,15 @@ func testAlertPushClaim(t *testing.T, newStore newAlertPushStoreFunc) {
 	if reclaimed := getPush(t, repo, stale.ID); reclaimed.StartedAt == nil || !reclaimed.StartedAt.Equal(base) {
 		t.Errorf("reclaimed started_at = %v, want %v (preserved)", reclaimed.StartedAt, base)
 	}
-	// The untouched sending row kept its own updated_at.
-	if untouched := getPush(t, repo, fresh.ID); !untouched.UpdatedAt.Equal(base.Add(20 * time.Minute)) {
-		t.Errorf("fresh sending row updated_at = %v, want %v (not claimed)", untouched.UpdatedAt, base.Add(20*time.Minute))
+	// The untouched sending row kept its own updated_at, and SetDeviceCount
+	// actually wrote the audience size the dispatcher reports.
+	if untouched := getPush(t, repo, fresh.ID); !untouched.UpdatedAt.Equal(base.Add(20*time.Minute)) || untouched.DeviceCount != 1 {
+		t.Errorf("fresh sending row updated_at = %v device_count = %d, want %v and 1 (not claimed)",
+			untouched.UpdatedAt, untouched.DeviceCount, base.Add(20*time.Minute))
+	}
+	// An unknown push is reported, never silently ignored.
+	if err := repo.SetDeviceCount(ctx, 999, 1, base); !errors.Is(err, alertpush.ErrNotFound) {
+		t.Errorf("SetDeviceCount(999) = %v, want ErrNotFound", err)
 	}
 	// Nothing left to claim right away.
 	if again := claimPushes(t, repo, now, now.Add(-alertpush.StuckAfter)); len(again) != 0 {
@@ -357,9 +363,22 @@ func testAlertPushAttemptsAndCompletion(t *testing.T, newStore newAlertPushStore
 	if attemptErr != nil || n != 2 {
 		t.Errorf("second RecordAttempt = %d, %v; want 2", n, attemptErr)
 	}
+	if _, err := repo.RecordAttempt(ctx, 999, "gorush: 502", base.Add(time.Second)); !errors.Is(err, alertpush.ErrNotFound) {
+		t.Errorf("RecordAttempt(999) = %v, want ErrNotFound", err)
+	}
 	got := getPush(t, repo, p.ID)
 	if got.LastError != "gorush: 503" || got.Attempts != 2 || !got.UpdatedAt.Equal(base.Add(2*time.Second)) {
 		t.Errorf("after attempts: %+v", got)
+	}
+
+	// Only a terminal status completes a push: a caller bug must never move a
+	// sending row back to queued with completed_at stamped.
+	nonTerminal, nonTerminalErr := repo.MarkCompleted(ctx, p.ID, alertpush.StatusQueued, "", base.Add(3*time.Second))
+	if nonTerminalErr != nil || nonTerminal {
+		t.Errorf("MarkCompleted(queued) = %v, %v; want false", nonTerminal, nonTerminalErr)
+	}
+	if still := getPush(t, repo, p.ID); still.Status != alertpush.StatusSending || still.CompletedAt != nil {
+		t.Errorf("after a refused MarkCompleted: status %s completed %v, want sending and nil", still.Status, still.CompletedAt)
 	}
 
 	ok, completeErr := repo.MarkCompleted(ctx, p.ID, alertpush.StatusSent, "", base.Add(3*time.Second))
