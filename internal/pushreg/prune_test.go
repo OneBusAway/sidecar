@@ -62,6 +62,14 @@ func (r *fakePruneRepo) DeleteByToken(context.Context, string) (int64, error) {
 	panic("RunPruneLoop must not call DeleteByToken")
 }
 
+func (r *fakePruneRepo) ListAudience(context.Context, int64, bool, int64, int) ([]pushreg.Registration, error) {
+	panic("RunPruneLoop must not call ListAudience")
+}
+
+func (r *fakePruneRepo) CountAudience(context.Context, int64, bool) (pushreg.AudienceCount, error) {
+	panic("RunPruneLoop must not call CountAudience")
+}
+
 // TestRunPruneLoop_PrunesImmediately proves the loop prunes once
 // immediately, before the first tick -- mirroring regions.RunSyncLoop, per
 // the brief, so a long-stopped deployment catches up at boot instead of

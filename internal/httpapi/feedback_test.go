@@ -54,6 +54,14 @@ func (f *fakePushRepo) Prune(ctx context.Context, cutoff time.Time) (int64, erro
 	return f.real.Prune(ctx, cutoff)
 }
 
+func (f *fakePushRepo) ListAudience(ctx context.Context, regionID int64, testOnly bool, afterID int64, limit int) ([]pushreg.Registration, error) {
+	return f.real.ListAudience(ctx, regionID, testOnly, afterID, limit)
+}
+
+func (f *fakePushRepo) CountAudience(ctx context.Context, regionID int64, testOnly bool) (pushreg.AudienceCount, error) {
+	return f.real.CountAudience(ctx, regionID, testOnly)
+}
+
 // feedbackRequest issues a POST to /webhooks/gorush with a JSON body.
 func feedbackRequest(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()

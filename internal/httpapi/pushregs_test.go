@@ -429,6 +429,12 @@ func (s erroringPushRepo) DeleteByToken(context.Context, string) (int64, error) 
 	return 0, s.deleteErr
 }
 func (erroringPushRepo) Prune(context.Context, time.Time) (int64, error) { return 0, nil }
+func (erroringPushRepo) ListAudience(context.Context, int64, bool, int64, int) ([]pushreg.Registration, error) {
+	return nil, nil
+}
+func (erroringPushRepo) CountAudience(context.Context, int64, bool) (pushreg.AudienceCount, error) {
+	return pushreg.AudienceCount{}, nil
+}
 
 func TestRegister_TokenNeverLogged(t *testing.T) {
 	t.Parallel()
