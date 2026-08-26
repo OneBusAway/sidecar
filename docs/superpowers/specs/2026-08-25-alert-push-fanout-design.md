@@ -8,8 +8,9 @@ requirement, §13 retention).
 
 ## 1. Scope
 
-The last required item on the conformance checklist: sending a service alert to the region's
-registered devices as a push notification. Today `internal/pushreg` collects registrations and
+The one required behavior in the spec with no implementation yet (§4 "What gets pushed", §12
+loop table row 3): sending a service alert to the region's registered devices as a push
+notification. Today `internal/pushreg` collects registrations and
 `internal/alerts` authors alerts; nothing joins them. This feature adds:
 
 - a new domain package `internal/alertpush` — the send record, its repository, the copy
@@ -64,8 +65,12 @@ A push is accepted only when:
   `alertpush.ErrInFlight`. Multiple *completed*
   pushes per alert are allowed — re-sending to test devices, then to everyone, is the normal
   verification workflow. (Divergence: OBACloud allows exactly one push per alert.)
-- the audience is non-empty. `422` otherwise, so an operator learns immediately that nobody
-  would receive it rather than finding a `sent` record with zero devices.
+- the audience is non-empty. `409` otherwise (a state conflict like the other two — the admin
+  API's validation errors are `400 {"error"}` and its state conflicts `409 {"error"}`; the rider
+  API's `422` shape from spec §2.5 is out of scope for admin routes per §14), so an operator
+  learns immediately that nobody would receive it rather than finding a `sent` record with
+  zero devices. An audience that empties *between* enqueue and send is the one case a `sent`
+  push legitimately shows `device_count = 0`.
 
 **Audience** is `all` or `test`. A **test alert** (`is_test`) can only ever go to test devices:
 the server forces `test` regardless of the request, matching the feed's rule that riders never
@@ -138,11 +143,17 @@ type BatchSender interface {
 ```
 
 `Notification` is reused unchanged (it already carries `[]Tokens`). `notifID` is stamped on
-the gorush request as `notif_id`; `Gorush.SendBatch` parses the response body
-(`{"success","counts","logs":[{"type","platform","token","message","error"}]}`) and returns
-each `logs` entry as a `Rejection`. In gorush's default async mode `logs` is empty and failures
-arrive via the webhook; in `core.sync` mode inline rejections (bad token, oversized payload)
-appear here and *never* hit the webhook. Both paths are reconciled (§2.8). A non-2xx or
+the gorush request as `notif_id` (gorush 1.22's `LogPushEntry` echoes it in both the sync
+response `logs` and the feedback webhook payload); `Gorush.SendBatch` parses the response body
+(`{"success","counts","logs":[{"type","platform","token","message","error","notif_id"}]}`)
+and returns each entry whose `type == "failed-push"` **and** token is non-empty as a
+`Rejection` — never every entry, because gorush can also log `succeeded-push` rows and
+counting those as failures would mark every submitted token failed. In gorush's default async
+mode (`core.sync=false`, which is what `compose.yaml` and `render.yaml` run — gorush forces it
+off unless the queue engine is local) `logs` is empty and failures arrive via the webhook; in
+`core.sync` mode inline rejections (bad token, oversized payload) appear here and *never* hit
+the webhook. Both paths are reconciled (§2.8). The sync branch is exercised by unit tests
+only; our deployments never produce inline logs. A non-2xx or
 transport error is returned as `error`, as `Send` does. The error string never includes the
 body (gorush echoes tokens in error bodies — same rule as `post`).
 
@@ -166,14 +177,19 @@ One cycle (`RunOnce(ctx)`):
 2. For each claimed push, sequentially (pushes are rare; concurrency buys nothing and would
    interleave two audiences' gorush calls): `send(ctx, push)`.
 
+`send` runs the §2.7 alert re-check **once, at claim time** (not per page): an alert deleted
+or unpublished after that is still sent to the remainder of the audience — the copy was
+snapshotted, and a page-by-page re-read buys little against a 15-second reclaim window.
+
 `send` loop:
 
 ```
+alert = Alerts.Get(alert_id): ErrNotFound → MarkCompleted(canceled); !Published → MarkCompleted(canceled)
 if device_count == 0: device_count = CountAudience(...).Total; persist
 loop:
   page = ListAudience(region, testOnly, batch_cursor, BatchSize)
   if empty: break
-  group page by (platform, NormalizeLocale(locale, catalog), apns_sandbox)
+  group page by (platform, NormalizeLocale(locale, catalog), apns_sandbox && platform == ios)
   for each group:
     result, err = Sender.SendBatch(ctx, Notification{tokens, platform, sandbox, copy[locale]}, notifID(push.ID))
     if err: return err               // retried per §2.7; cursor not advanced
@@ -187,9 +203,21 @@ MarkCompleted(sent, completed_at = now)   // conditional on status = 'sending'
 `AdvanceCursor` is one conditional `UPDATE … WHERE id = ? AND batch_cursor = ? AND status =
 'sending'` that also adds to `submitted_count` and stamps `updated_at`; it reports whether a
 row matched. A `false` therefore means either "another worker advanced it" or "the operator
-canceled it" — both mean stop, so no separate status read is needed between pages. The final
-`sent` transition is likewise conditional on `status = 'sending'` (`MarkCompleted`), so a
-cancel that lands during the last page wins. This is the §12 cursor: a crash between pages resumes at the last committed
+canceled it" — both mean stop, so no separate status read is needed between pages; the
+in-flight page's `submitted` count is deliberately dropped in that case (the row is no longer
+ours to update). The final `sent` transition is likewise conditional on `status = 'sending'`
+(`MarkCompleted`), so a cancel that lands during the last page wins. A successful
+`AdvanceCursor` also resets `attempts` to 0 and `last_error` to `""`, so `MaxAttempts` (§2.7)
+means five *consecutive* failures, not five over the life of a long send.
+
+Grouping normalizes `apns_sandbox` to `false` off iOS: registration writes it for every
+platform (spec §4), so an Android row can carry `true`, and honoring it would split one FCM
+batch into two identical calls.
+
+Pushes are sent sequentially and `RunLoop` drops ticks while a cycle runs, so a push queued
+for alert B during a 100k-device send of alert A starts after A finishes. `Wake()` starts a
+send "at once" only when the loop is idle; that is acceptable for a rare, operator-initiated
+action. This is the §12 cursor: a crash between pages resumes at the last committed
 cursor, re-sending at most one page. A group that errors mid-page re-sends the groups already
 pushed in that page on retry — a bounded duplicate, preferred over losing the rest of the
 audience (OBACloud's stated trade-off).
@@ -206,7 +234,9 @@ letting an operator queue a push that will fail.
 ### 2.7 Failure handling
 
 - **Transport error** (`SendBatch` returned `error`): `Repo.RecordAttempt(push.ID, err, now)`
-  increments `attempts`, stores `last_error`, and — when `attempts >= 5` (`MaxAttempts`) —
+  increments `attempts`, stores `last_error`, stamps `updated_at = now` (so the stuck clock
+  measures from the last attempt, not the last claim), and — when `attempts >= 5`
+  (`MaxAttempts`) —
   moves the row to `failed` with `completed_at` (via `MarkCompleted`). Otherwise the row stays `sending`; the next
   cycle sees it as stuck only after 15 minutes. That is deliberately slow: a gorush outage
   should not be hammered every 15 seconds, and OBACloud's polynomial backoff lands in the same
@@ -220,20 +250,28 @@ letting an operator queue a push that will fail.
 
 ### 2.8 Reconciling failures
 
-`alert_push_failures(push_id, token, reason, created_at, UNIQUE(push_id, token))`.
-`Repo.RecordFailure(ctx, pushID, token, reason, now) (bool, error)` inserts with `ON CONFLICT DO
-NOTHING` and increments `failed_count` **only when a row was inserted**, so gorush replaying
-feedback (it can) does not double-count. Two sources feed it:
+`alert_push_failures(push_id, token_sha256, reason, created_at, UNIQUE(push_id, token_sha256))`.
+`Repo.RecordFailure(ctx, pushID, token, reason, now) (bool, error)` hashes the token
+(hex SHA-256), inserts with `INSERT OR IGNORE`, and increments `failed_count` **only when a
+row was inserted**, so gorush replaying feedback (it can) does not double-count. The two
+statements run in one write transaction and must never be collapsed into `ON CONFLICT DO
+UPDATE SET failed_count = …` — a parameter on the right-hand side of that clause is the sqlc
+bug documented at the top of `queries/pushregs.sql`. Two sources feed it:
 
 1. synchronous `Rejection`s from `SendBatch` (§2.6);
 2. the feedback webhook: when the payload carries `notif_id` with the `alertpush:` prefix and
-   a token, `RecordFailure` is called for that push. The existing terminal-reason registration
-   delete is unchanged and runs regardless. Feedback without a recognized `notif_id` behaves
-   exactly as today. `gorushFeedback` gains a `NotifID string \`json:"notif_id"\`` field.
+   a token, `RecordFailure` is called for that push **before** the handler's existing
+   `!push.IsTerminal(fb.Error)` early return — most gorush bounces are non-terminal
+   (`TooManyRequests`, `Unavailable`, …) and every one of them counts against the push. The
+   existing terminal-reason registration delete is unchanged and runs after. An unknown push
+   id (foreign or stale `notif_id`) is logged and answered `200`, never `500` — gorush does not
+   retry. Feedback without a recognized `notif_id` behaves exactly as today. `gorushFeedback`
+   gains a `NotifID string \`json:"notif_id"\`` field.
 
-A token is stored in `alert_push_failures` because it is the dedup key; the table is
-cascade-deleted with its push and its push with its alert, and the API never returns tokens
-(§2.9 returns only counts and reasons).
+Only a hash of the token is stored: it is the dedup key and nothing reads it back, and a
+plaintext copy would outlive the registration's §13 retention (a token deleted on a terminal
+bounce must not survive in a side table). The table is cascade-deleted with its push and its
+push with its alert; the API returns only counts and reasons (§2.9).
 
 `submitted_count` is *not* decremented on a webhook failure. `submitted` means "accepted by
 gorush"; `failed` means "later reported undeliverable". A device can be in both; the SPA
@@ -241,16 +279,19 @@ shows both numbers, which is more honest than pretending to know end delivery.
 
 ### 2.9 Admin API
 
-All in the `adminRoutes` table, session-required, cross-site guarded. Registered only when
-`Deps.AlertPushes != nil`; `main` sets it only when gorush is configured. The handlers also
-need `Deps.PushRegs` and `Deps.Alerts` (boot-time `missingDeps` panic, matching the other
-blocks) and use `Deps.AlertPushWaker` (interface `{ Wake() }`, optional — nil means rely on
-the ticker) after every insert.
+All in the `adminRoutes` table, session-required, cross-site guarded. `Deps.AlertPushes`
+(the repository) is always set by `main` — the feedback webhook needs it regardless of
+transport. The admin routes are registered only when **both** `Deps.AlertPushes` and
+`Deps.AlertPushWaker` (interface `{ Wake() }`) are non-nil: the waker is the dispatcher, and
+`main` supplies it only when gorush is configured, so it doubles as the "a transport exists"
+signal and the SPA can show "not configured" instead of queueing pushes that can only fail.
+The handlers also need `Deps.PushRegs` and `Deps.Alerts` (boot-time `missingDeps` panic,
+matching the other blocks) and call `Wake()` after every insert.
 
 ```
 POST   /api/admin/v1/alerts/{id}/pushes            {"audience":"all"|"test"}   → 202 pushJSON
 GET    /api/admin/v1/alerts/{id}/pushes                                       → 200 [pushJSON] newest first
-DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}                              → 204 | 409 already terminal | 404
+DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}                              → 204 | 409 already terminal | 404 (unknown, or belongs to another alert)
 GET    /api/admin/v1/alerts/{id}/push_audience                                → 200 audienceJSON
 ```
 
@@ -266,11 +307,13 @@ GET    /api/admin/v1/alerts/{id}/push_audience                                �
 
 `audienceJSON`: `{"all":{"total":N,"ios":N,"android":N},"test":{…},"forced_test":bool}` —
 `forced_test` is true for a test alert so the SPA can hide the audience choice. Timestamps are
-RFC 3339 UTC as elsewhere. `failure_reasons` is grouped in SQL (`GROUP BY reason`), top 10 by
-count.
+RFC 3339 UTC as elsewhere; `last_error` is always a string (`""` when none). `failure_reasons`
+is grouped in SQL (`GROUP BY reason`), top 10 by count, and is present on both the list and
+the single-push shapes (`ListByAlert` attaches it per row — an alert has a handful of pushes,
+so the extra query per row is negligible and the SPA's history table can show reasons).
 
-Errors follow §2.5 of the spec (`{"error": "..."}`) with the codes in §2.2. `pushId` not
-belonging to `{id}` is `404`.
+Errors are `{"error": "..."}` with the codes in §2.2 (`400` for a malformed body or
+audience value). `pushId` not belonging to `{id}` is `404`.
 
 ### 2.10 Admin SPA
 
@@ -284,8 +327,9 @@ The alert detail page (`web/admin/src/routes/alerts/[id]/+page.svelte`) gains a
   the button.
 - Audience radio (`Everyone (N devices) / Test devices (M)`) hidden when `forced_test`; the
   Send button shows the count and asks `confirm()` (the same pattern as delete).
-- History table: status badge, audience, sent/failed/of N, started, last error, and a Cancel
-  button on `queued`/`sending` rows.
+- History table: status badge, audience, sent/failed/of N (tolerating `sent > N` after a
+  resumed page's bounded duplicate, and showing "pending" while N is 0), started, last error,
+  failure reasons, and a Cancel button on `queued`/`sending` rows.
 - While any push is `queued`/`sending` the page polls `/pushes` every 3 seconds
   (`setInterval` cleared on destroy and when nothing is in flight).
 
@@ -301,19 +345,19 @@ sidecar-admin alert pushes <id>                       # lists that alert's pushe
 ```
 
 `alert push` applies the same preconditions as the API (published, none in flight, non-empty
-audience, test alert forces `test`) through a shared `alertpush.Request` validator so the two
-surfaces cannot drift. It prints `queued push N; the sidecar server sends it within 15 seconds
-of its next dispatcher tick` because the CLI never talks to the running server. Both commands
-take `--db` like the rest.
+audience, test alert forces `test`) through the shared `alertpush.Enqueuer` so the two
+surfaces cannot drift. It prints `queued push N for alert M (audience …); the sidecar server
+sends it on its next dispatcher tick (within 15s), or marks it failed if no push transport is
+configured` because the CLI never talks to the running server. Both commands take `--db` like
+the rest.
 
 ### 2.12 Wiring
 
 `cmd/sidecar/main.go`: build `alertpush.Dispatcher` after the gorush client (sender nil when
-unconfigured, §2.6), `go d.RunLoop(ctx, alertPushInterval)` (15s), and set
-`Deps.AlertPushes = store.AlertPushes()` + `Deps.AlertPushWaker = d` only when `gorushURL != ""`.
-`Store.AlertPushes()` accessor in the sqlite adapter. The webhook block in `NewRouter` passes
-`Deps.AlertPushes` through regardless of transport (a webhook can arrive after a restart that
-dropped the transport flag).
+unconfigured, §2.6), `go d.RunLoop(ctx, alertPushInterval)` (15s), always set
+`Deps.AlertPushes = store.AlertPushes()`, and set `Deps.AlertPushWaker = d` only when
+`gorushURL != ""` (§2.9). `Store.AlertPushes()` accessor in the sqlite adapter. The webhook
+therefore keeps accounting after a restart that dropped the transport flag.
 
 ## 3. Data model
 
@@ -345,12 +389,12 @@ CREATE UNIQUE INDEX alert_pushes_inflight_idx ON alert_pushes (alert_id)
   WHERE status IN ('queued', 'sending');
 
 CREATE TABLE alert_push_failures (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  push_id    INTEGER NOT NULL REFERENCES alert_pushes(id) ON DELETE CASCADE,
-  token      TEXT    NOT NULL,
-  reason     TEXT    NOT NULL,
-  created_at INTEGER NOT NULL,
-  UNIQUE (push_id, token)
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id      INTEGER NOT NULL REFERENCES alert_pushes(id) ON DELETE CASCADE,
+  token_sha256 TEXT    NOT NULL,   -- hex; never the token itself (§2.8)
+  reason       TEXT    NOT NULL,
+  created_at   INTEGER NOT NULL,
+  UNIQUE (push_id, token_sha256)
 );
 
 -- The audience query pages by id within a region (spec §12 cursor).
@@ -365,13 +409,13 @@ alert so the audience query and the webhook never need a join to `alerts`.
 ```go
 Create(ctx, in NewPush, now) (Push, error)
 Get(ctx, id) (Push, error)                       // includes FailureReasons
-ListByAlert(ctx, alertID) ([]Push, error)        // newest first
+ListByAlert(ctx, alertID) ([]Push, error)        // newest first, FailureReasons attached per row
 InFlightForAlert(ctx, alertID) (bool, error)
 Claim(ctx, now, stuckBefore time.Time) ([]Push, error)
 SetDeviceCount(ctx, id, n, now) error
-AdvanceCursor(ctx, id, prevCursor, newCursor int64, submitted int64, now) (bool, error)
+AdvanceCursor(ctx, id, prevCursor, newCursor int64, submitted int64, now) (bool, error) // also resets attempts/last_error
 RecordFailure(ctx, id int64, token, reason string, now) (bool, error)
-RecordAttempt(ctx, id, errMsg string, now) (attempts int64, error)
+RecordAttempt(ctx, id, errMsg string, now) (attempts int64, error) // stamps updated_at
 MarkCompleted(ctx, id, status Status, lastError string, now) (bool, error) // sent|failed|canceled, only while sending; stamps completed_at
 Cancel(ctx, id, now) error                       // queued|sending → canceled; ErrNotFound / ErrTerminal
 ```
@@ -382,9 +426,11 @@ insert-then-increment run in one write transaction.
 
 ## 4. Testing
 
-- **storetest**: `RunAlertPushRepository` (create/get round trip, in-flight detection, claim
-  is exclusive and reclaims stuck rows, `AdvanceCursor` refuses a moved cursor and a
-  non-sending status, `RecordFailure` dedups and counts once, cascade on alert delete) and
+- **storetest**: `RunAlertPushRepository` (create/get round trip, in-flight detection and the
+  partial unique index, claim is exclusive and reclaims stuck rows, `AdvanceCursor` refuses a
+  moved cursor and a non-sending status and resets attempts, `RecordFailure` dedups and counts
+  once and stores only a hash, `Cancel` transitions, cascade of pushes and failures on alert
+  delete) and
   `ListAudience`/`CountAudience` cases added to `RunPushRegistrationRepository` (paging by id,
   region scoping, test-only filter, platform split). Instants derive from `base`.
 - **alertpush** unit tests with a fake `BatchSender` recording every call: grouping keys
@@ -393,12 +439,15 @@ insert-then-increment run in one write transaction.
   re-sends only the failed page, cancel between pages stops, stuck reclaim, sync rejections
   counted, nil sender fails the push, `MaxAttempts` marks failed. Each test is mutated-to-fail
   once before commit (repo rule).
-- **push**: `SendBatch` posts `notif_id`, parses `logs` into rejections, tolerates an empty or
-  non-JSON body, and never embeds the body in an error.
+- **push**: `SendBatch` posts `notif_id`, parses only `failed-push` log entries with a token
+  into rejections (a `succeeded-push` entry is ignored), tolerates an empty or non-JSON body,
+  and never embeds the body in an error.
 - **httpapi**: each route in the table (auth-wrapped assertion already enumerates the table),
-  preconditions → 409/422, forced test audience, cancel on terminal → 409, `pushId` from
-  another alert → 404, `Wake` called after create; feedback webhook with `notif_id` records the
-  failure and still deletes on terminal reasons; replay does not double count.
+  routes absent when `Deps.AlertPushWaker` is nil, preconditions → 409/400, forced test
+  audience, cancel on terminal → 409, `pushId` from another alert → 404, `Wake` called after
+  create; feedback webhook with `notif_id` records a **non-terminal** failure without deleting
+  the registration, records a terminal one and deletes, ignores an unknown push id with 200;
+  replay does not double count.
 - **cmd/sidecar-admin**: `alert push` / `alert pushes` happy path and each precondition.
 - **web/admin**: vitest for `lib/pushes.ts`.
 - `make check` (including `test-tz`) green.
@@ -406,5 +455,6 @@ insert-then-increment run in one write transaction.
 ## 5. Documentation
 
 README: a "Sending alerts as push notifications" subsection under *Service alerts* (admin
-routes, CLI, the copy rules, the async/sync gorush note, what the counts mean), and the new
-CLI subcommands in the `sidecar-admin` table. `.env.example` needs no new keys.
+routes, CLI, the copy rules, the async/sync gorush note, what the counts mean, that failure
+rows hold only token hashes and die with the alert), and the new CLI subcommands in the
+`sidecar-admin` table. `.env.example` needs no new keys.
