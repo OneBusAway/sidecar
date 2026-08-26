@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
@@ -192,7 +193,7 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "", nil)
 
 	if deps.FailDelay != 500*time.Millisecond {
 		t.Errorf("Deps.FailDelay = %v, want 500ms", deps.FailDelay)
@@ -215,7 +216,7 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "", nil)
 
 	if deps.Auth == nil {
 		t.Error("Deps.Auth = nil, want store.Auth()")
@@ -250,7 +251,7 @@ func TestBuildDeps_WiresPushAndAlarms(t *testing.T) {
 	t.Parallel()
 
 	store := sqlitetest.Open(t)
-	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
+	deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "", nil)
 
 	if deps.PushRegs == nil {
 		t.Error("Deps.PushRegs = nil, want store.PushRegs()")
@@ -278,7 +279,7 @@ func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
 	t.Run("set when a key is configured", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "", nil)
 		if !deps.OBADefaultKeySet {
 			t.Error("Deps.OBADefaultKeySet = false, want true when --oba-api-key is non-empty")
 		}
@@ -287,7 +288,7 @@ func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
 	t.Run("unset when no key is configured", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "", "", "", nil)
 		if deps.OBADefaultKeySet {
 			t.Error("Deps.OBADefaultKeySet = true, want false when --oba-api-key is empty")
 		}
@@ -306,7 +307,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 	t.Run("Vehicles is always wired", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "", "", nil)
 		if deps.Vehicles == nil {
 			t.Fatal("Deps.Vehicles = nil, want a *vehicles.Service")
 		}
@@ -316,7 +317,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "", "", "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "", "", "", nil)
 		if !strings.Contains(buf.String(), "oba-api-key") {
 			t.Errorf("log output = %q, want a warning mentioning oba-api-key", buf.String())
 		}
@@ -329,7 +330,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 		// Every optional setting supplied, so a warning about one of the
 		// others cannot contaminate an assertion scoped to the OBA-key one:
 		// this asserts a fully configured deployment is silent.
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key", "a-real-pirate-key", "a-real-secret")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "a-real-key", "a-real-pirate-key", "a-real-secret", nil)
 		if buf.Len() != 0 {
 			t.Errorf("log output = %q, want nothing logged when a key is configured", buf.String())
 		}
@@ -349,7 +350,7 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 	t.Run("Weather is always wired", func(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
-		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "some-pirate-key", "")
+		deps := buildDeps(store, slog.New(slog.DiscardHandler), "some-key", "some-pirate-key", "", nil)
 		if deps.Weather == nil {
 			t.Fatal("Deps.Weather = nil, want a *weather.Service")
 		}
@@ -359,7 +360,7 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "", "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "", "", nil)
 		if !strings.Contains(buf.String(), "pirate-weather-key") {
 			t.Errorf("log output = %q, want a warning mentioning pirate-weather-key", buf.String())
 		}
@@ -369,11 +370,44 @@ func TestBuildDeps_WiresWeather(t *testing.T) {
 		t.Parallel()
 		store := sqlitetest.Open(t)
 		var buf bytes.Buffer
-		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "a-real-pirate-key", "")
+		buildDeps(store, slog.New(slog.NewTextHandler(&buf, nil)), "some-key", "a-real-pirate-key", "", nil)
 		if strings.Contains(buf.String(), "pirate-weather-key") {
 			t.Errorf("log output = %q, want no pirate-weather-key warning when a key is configured", buf.String())
 		}
 	})
+}
+
+// TestBuildDepsWiresAlertPushWakerOnlyWithTransport pins the asymmetry in
+// the alert push wiring (design spec §2.12): Deps.AlertPushes is set on
+// every deployment -- the feedback webhook keeps accounting failures against
+// a push the CLI enqueued even after a restart that dropped the gorush flag
+// -- while Deps.AlertPushWaker is what gates the admin routes on a transport
+// actually existing (httpapi.NewRouter registers them only when both are
+// non-nil). Wiring the waker unconditionally would compile, lint, and pass
+// every httpapi test while letting the SPA queue pushes that can only ever
+// fail; nothing outside this test would notice.
+func TestBuildDepsWiresAlertPushWakerOnlyWithTransport(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	logger := slog.New(slog.DiscardHandler)
+
+	without := buildDeps(store, logger, "", "", "", nil)
+	if without.AlertPushes == nil {
+		t.Error("Deps.AlertPushes = nil, want store.AlertPushes() even without a transport (the webhook keeps accounting)")
+	}
+	if without.AlertPushWaker != nil {
+		t.Error("Deps.AlertPushWaker set without a transport; the admin push routes must not be registered")
+	}
+
+	d := &alertpush.Dispatcher{}
+	with := buildDeps(store, logger, "", "", "", d)
+	if with.AlertPushes == nil {
+		t.Error("Deps.AlertPushes = nil, want store.AlertPushes()")
+	}
+	if with.AlertPushWaker != alertpush.Waker(d) {
+		t.Errorf("Deps.AlertPushWaker = %v, want the dispatcher passed in", with.AlertPushWaker)
+	}
 }
 
 // TestCacheBudgetsNestCorrectly pins the ordering the comment above the
