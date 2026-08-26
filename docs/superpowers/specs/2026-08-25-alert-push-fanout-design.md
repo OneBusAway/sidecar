@@ -58,7 +58,10 @@ A push is accepted only when:
 
 - the alert is **published** (feed and push are two views of the same authored content, §3;
   OBACloud cancels a send whose alert is a draft). `409` otherwise.
-- no other push for that alert is `queued` or `sending`. `409` otherwise. Multiple *completed*
+- no other push for that alert is `queued` or `sending`. `409` otherwise. A partial unique
+  index (`alert_pushes_inflight_idx`, §3) makes this race-free: two concurrent sends both pass
+  the read check but only one insert succeeds; the adapter maps the constraint failure to
+  `alertpush.ErrInFlight`. Multiple *completed*
   pushes per alert are allowed — re-sending to test devices, then to everyone, is the normal
   verification workflow. (Divergence: OBACloud allows exactly one push per alert.)
 - the audience is non-empty. `422` otherwise, so an operator learns immediately that nobody
@@ -94,7 +97,8 @@ Page size: 500 (`alertpush.BatchSize`), OBACloud's value.
 ### 2.4 Copy and localization
 
 Copy is snapshotted into the row at creation (`messages` column, JSON
-`{"": {"title","body"}, "es": {...}}`; the empty key is English). Snapshotting means an edit
+`{"en": {"title","body"}, "es": {...}}`; English is always present under `en`, which can
+never collide with a translation because `alert_translations` forbids `language = 'en'`). Snapshotting means an edit
 to the alert during a send does not change what riders receive mid-audience, and the record
 shows what was actually sent.
 
@@ -113,8 +117,9 @@ shows what was actually sent.
   not for the transport.
 
 At fan-out time each registration's locale is resolved with the existing
-`pushreg.NormalizeLocale(reg.Locale, catalog)` where `catalog` is the message map's non-empty
-keys. `""` means English. This is the consumer that package's doc comment promised.
+`pushreg.NormalizeLocale(reg.Locale, catalog)` where `catalog` is the message map's keys
+other than `en`. `""` (no match) means English, so `Messages.For(locale)` maps `""` to `en`.
+This is the consumer that package's doc comment promised.
 
 The push carries **no `data` payload.** The iOS app displays the message as an alert when
 there is no custom key (`PushService.notificationReceivedHandler`); OBACloud sends none.
@@ -175,14 +180,16 @@ loop:
     for each rejection: Repo.RecordFailure(push.ID, token, reason)  (§2.8)
     submitted += len(group) - len(result.Rejected)
   ok = Repo.AdvanceCursor(push.ID, prevCursor=batch_cursor, newCursor=page[last].ID, submitted, now)
-  if !ok: log "cursor moved underneath us; yielding"; return nil   // another worker owns it
-  status = Repo.Get(push.ID).Status; if status != sending: return nil  // canceled mid-send
-mark sent (completed_at = now)
+  if !ok: log "push no longer ours (advanced elsewhere or canceled); yielding"; return nil
+MarkCompleted(sent, completed_at = now)   // conditional on status = 'sending'
 ```
 
 `AdvanceCursor` is one conditional `UPDATE … WHERE id = ? AND batch_cursor = ? AND status =
 'sending'` that also adds to `submitted_count` and stamps `updated_at`; it reports whether a
-row matched. This is the §12 cursor: a crash between pages resumes at the last committed
+row matched. A `false` therefore means either "another worker advanced it" or "the operator
+canceled it" — both mean stop, so no separate status read is needed between pages. The final
+`sent` transition is likewise conditional on `status = 'sending'` (`MarkCompleted`), so a
+cancel that lands during the last page wins. This is the §12 cursor: a crash between pages resumes at the last committed
 cursor, re-sending at most one page. A group that errors mid-page re-sends the groups already
 pushed in that page on retry — a bounded duplicate, preferred over losing the rest of the
 audience (OBACloud's stated trade-off).
@@ -200,15 +207,15 @@ letting an operator queue a push that will fail.
 
 - **Transport error** (`SendBatch` returned `error`): `Repo.RecordAttempt(push.ID, err, now)`
   increments `attempts`, stores `last_error`, and — when `attempts >= 5` (`MaxAttempts`) —
-  moves the row to `failed` with `completed_at`. Otherwise the row stays `sending`; the next
+  moves the row to `failed` with `completed_at` (via `MarkCompleted`). Otherwise the row stays `sending`; the next
   cycle sees it as stuck only after 15 minutes. That is deliberately slow: a gorush outage
   should not be hammered every 15 seconds, and OBACloud's polynomial backoff lands in the same
   range by the third attempt. The push resumes from its cursor.
 - **Store error** while sending: logged; the row stays `sending` and is reclaimed as stuck.
   Store failures are not counted as attempts — they say nothing about the transport.
 - **Alert deleted or unpublished** between creation and send: `Alerts.Get` returns
-  `ErrNotFound` (cascade) or an unpublished alert → the push is marked `canceled` with
-  `last_error` naming the cause. Copy was snapshotted, so a deleted alert's row is only
+  `ErrNotFound` (cascade) or an unpublished alert → the push is marked `canceled` (via
+  `MarkCompleted`) with `last_error` naming the cause. Copy was snapshotted, so a deleted alert's row is only
   reached via the cascade in practice; the check exists for unpublish.
 
 ### 2.8 Reconciling failures
@@ -252,7 +259,7 @@ GET    /api/admin/v1/alerts/{id}/push_audience                                �
 ```json
 {"id":7,"alert_id":3,"region_id":1,"audience":"all","status":"sending",
  "device_count":1200,"submitted_count":500,"failed_count":2,"attempts":1,
- "last_error":null,"messages":{"":{"title":"…","body":"…"},"es":{"title":"…","body":"…"}},
+ "last_error":"","messages":{"en":{"title":"…","body":"…"},"es":{"title":"…","body":"…"}},
  "failure_reasons":[{"reason":"Unregistered","count":2}],
  "created_at":"…","started_at":null,"completed_at":null}
 ```
@@ -333,6 +340,9 @@ CREATE TABLE alert_pushes (
 );
 CREATE INDEX alert_pushes_alert_idx  ON alert_pushes (alert_id, id);
 CREATE INDEX alert_pushes_status_idx ON alert_pushes (status, updated_at);
+-- At most one queued/sending push per alert (§2.2).
+CREATE UNIQUE INDEX alert_pushes_inflight_idx ON alert_pushes (alert_id)
+  WHERE status IN ('queued', 'sending');
 
 CREATE TABLE alert_push_failures (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,8 +372,8 @@ SetDeviceCount(ctx, id, n, now) error
 AdvanceCursor(ctx, id, prevCursor, newCursor int64, submitted int64, now) (bool, error)
 RecordFailure(ctx, id int64, token, reason string, now) (bool, error)
 RecordAttempt(ctx, id, errMsg string, now) (attempts int64, error)
-SetStatus(ctx, id, status Status, lastError string, now) error   // terminal transitions; stamps completed_at
-Cancel(ctx, id, now) error                       // ErrNotFound / ErrTerminal
+MarkCompleted(ctx, id, status Status, lastError string, now) (bool, error) // sent|failed|canceled, only while sending; stamps completed_at
+Cancel(ctx, id, now) error                       // queued|sending → canceled; ErrNotFound / ErrTerminal
 ```
 
 Queries live in `queries/alertpushes.sql` (sqlc; every parameter `sqlc.arg`, per the
