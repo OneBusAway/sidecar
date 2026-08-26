@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
@@ -574,5 +575,132 @@ func TestFeedbackNonTerminalKeepsLiveActivity(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if list, _ := store.LiveActivities().List(context.Background()); len(list) != 1 {
 		t.Errorf("non-terminal reason must not delete: %+v", list)
+	}
+}
+
+// TestFeedbackRecordsAlertPushFailureByNotifID is the §2.8 correlation: a
+// bounce carrying the notif_id the fan-out stamped on its batch counts
+// against that push, whether or not the reason is terminal. Most gorush
+// bounces are non-terminal, so accounting that only ran on the terminal path
+// would report a near-zero failure count for a send that mostly failed.
+func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	alertID := publishAlert(t, store.Alerts(), 1, "Route 40 detour", false)
+
+	for _, token := range []string{"tok", "tok2"} {
+		if err := store.PushRegs().Upsert(ctx, pushreg.Upsert{
+			RegionID: 1, Token: token, OperatingSystem: "ios",
+		}, base); err != nil {
+			t.Fatalf("upsert %q: %v", token, err)
+		}
+	}
+
+	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
+	p, err := enq.Enqueue(ctx, alertID, alertpush.AudienceAll, base)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs:    store.PushRegs(),
+		AlertPushes: store.AlertPushes(),
+		Regions:     store.Regions(),
+		Now:         func() time.Time { return base },
+		Logger:      slog.New(slog.DiscardHandler),
+	})
+
+	failedCount := func() int64 {
+		t.Helper()
+		got, getErr := store.AlertPushes().Get(ctx, p.ID)
+		if getErr != nil {
+			t.Fatalf("get push %d: %v", p.ID, getErr)
+		}
+		return got.FailedCount
+	}
+
+	notifID := alertpush.NotifID(p.ID)
+	terminal := fmt.Sprintf(
+		`{"type":"failed-push","platform":"ios","token":"tok","error":"Unregistered","notif_id":%q}`, notifID)
+	if rec := feedbackRequest(t, h, terminal); rec.Code != http.StatusOK {
+		t.Fatalf("terminal feedback: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := failedCount(); got != 1 {
+		t.Errorf("failed_count after one terminal bounce = %d, want 1", got)
+	}
+	// The accounting is additional to the prune, not instead of it.
+	if _, getErr := store.PushRegs().Get(ctx, 1, "tok"); !errors.Is(getErr, pushreg.ErrNotFound) {
+		t.Errorf("registration survived a terminal bounce: err = %v, want ErrNotFound", getErr)
+	}
+
+	// gorush can replay its feedback; a replayed token must not be counted
+	// twice or the failure total would drift above the audience size.
+	if rec := feedbackRequest(t, h, terminal); rec.Code != http.StatusOK {
+		t.Fatalf("replayed feedback: status = %d, want 200", rec.Code)
+	}
+	if got := failedCount(); got != 1 {
+		t.Errorf("failed_count after a replay = %d, want 1", got)
+	}
+
+	// A non-terminal reason still counts against the push, and still leaves
+	// the registration alone: the token is alive, the delivery is not.
+	nonTerminal := fmt.Sprintf(
+		`{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests","notif_id":%q}`, notifID)
+	if rec := feedbackRequest(t, h, nonTerminal); rec.Code != http.StatusOK {
+		t.Fatalf("non-terminal feedback: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := failedCount(); got != 2 {
+		t.Errorf("failed_count after a non-terminal bounce = %d, want 2", got)
+	}
+	if _, getErr := store.PushRegs().Get(ctx, 1, "tok2"); getErr != nil {
+		t.Errorf("non-terminal bounce deleted the registration: %v", getErr)
+	}
+
+	// A stale or foreign notif_id is a dead end, not a 500: gorush does not
+	// retry, so answering 500 would only lose the prune signal in the same
+	// payload.
+	unknown := `{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests","notif_id":"alertpush:999999"}`
+	if rec := feedbackRequest(t, h, unknown); rec.Code != http.StatusOK {
+		t.Fatalf("unknown notif_id: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := failedCount(); got != 2 {
+		t.Errorf("failed_count after an unknown notif_id = %d, want 2 (nothing recorded)", got)
+	}
+
+	// Feedback with no notif_id behaves exactly as it did before §2.8.
+	plain := `{"type":"failed-push","platform":"ios","token":"tok2","error":"TooManyRequests"}`
+	if rec := feedbackRequest(t, h, plain); rec.Code != http.StatusOK {
+		t.Fatalf("no notif_id: status = %d, want 200", rec.Code)
+	}
+	if got := failedCount(); got != 2 {
+		t.Errorf("failed_count after feedback with no notif_id = %d, want 2", got)
+	}
+}
+
+// TestFeedbackAccountingWithoutAlertPushes: a deployment with no alert push
+// repository wired (a feed-only or Live-Activities-only sidecar) must still
+// answer the webhook normally rather than nil-deref on a notif_id it has no
+// table for.
+func TestFeedbackAccountingWithoutAlertPushes(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	if err := store.PushRegs().Upsert(context.Background(), pushreg.Upsert{
+		RegionID: 1, Token: "tok", OperatingSystem: "ios",
+	}, base); err != nil {
+		t.Fatal(err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs: store.PushRegs(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler),
+	})
+	body := `{"type":"failed-push","platform":"ios","token":"tok","error":"Unregistered","notif_id":"alertpush:1"}`
+	if rec := feedbackRequest(t, h, body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.PushRegs().Get(context.Background(), 1, "tok"); !errors.Is(err, pushreg.ErrNotFound) {
+		t.Errorf("terminal prune stopped working: err = %v, want ErrNotFound", err)
 	}
 }

@@ -39,9 +39,24 @@ type adminFixture struct {
 	handler http.Handler
 	store   *sqlite.Store
 	cookie  *http.Cookie
+	// deps is the exact Deps the router was built from, so a test can walk
+	// adminRoutes(f.deps) and know it is looking at the same table this
+	// fixture's handler serves.
+	deps Deps
+	// waker records the dispatcher pokes the alert push routes send.
+	waker *recordingWaker
 }
 
 func newAdminFixture(t *testing.T) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWithDeps(t, nil)
+}
+
+// newAdminFixtureWithDeps is newAdminFixture with a hook that adjusts Deps
+// just before the router is built. It exists for the tests that need a
+// deliberately partial wiring -- an alert push repository with no transport,
+// say -- and still want a real store and a real logged-in session.
+func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
 	t.Helper()
 
 	store := sqlitetest.Open(t)
@@ -69,15 +84,23 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		t.Fatalf("create admin user: %v", err)
 	}
 
-	f := &adminFixture{store: store}
-	f.handler = NewRouter(Deps{
-		Alerts:  store.Alerts(),
-		Regions: store.Regions(),
-		Auth:    store.Auth(),
-		Now:     func() time.Time { return testNow },
-		Logger:  discardLogger(),
-		Sleep:   func(time.Duration) {},
-	})
+	f := &adminFixture{store: store, waker: &recordingWaker{}}
+	deps := Deps{
+		Alerts:         store.Alerts(),
+		Regions:        store.Regions(),
+		Auth:           store.Auth(),
+		Now:            func() time.Time { return testNow },
+		Logger:         discardLogger(),
+		Sleep:          func(time.Duration) {},
+		PushRegs:       store.PushRegs(),
+		AlertPushes:    store.AlertPushes(),
+		AlertPushWaker: f.waker,
+	}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	f.deps = deps
+	f.handler = NewRouter(deps)
 	f.cookie = adminLogin(t, f.handler)
 	return f
 }
@@ -385,6 +408,7 @@ func concreteRoute(t *testing.T, pattern string) (method, target string) {
 	}
 	path = strings.ReplaceAll(path, "{id}", "1")
 	path = strings.ReplaceAll(path, "{lang}", "es")
+	path = strings.ReplaceAll(path, "{pushId}", "1")
 	if strings.ContainsAny(path, "{}") {
 		t.Fatalf("route pattern %q has a wildcard this test does not know how to fill", pattern)
 	}

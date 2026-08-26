@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/push"
 )
 
@@ -14,13 +15,17 @@ import (
 // so this is an abuse ceiling rather than a normal-volume limit.
 const feedbackLimitPerMinute = 600
 
-// gorushFeedback is gorush's failed-push webhook payload. Only token and
-// error matter here; the rest is logged context.
+// gorushFeedback is gorush's failed-push webhook payload. Token, error and
+// notif_id matter here; the rest is logged context.
 type gorushFeedback struct {
 	Type     string `json:"type"`
 	Platform string `json:"platform"`
 	Token    string `json:"token"`
 	Error    string `json:"error"`
+	// NotifID is echoed back from the send. The alert push fan-out stamps
+	// alertpush.NotifID on every batch, which is what lets an asynchronous
+	// bounce be counted against the push that caused it (design spec §2.8).
+	NotifID string `json:"notif_id"`
 }
 
 type feedbackHandler struct{ deps Deps }
@@ -42,6 +47,7 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	h.recordAlertPushFailure(r, fb)
 	if fb.Token == "" || !push.IsTerminal(fb.Error) {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -82,6 +88,36 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// recordAlertPushFailure counts one bounce against the push that sent it
+// (design spec §2.8).
+//
+// It runs *before* receive's terminal-reason early return on purpose: most
+// gorush bounces are non-terminal (TooManyRequests, Unavailable, ...) and
+// every one of them counts against the push, so accounting that only ran on
+// the terminal path would report a near-zero failure count for a send that
+// mostly failed. The terminal prune is unchanged and still runs after.
+//
+// Nothing here can fail the request. An unrecognised notif_id is a stale or
+// foreign correlation id and is skipped; a repository error (an unknown push
+// id trips the foreign key) is logged at Info and dropped, because gorush
+// fires the webhook once and never retries -- answering 500 would lose the
+// prune signal carried in the same payload without saving the count.
+func (h *feedbackHandler) recordAlertPushFailure(r *http.Request, fb gorushFeedback) {
+	// Now is guaranteed by both blocks that register this route, but a nil
+	// clock must not turn accounting into a panic on a live webhook.
+	if fb.Token == "" || h.deps.AlertPushes == nil || h.deps.Now == nil {
+		return
+	}
+	pushID, ok := alertpush.ParseNotifID(fb.NotifID)
+	if !ok {
+		return
+	}
+	if _, err := h.deps.AlertPushes.RecordFailure(r.Context(), pushID, fb.Token, fb.Error, h.deps.Now()); err != nil {
+		h.deps.Logger.Info("httpapi: alert push feedback not recorded",
+			"push_id", pushID, "err", sanitizeToken(err, fb.Token))
+	}
 }
 
 // authorized reports whether r carries the configured shared secret. An empty
