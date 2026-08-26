@@ -47,6 +47,25 @@ func (s *fakeSender) SendBatch(_ context.Context, n push.Notification, notifID s
 	return res, nil
 }
 
+// cancelingSender cancels the push out from under the dispatcher on its
+// first batch, standing in for an operator hitting cancel mid-send.
+type cancelingSender struct {
+	t      *testing.T
+	repo   alertpush.Repository
+	pushID int64
+	calls  int
+}
+
+func (s *cancelingSender) SendBatch(ctx context.Context, _ push.Notification, _ string) (push.BatchResult, error) {
+	s.calls++
+	if s.calls == 1 {
+		if err := s.repo.Cancel(ctx, s.pushID, base); err != nil {
+			s.t.Errorf("cancel mid-send: %v", err)
+		}
+	}
+	return push.BatchResult{}, nil
+}
+
 type alwaysFail struct{}
 
 func (alwaysFail) SendBatch(context.Context, push.Notification, string) (push.BatchResult, error) {
@@ -113,20 +132,28 @@ func TestDispatcherGroupsByPlatformLocaleAndSandbox(t *testing.T) {
 		platform push.Platform
 		sandbox  bool
 		title    string
+		body     string
 	}
 	got := map[key][]string{}
 	for _, c := range sender.calls {
 		if c.notifID != alertpush.NotifID(p.ID) {
 			t.Errorf("notif_id = %q, want %q", c.notifID, alertpush.NotifID(p.ID))
 		}
-		got[key{c.n.Platform, c.n.Sandbox, c.n.Title}] = c.n.Tokens
+		// The fan-out carries copy only; the structured payload is the
+		// alarm/Live Activity path, not this one.
+		if c.n.Data != nil {
+			t.Errorf("Data = %v, want nil", c.n.Data)
+		}
+		got[key{c.n.Platform, c.n.Sandbox, c.n.Title, c.n.Message}] = c.n.Tokens
 	}
+	// Only the header is translated, so every group's body is the alert's
+	// English description.
 	want := map[key][]string{
-		{push.PlatformIOS, false, "Hdr"}:        {"ios-en-prod"},
-		{push.PlatformIOS, true, "Hdr"}:         {"ios-en-sandbox"},
-		{push.PlatformIOS, false, "Título"}:     {"ios-es-mx"},
-		{push.PlatformAndroid, false, "Título"}: {"android-es"},
-		{push.PlatformAndroid, false, "Hdr"}:    {"android-de", "android-de-sandbox"},
+		{push.PlatformIOS, false, "Hdr", "Desc"}:        {"ios-en-prod"},
+		{push.PlatformIOS, true, "Hdr", "Desc"}:         {"ios-en-sandbox"},
+		{push.PlatformIOS, false, "Título", "Desc"}:     {"ios-es-mx"},
+		{push.PlatformAndroid, false, "Título", "Desc"}: {"android-es"},
+		{push.PlatformAndroid, false, "Hdr", "Desc"}:    {"android-de", "android-de-sandbox"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("groups = %v, want %v", got, want)
@@ -244,6 +271,65 @@ func TestDispatcherCanceledPushIsNotSent(t *testing.T) {
 	if len(sender.calls) != 0 {
 		t.Errorf("calls = %d, want 0 for a canceled push", len(sender.calls))
 	}
+	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if final.Status != alertpush.StatusCanceled {
+		t.Errorf("Status = %s, want canceled (Claim must not resurrect it)", final.Status)
+	}
+}
+
+func TestDispatcherCancelMidSendYieldsWithoutCommittingPage(t *testing.T) {
+	f := newFixture(t)
+	a := f.alert(t, true, false)
+	// Two pages: if the yield does not fire, the dispatcher walks on to the
+	// second one and the batch count gives it away.
+	for i := 0; i < alertpush.BatchSize+3; i++ {
+		f.registerFull(t, "tok-"+strconv.Itoa(i), pushreg.OSAndroid, "", false, false)
+	}
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &cancelingSender{t: t, repo: f.store.AlertPushes(), pushID: p.ID}
+	now := base
+	newDispatcher(f, sender, &now).RunOnce(context.Background())
+
+	if sender.calls != 1 {
+		t.Errorf("batches = %d, want 1 (AdvanceCursor must report the cancel and stop the send)", sender.calls)
+	}
+	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if final.Status != alertpush.StatusCanceled {
+		t.Errorf("Status = %s, want canceled (the dispatcher must not overwrite the operator's cancel)", final.Status)
+	}
+	// The row stopped being ours the moment it left sending, so the
+	// in-flight page's progress is deliberately dropped (design spec §2.6).
+	if final.SubmittedCount != 0 || final.BatchCursor != 0 {
+		t.Errorf("uncommitted page leaked: submitted %d cursor %d, want 0 and 0", final.SubmittedCount, final.BatchCursor)
+	}
+}
+
+func TestDispatcherTestAudienceReachesOnlyTestDevices(t *testing.T) {
+	f := newFixture(t)
+	a := f.alert(t, true, false)
+	f.register(t, "qa", true)
+	f.register(t, "rider", false)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceTest, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeSender{}
+	now := base
+	newDispatcher(f, sender, &now).RunOnce(context.Background())
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("batches = %d, want 1", len(sender.calls))
+	}
+	if got := sender.calls[0].n.Tokens; !slices.Equal(got, []string{"qa"}) {
+		t.Errorf("tokens = %v, want only the test device", got)
+	}
+	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
+	if final.Status != alertpush.StatusSent || final.DeviceCount != 1 || final.SubmittedCount != 1 {
+		t.Errorf("final = %+v, want sent with a 1-device test audience", final)
+	}
 }
 
 func TestDispatcherUnpublishedAlertCancelsPush(t *testing.T) {
@@ -271,8 +357,13 @@ func TestDispatcherNoSenderFailsPush(t *testing.T) {
 	now := base
 	newDispatcher(f, nil, &now).RunOnce(context.Background())
 	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
-	if final.Status != alertpush.StatusFailed || final.LastError == "" {
-		t.Errorf("final = %+v", final)
+	if final.Status != alertpush.StatusFailed {
+		t.Errorf("Status = %s, want failed", final.Status)
+	}
+	// Operators read this string in the SPA; it must name both knobs.
+	const want = "no push transport configured (--gorush-url/SIDECAR_GORUSH_URL)"
+	if final.LastError != want {
+		t.Errorf("LastError = %q, want %q", final.LastError, want)
 	}
 }
 

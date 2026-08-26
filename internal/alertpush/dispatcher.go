@@ -231,14 +231,19 @@ func (d *Dispatcher) recordAttempt(ctx context.Context, log *slog.Logger, id int
 }
 
 // complete moves a sending push to a terminal status. A false from
-// MarkCompleted means an operator canceled it mid-flight: not an error.
+// MarkCompleted means an operator canceled it mid-flight, or another worker
+// already finished it: logged, never an error.
 func (d *Dispatcher) complete(ctx context.Context, log *slog.Logger, id int64, status Status, lastError string) {
 	ok, err := d.Repo.MarkCompleted(ctx, id, status, lastError, d.Now())
 	if err != nil {
 		log.Error("alertpush: mark completed", "status", status, "err", err)
 		return
 	}
-	if ok {
-		log.Info("alertpush: completed", "status", status)
+	if !ok {
+		// An operator canceled between the last AdvanceCursor and here, or
+		// another worker finished it: the row is no longer ours to move.
+		log.Info("alertpush: push no longer sending; completion skipped", "status", status)
+		return
 	}
+	log.Info("alertpush: completed", "status", status)
 }
