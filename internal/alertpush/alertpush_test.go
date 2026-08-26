@@ -14,7 +14,7 @@ func TestNotifIDRoundTrip(t *testing.T) {
 	if !ok || id != 42 {
 		t.Errorf("ParseNotifID = %d, %v; want 42, true", id, ok)
 	}
-	for _, bad := range []string{"", "alertpush:", "alertpush:x", "alarm:42", "42"} {
+	for _, bad := range []string{"", "alertpush:", "alertpush:x", "alertpush:0", "alertpush:-1", "alarm:42", "42"} {
 		if _, ok := alertpush.ParseNotifID(bad); ok {
 			t.Errorf("ParseNotifID(%q) ok = true, want false", bad)
 		}

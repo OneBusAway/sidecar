@@ -144,7 +144,7 @@ type NewPush struct {
 	Messages Messages
 }
 
-// Sentinel errors. The HTTP layer maps them to 404/409/409/409/422.
+// Sentinel errors. The HTTP layer maps them to 404/409/409/409/409.
 var (
 	ErrNotFound      = errors.New("alert push not found")
 	ErrInFlight      = errors.New("a push for this alert is already queued or sending")
