@@ -217,7 +217,7 @@ batch into two identical calls.
 **Graceful restart.** A deploy is a SIGTERM, not a crash: the cycle stops between pushes
 (or mid-page on a canceled context), leaving rows `sending` with a fresh `updated_at`. The
 sidecar is a single process, so the dispatcher's **first** cycle after boot adopts every
-`sending` row immediately (`stuckBefore = now`) instead of waiting out `StuckAfter`; later
+`sending` row immediately (`stuckBefore = now + 1s` — the claim window is exclusive over whole epoch seconds, so `now` alone would miss a row stamped in the same second) instead of waiting out `StuckAfter`; later
 cycles use `now - StuckAfter`. `updated_at` is stamped only by the dispatcher's own writes —
 the feedback webhook's failure accounting must not touch it, or a trickle of bounces from
 already-submitted pages would keep pushing a paused send's retry out. A store *write* failure
