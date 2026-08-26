@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -247,14 +246,14 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	}
 
 	created := object(t, f.do(http.MethodPost, pushesPath(id), `{}`), http.StatusAccepted)
-	pushID := alertID(t, created)
+	pushID := jsonID(t, created)
 
 	list := array(t, f.do(http.MethodGet, pushesPath(id), ""), http.StatusOK)
 	if len(list) != 1 {
 		t.Fatalf("list = %v, want exactly the one push", list)
 	}
 	assertKeys(t, "listed pushJSON", list[0], pushJSONFields)
-	if got := alertID(t, list[0]); got != pushID {
+	if got := jsonID(t, list[0]); got != pushID {
 		t.Errorf("listed push id = %d, want %d", got, pushID)
 	}
 	// An alert with no pushes is an empty array, never null.
@@ -276,6 +275,15 @@ func TestAdminListCancelAndAudience(t *testing.T) {
 	if res := f.do(http.MethodDelete, cancelPath(id, 9999), ""); res.Code != http.StatusNotFound {
 		t.Errorf("cancel of an unknown push: status = %d, want 404", res.Code)
 	}
+	// A non-numeric pushId is a malformed request, not a missing push: 400
+	// tells the caller their URL is wrong, where 404 would send them looking
+	// for a push that was never named.
+	bad := f.do(http.MethodDelete, fmt.Sprintf("%s/not-a-number", pushesPath(id)), "")
+	if bad.Code != http.StatusBadRequest {
+		t.Errorf("cancel with a non-numeric pushId: status = %d, want 400 (%s)", bad.Code, bad.Body)
+	}
+	assertContains(t, "non-numeric pushId error", errorText(t, bad, http.StatusBadRequest),
+		"invalid pushId", "not-a-number")
 	if res := f.do(http.MethodDelete, cancelPath(id, pushID), ""); res.Code != http.StatusNoContent {
 		t.Errorf("cancel: status = %d, want 204 (%s)", res.Code, res.Body)
 	}
@@ -349,10 +357,16 @@ func TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker(t *testing.T) {
 		}
 	})
 
-	t.Run("session-required when fully wired", func(t *testing.T) {
+	t.Run("listed and session-required when fully wired", func(t *testing.T) {
 		t.Parallel()
 		f := newAdminFixture(t)
 
+		// Membership only. What each route then *does* about a missing
+		// session and a cross-site write is proven for all eighteen routes by
+		// TestAdminRoutes_EveryRouteRequiresASession and
+		// TestAdminRoutes_EveryWriteIsCrossSiteGuarded, which now walk this
+		// same table; the one thing those sweeps cannot notice is a route
+		// quietly dropping out of it, which is what this half pins.
 		listed := map[string]bool{}
 		for _, rt := range adminRoutes(f.deps) {
 			for _, want := range pushRoutePatterns {
@@ -368,30 +382,6 @@ func TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker(t *testing.T) {
 		for _, want := range pushRoutePatterns {
 			if !listed[want] {
 				t.Errorf("route %q is missing from the table with both deps set", want)
-			}
-		}
-
-		for _, pattern := range pushRoutePatterns {
-			method, target := concreteRoute(t, pattern)
-			// Anonymous: the route exists, and answers 401 rather than
-			// running the handler.
-			rec := sendTo(f.handler, method, target, "", nil)
-			if rec.Code != http.StatusUnauthorized {
-				t.Errorf("%s %s unauthenticated: status = %d, want 401 (%s)", method, target, rec.Code, rec.Body)
-			}
-			if method == http.MethodGet {
-				continue
-			}
-			// Cross-site with a valid cookie: refused before the handler.
-			req := httptest.NewRequestWithContext(context.Background(), method, target, strings.NewReader("{}"))
-			req.Host = "sidecar.test"
-			req.Header.Set("Sec-Fetch-Site", "cross-site")
-			req.Header.Set("Content-Type", "application/json")
-			req.AddCookie(f.cookie)
-			rec = httptest.NewRecorder()
-			f.handler.ServeHTTP(rec, req)
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("%s %s cross-site: status = %d, want 403 (%s)", method, target, rec.Code, rec.Body)
 			}
 		}
 	})
@@ -428,4 +418,103 @@ func TestNewRouter_AlertPushRoutesRequirePushRegs(t *testing.T) {
 		assertContains(t, "panic message", msg, "Deps.PushRegs")
 	}()
 	NewRouter(deps)
+}
+
+// ---------------------------------------------------------------------------
+// failing stubs, for the invariant sweeps
+// ---------------------------------------------------------------------------
+
+// failingAlertPushes fails every call, so the push routes' store-error paths
+// can be exercised without corrupting a real database. Every method fails,
+// for the same reason failingAlerts does: a repository that broke only on the
+// call a test happened to pick would let a missed error check survive.
+//
+// It doubles as the non-nil AlertPushes the invariant sweeps need in order to
+// see the conditional routes at all.
+type failingAlertPushes struct{}
+
+func (failingAlertPushes) Create(context.Context, alertpush.NewPush, time.Time) (alertpush.Push, error) {
+	return alertpush.Push{}, errStoreBroken
+}
+func (failingAlertPushes) Get(context.Context, int64) (alertpush.Push, error) {
+	return alertpush.Push{}, errStoreBroken
+}
+func (failingAlertPushes) ListByAlert(context.Context, int64) ([]alertpush.Push, error) {
+	return nil, errStoreBroken
+}
+func (failingAlertPushes) InFlightForAlert(context.Context, int64) (bool, error) {
+	return false, errStoreBroken
+}
+func (failingAlertPushes) Claim(context.Context, time.Time, time.Time) ([]alertpush.Push, error) {
+	return nil, errStoreBroken
+}
+func (failingAlertPushes) SetDeviceCount(context.Context, int64, int64, time.Time) error {
+	return errStoreBroken
+}
+func (failingAlertPushes) AdvanceCursor(context.Context, int64, int64, int64, int64, time.Time) (bool, error) {
+	return false, errStoreBroken
+}
+func (failingAlertPushes) RecordFailure(context.Context, int64, string, string, time.Time) (bool, error) {
+	return false, errStoreBroken
+}
+func (failingAlertPushes) RecordAttempt(context.Context, int64, string, time.Time) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingAlertPushes) MarkCompleted(context.Context, int64, alertpush.Status, string, time.Time) (bool, error) {
+	return false, errStoreBroken
+}
+func (failingAlertPushes) Cancel(context.Context, int64, time.Time) error { return errStoreBroken }
+
+// failingPushRegs is the registry equivalent. The push routes require a
+// non-nil one at boot (they count the audience before enqueueing), so the
+// store-failure sweep has to supply something; failing every call keeps it
+// honest rather than quietly serving a working repository.
+type failingPushRegs struct{}
+
+func (failingPushRegs) Get(context.Context, int64, string) (pushreg.Registration, error) {
+	return pushreg.Registration{}, errStoreBroken
+}
+func (failingPushRegs) Upsert(context.Context, pushreg.Upsert, time.Time) error {
+	return errStoreBroken
+}
+func (failingPushRegs) Delete(context.Context, int64, string) error { return errStoreBroken }
+func (failingPushRegs) DeleteByToken(context.Context, string) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingPushRegs) Prune(context.Context, time.Time) (int64, error) { return 0, errStoreBroken }
+func (failingPushRegs) ListAudience(context.Context, int64, bool, int64, int) ([]pushreg.Registration, error) {
+	return nil, errStoreBroken
+}
+func (failingPushRegs) CountAudience(context.Context, int64, bool) (pushreg.AudienceCount, error) {
+	return pushreg.AudienceCount{}, errStoreBroken
+}
+
+// TestAdminPushes_AlertPushStoreFailuresAre500 covers the error paths the
+// store-failure sweep cannot reach. That sweep breaks the *alerts* store, so
+// every push route fails at its first alert lookup; here the alert catalog
+// works and only the push repository is broken, which is the only way to
+// reach Create/InFlightForAlert and ListByAlert's own failures.
+func TestAdminPushes_AlertPushStoreFailuresAre500(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixtureWithDeps(t, func(d *Deps) { d.AlertPushes = failingAlertPushes{} })
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+
+	for _, tc := range []struct {
+		name, method, target, body string
+	}{
+		{"create", http.MethodPost, pushesPath(id), `{}`},
+		{"list", http.MethodGet, pushesPath(id), ""},
+		{"cancel", http.MethodDelete, fmt.Sprintf("%s/1", pushesPath(id)), ""},
+	} {
+		rec := f.do(tc.method, tc.target, tc.body)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s: status = %d, want 500; body = %s", tc.name, rec.Code, rec.Body.String())
+			continue
+		}
+		if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
+			t.Errorf("%s: body = %q, want %q", tc.name, got, want)
+		}
+	}
 }

@@ -194,7 +194,7 @@ func (f *adminFixture) createAlert(t *testing.T, body string) map[string]any {
 // createAlertID posts an alert and returns its id.
 func (f *adminFixture) createAlertID(t *testing.T, body string) int64 {
 	t.Helper()
-	return alertID(t, f.createAlert(t, body))
+	return jsonID(t, f.createAlert(t, body))
 }
 
 // countAlerts is the "nothing was written" check the rejection tests use.
@@ -218,8 +218,11 @@ func (f *adminFixture) storedAlert(t *testing.T, id int64) alerts.Alert {
 	return a
 }
 
-// alertID reads the id out of a decoded alert body.
-func alertID(t *testing.T, m map[string]any) int64 {
+// jsonID reads the "id" field out of any decoded response body. It is
+// deliberately not named for one resource: alerts and alert pushes both
+// answer with an id, and a helper named for the wrong one reads as a bug at
+// the call site.
+func jsonID(t *testing.T, m map[string]any) int64 {
 	t.Helper()
 	v, ok := m["id"].(float64)
 	if !ok {
@@ -327,9 +330,15 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		"DELETE /api/admin/v1/session": true,
 	}
 
-	routes := adminRoutes(Deps{Logger: discardLogger()})
-	if want := 14; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions)", len(routes), want)
+	// f.deps, not a zero Deps: some routes are conditional on a dependency
+	// being wired (the alert push routes need a repository and a transport),
+	// and enumerating a bare Deps would walk right past them -- a conditional
+	// route registered without requireSession would ship open with every test
+	// in this file still green.
+	routes := adminRoutes(f.deps)
+	if want := 18; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions + 4 pushes)",
+			len(routes), want)
 	}
 
 	seen := map[string]bool{}
@@ -374,7 +383,10 @@ func TestAdminRoutes_EveryWriteIsCrossSiteGuarded(t *testing.T) {
 
 	f := newAdminFixture(t)
 
-	for _, rt := range adminRoutes(Deps{Logger: discardLogger()}) {
+	// f.deps for the same reason as the sweep above: the conditional routes
+	// have to be in the table being walked or the guard is never checked on
+	// them.
+	for _, rt := range adminRoutes(f.deps) {
 		method, target := concreteRoute(t, rt.pattern)
 		if method == http.MethodGet || method == http.MethodHead {
 			continue // the guard deliberately ignores safe methods
@@ -441,7 +453,7 @@ func TestAdminAlerts_CreateSuccess(t *testing.T) {
 	got := object(t, rec, http.StatusCreated)
 	assertKeys(t, "alert", got, alertJSONFields)
 
-	id := alertID(t, got)
+	id := jsonID(t, got)
 	if want := alertPath(id, ""); rec.Header().Get("Location") != want {
 		t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), want)
 	}
@@ -696,7 +708,7 @@ func TestAdminAlerts_List(t *testing.T) {
 		t.Helper()
 		var out []int64
 		for _, m := range array(t, rec, http.StatusOK) {
-			out = append(out, alertID(t, m))
+			out = append(out, jsonID(t, m))
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 		return out
@@ -770,7 +782,7 @@ func TestAdminAlerts_List(t *testing.T) {
 		}
 		for _, m := range items {
 			if boolean(t, m, "published") {
-				t.Errorf("alert %d is published; the fixture only created drafts", alertID(t, m))
+				t.Errorf("alert %d is published; the fixture only created drafts", jsonID(t, m))
 			}
 		}
 	})
@@ -789,7 +801,7 @@ func TestAdminAlerts_Get(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		got := object(t, f.do(http.MethodGet, alertPath(id, ""), ""), http.StatusOK)
 		assertKeys(t, "alert", got, alertJSONFields)
-		if alertID(t, got) != id {
+		if jsonID(t, got) != id {
 			t.Errorf("id = %v, want %d", got["id"], id)
 		}
 		if v := str(t, got, "header"); v != "fetch me" {
@@ -825,7 +837,7 @@ func TestAdminAlerts_PatchAppliesOnlyWhatWasSent(t *testing.T) {
 		"start_time": "2026-08-15T14:00:00-07:00", "end_time": "2026-08-20T14:00:00-07:00",
 		"is_test": true
 	}`)
-	id := alertID(t, created)
+	id := jsonID(t, created)
 
 	got := object(t, f.do(http.MethodPatch, alertPath(id, ""),
 		`{"header":"after header","severity":"SEVERE"}`), http.StatusOK)
@@ -1297,7 +1309,13 @@ func (m *recordingMux) Handle(pattern string, _ http.Handler) {
 func TestRegisterAdminRoutes_RegistersExactlyTheTable(t *testing.T) {
 	t.Parallel()
 
-	deps := Deps{Logger: discardLogger()}
+	// Every conditional route must be present in the Deps under test, or a
+	// stray mux.Handle guarded by the same condition would go unnoticed.
+	deps := Deps{
+		Logger:         discardLogger(),
+		AlertPushes:    failingAlertPushes{},
+		AlertPushWaker: &recordingWaker{},
+	}
 	rec := &recordingMux{}
 	registerAdminRoutes(rec, deps)
 
@@ -1376,17 +1394,24 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 
 	repo := newStubAuth()
 	repo.addUser("admin", testHash())
-	h := NewRouter(Deps{
-		Alerts:  failingAlerts{},
-		Regions: failingRegions{},
-		Auth:    repo,
-		Now:     func() time.Time { return testNow },
-		Logger:  discardLogger(),
-		Sleep:   func(time.Duration) {},
-	})
+	// One Deps builds the router and supplies the table, so the routes swept
+	// are exactly the routes served -- including the conditional push routes,
+	// whose repositories fail here like every other.
+	deps := Deps{
+		Alerts:         failingAlerts{},
+		Regions:        failingRegions{},
+		Auth:           repo,
+		Now:            func() time.Time { return testNow },
+		Logger:         discardLogger(),
+		Sleep:          func(time.Duration) {},
+		PushRegs:       failingPushRegs{},
+		AlertPushes:    failingAlertPushes{},
+		AlertPushWaker: &recordingWaker{},
+	}
+	h := NewRouter(deps)
 	cookie := adminLogin(t, h)
 
-	for _, rt := range adminRoutes(Deps{Logger: discardLogger()}) {
+	for _, rt := range adminRoutes(deps) {
 		if strings.HasSuffix(rt.pattern, "/session") {
 			continue // the session routes do not touch these two stores
 		}

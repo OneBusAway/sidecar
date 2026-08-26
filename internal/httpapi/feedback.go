@@ -30,11 +30,25 @@ type gorushFeedback struct {
 
 type feedbackHandler struct{ deps Deps }
 
-// receive consumes async delivery feedback (spec §6.5) and prunes both the
+// receive consumes async delivery feedback (spec §6.5). It prunes both the
 // push registration and the Live Activity subscription tables, whichever are
-// configured. Deleting either requires only knowing its token -- exactly the
-// power the public opt-out DELETE endpoints already grant -- so this
-// endpoint being unauthenticated adds no new capability.
+// configured, and counts the bounce against the alert push that sent it
+// (design spec §2.8).
+//
+// On the deletes, an unauthenticated endpoint grants nothing new: removing
+// either row requires only knowing its token, which is exactly the power the
+// public opt-out DELETE endpoints already hand out.
+//
+// The §2.8 accounting is different, and worth stating plainly: it is a
+// *write* an anonymous caller could not otherwise make. Someone who guesses a
+// notif_id can inflate a push's failed_count and add rows to
+// alert_push_failures. What bounds it is that there is nothing there to
+// steal or corrupt beyond a report -- the table holds a counter and SHA-256
+// token hashes, nothing reads either back to make a delivery decision, and
+// both cascade-delete with the push and its alert -- and that a
+// deployment without FeedbackSecret is throttled to feedbackLimitPerMinute
+// per IP. A deployment that cares about the accuracy of its own fan-out
+// numbers sets the shared secret; that is what the setting is for.
 func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		// No body is read and nothing is looked up: an unauthorized caller
