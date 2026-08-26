@@ -74,6 +74,7 @@ func (r *pushRegRepo) Upsert(ctx context.Context, in pushreg.Upsert, now time.Ti
 
 func pushRegistrationFromRow(row gen.PushRegistration) pushreg.Registration {
 	return pushreg.Registration{
+		ID:              row.ID,
 		RegionID:        row.RegionID,
 		Token:           row.Token,
 		OperatingSystem: row.OperatingSystem,
@@ -122,4 +123,44 @@ func (r *pushRegRepo) Prune(ctx context.Context, cutoff time.Time) (int64, error
 		return 0, fmt.Errorf("sqlite: prune push registrations before %v: %w", cutoff, err)
 	}
 	return n, nil
+}
+
+// ListAudience pages a region's registrations by ascending id (design spec
+// section 2.3). The caller resumes at the last id it saw, so a registration
+// created mid-send lands after the cursor and a deleted one is simply absent
+// from the next page -- no token is ever visited twice or skipped.
+func (r *pushRegRepo) ListAudience(ctx context.Context, regionID int64, testOnly bool, afterID int64, limit int) ([]pushreg.Registration, error) {
+	rows, err := r.q.ListPushAudience(ctx, gen.ListPushAudienceParams{
+		RegionID: regionID, AfterID: afterID, TestOnly: testOnly, Limit: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list push audience (region %d): %w", regionID, err)
+	}
+	out := make([]pushreg.Registration, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, pushRegistrationFromRow(row))
+	}
+	return out, nil
+}
+
+// CountAudience is the size of the ListAudience set, split by platform.
+// Platforms absent from the region contribute no row, so their count stays
+// zero; Total is summed from the rows rather than queried separately, which
+// keeps it consistent with the split by construction.
+func (r *pushRegRepo) CountAudience(ctx context.Context, regionID int64, testOnly bool) (pushreg.AudienceCount, error) {
+	rows, err := r.q.CountPushAudience(ctx, gen.CountPushAudienceParams{RegionID: regionID, TestOnly: testOnly})
+	if err != nil {
+		return pushreg.AudienceCount{}, fmt.Errorf("sqlite: count push audience (region %d): %w", regionID, err)
+	}
+	var c pushreg.AudienceCount
+	for _, row := range rows {
+		switch row.OperatingSystem {
+		case pushreg.OSIOS:
+			c.IOS = row.N
+		case pushreg.OSAndroid:
+			c.Android = row.N
+		}
+		c.Total += row.N
+	}
+	return c, nil
 }

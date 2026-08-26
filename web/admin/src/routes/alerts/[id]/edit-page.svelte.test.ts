@@ -96,7 +96,16 @@ function mount(initial: Alert) {
 	// so the fixture supplies them rather than casting the shape away.
 	const shell = { user: { username: 'admin' }, sessionError: '' };
 	const props = (a: Alert) => ({
-		data: { ...shell, alert: a, regions: [REGION] },
+		// `pushes`/`audience` come from the same load; null audience is the
+		// "no push transport configured" case, which keeps the push card out
+		// of these tests without stubbing another endpoint.
+		data: {
+			...shell,
+			alert: a,
+			regions: [REGION],
+			pushes: [],
+			audience: null,
+		},
 		params: { id: String(a.id) },
 	});
 	let next = initial;

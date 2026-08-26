@@ -40,6 +40,10 @@ type gorushNotification struct {
 	// and gorush has no global setting for it, so it rides on each request.
 	Topic string         `json:"topic,omitempty"`
 	Data  map[string]any `json:"data,omitempty"`
+	// NotifID is echoed back by gorush in its response logs and in feedback
+	// webhook payloads, which is the only way a failure reported for a
+	// batched push finds its way back to the push that sent it.
+	NotifID string `json:"notif_id,omitempty"`
 }
 
 // Gorush is a Sender backed by one gorush instance's HTTP push API.
@@ -86,6 +90,31 @@ func NewGorush(baseURL, apnsTopic string, httpClient *http.Client) *Gorush {
 // delivery failures come back asynchronously via the feedback webhook
 // (§6.5).
 func (g *Gorush) Send(ctx context.Context, n Notification) error {
+	// Same request as a batch send with no notif_id; the field is omitempty,
+	// so the wire format is unchanged and the inline logs are simply unused.
+	_, err := g.SendBatch(ctx, n, "")
+	return err
+}
+
+// gorushResponse is the subset of gorush's /api/push response this sidecar
+// reads. Logs is populated only in core.sync mode, and may carry
+// succeeded-push entries as well as failed-push ones.
+type gorushResponse struct {
+	Logs []struct {
+		Type  string `json:"type"`
+		Token string `json:"token"`
+		Error string `json:"error"`
+	} `json:"logs"`
+}
+
+// gorushFailedPush is the log entry type gorush uses for a rejected token.
+const gorushFailedPush = "failed-push"
+
+// SendBatch posts n to gorush with notifID stamped on the request and
+// returns every inline rejection from the response logs (design spec §2.5).
+// An empty, non-JSON, or log-less body is the async-mode normal case and
+// yields no rejections, not an error.
+func (g *Gorush) SendBatch(ctx context.Context, n Notification, notifID string) (BatchResult, error) {
 	gn := gorushNotification{
 		Tokens:   n.Tokens,
 		Platform: int(n.Platform),
@@ -93,36 +122,64 @@ func (g *Gorush) Send(ctx context.Context, n Notification) error {
 		Message:  n.Message,
 		Priority: "high",
 		Data:     n.Data,
+		NotifID:  notifID,
 	}
 	if n.Platform == PlatformIOS {
 		gn.Development = n.Sandbox
 		gn.Topic = g.apnsTopic
 	}
-	return g.post(ctx, map[string]any{"notifications": []gorushNotification{gn}})
+	body, err := g.post(ctx, map[string]any{"notifications": []gorushNotification{gn}})
+	if err != nil {
+		return BatchResult{}, err
+	}
+	// An empty, non-JSON, or log-less body is the async-mode normal case:
+	// there are simply no inline rejections to report, so a decode failure
+	// is deliberately not an error. Logs is cleared because a truncated body
+	// can leave a partial decode behind.
+	var resp gorushResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		resp.Logs = nil
+	}
+	var res BatchResult
+	for _, l := range resp.Logs {
+		if l.Type != gorushFailedPush || l.Token == "" {
+			continue
+		}
+		res.Rejected = append(res.Rejected, Rejection{Token: l.Token, Reason: l.Error})
+	}
+	return res, nil
 }
 
-// post submits one /api/push batch. Never include the response body in the
-// error: gorush error bodies echo the notification, tokens included.
-func (g *Gorush) post(ctx context.Context, batch any) error {
+// gorushMaxResponse caps how much of a gorush response body is read. In
+// sync mode the logs grow with the batch; a bounded read keeps a runaway
+// or hostile body from being buffered whole.
+const gorushMaxResponse = 1 << 20
+
+// post submits one /api/push batch and returns the (bounded) response body
+// so callers can read gorush's sync-mode logs. Never include that body in
+// an error: gorush error bodies echo the notification, tokens included.
+func (g *Gorush) post(ctx context.Context, batch any) ([]byte, error) {
 	body, err := json.Marshal(batch)
 	if err != nil {
-		return fmt.Errorf("push: marshal notification: %w", err)
+		return nil, fmt.Errorf("push: marshal notification: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.pushURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("push: build request: %w", err)
+		return nil, fmt.Errorf("push: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("push: gorush request: %w", err)
+		return nil, fmt.Errorf("push: gorush request: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain so the connection is reused
+	// Read (rather than discard) the body so the connection is reused and
+	// SendBatch can parse it; a read error is not fatal on its own.
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, gorushMaxResponse)) //nolint:errcheck // a truncated body only costs rejection detail
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("push: gorush returned status %d", resp.StatusCode)
+		return nil, fmt.Errorf("push: gorush returned status %d", resp.StatusCode)
 	}
-	return nil
+	return respBody, nil
 }
 
 // liveActivityTopicSuffix is appended to the app bundle id to form the APNs
@@ -177,5 +234,6 @@ func (g *Gorush) SendLiveActivity(ctx context.Context, p LiveActivityPush) error
 	if !p.DismissalDate.IsZero() {
 		n.DismissalDate = p.DismissalDate.Unix()
 	}
-	return g.post(ctx, map[string]any{"notifications": []gorushLiveActivity{n}})
+	_, err := g.post(ctx, map[string]any{"notifications": []gorushLiveActivity{n}})
+	return err
 }

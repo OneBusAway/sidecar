@@ -46,6 +46,33 @@ type Alert struct {
 	UpdatedAt       int64
 }
 
+type AlertPush struct {
+	ID             int64
+	AlertID        int64
+	RegionID       int64
+	Audience       string
+	Status         string
+	Messages       string
+	BatchCursor    int64
+	DeviceCount    int64
+	SubmittedCount int64
+	FailedCount    int64
+	Attempts       int64
+	LastError      string
+	StartedAt      sql.NullInt64
+	CompletedAt    sql.NullInt64
+	CreatedAt      int64
+	UpdatedAt      int64
+}
+
+type AlertPushFailure struct {
+	ID          int64
+	PushID      int64
+	TokenSha256 string
+	Reason      string
+	CreatedAt   int64
+}
+
 type AlertTranslation struct {
 	ID           int64
 	AlertID      int64

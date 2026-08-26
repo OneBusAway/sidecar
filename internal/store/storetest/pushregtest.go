@@ -3,6 +3,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +38,8 @@ func RunPushRegistrationRepository(t *testing.T, newStore newPushRegStoreFunc) {
 	t.Run("PruneRemovesOnlyStale", func(t *testing.T) { testPruneRemovesOnlyStale(t, newStore) })
 	t.Run("RegionScoping", func(t *testing.T) { testPushRegRegionScoping(t, newStore) })
 	t.Run("ConcurrentFirstRegistrationRaces", func(t *testing.T) { testConcurrentFirstRegistrationRaces(t, newStore) })
+	t.Run("ListAudiencePagesByID", func(t *testing.T) { testListAudiencePagesByID(t, newStore) })
+	t.Run("CountAudienceSplitsByPlatform", func(t *testing.T) { testCountAudienceSplitsByPlatform(t, newStore) })
 }
 
 // putStoretestRegion inserts a minimal directory-sourced region with the
@@ -576,5 +579,114 @@ func testConcurrentFirstRegistrationRaces(t *testing.T, newStore newPushRegStore
 	}
 	if n2 != 1 {
 		t.Fatalf("DeleteByToken after race = %d, want 1 (exactly one row must exist)", n2)
+	}
+}
+
+// testListAudiencePagesByID pins the cursor contract the alert push
+// dispatcher resumes on (design spec §2.3): ascending id, strictly greater
+// than afterID, region-scoped, test-only filter, and a limit.
+func testListAudiencePagesByID(t *testing.T, newStore newPushRegStoreFunc) {
+	repo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionsRepo, 1)
+	putStoretestRegion(t, regionsRepo, 2)
+
+	// Five in region 1 (the third is a test device), one in region 2.
+	for i, tok := range []string{"a", "b", "c", "d", "e"} {
+		up := pushreg.Upsert{RegionID: 1, Token: tok, OperatingSystem: pushreg.OSIOS}
+		if i == 2 {
+			up.TestDevice, up.Description = ptr(true), ptr("QA phone")
+		}
+		if err := repo.Upsert(ctx, up, base); err != nil {
+			t.Fatalf("Upsert(%s): %v", tok, err)
+		}
+	}
+	if err := repo.Upsert(ctx, pushreg.Upsert{RegionID: 2, Token: "z", OperatingSystem: pushreg.OSAndroid}, base); err != nil {
+		t.Fatalf("Upsert(z): %v", err)
+	}
+
+	page1, err := repo.ListAudience(ctx, 1, false, 0, 2)
+	if err != nil {
+		t.Fatalf("ListAudience page 1: %v", err)
+	}
+	if got := tokensOf(page1); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("page 1 tokens = %v, want [a b]", got)
+	}
+	if page1[0].ID <= 0 || page1[1].ID <= page1[0].ID {
+		t.Fatalf("ids not ascending/positive: %d, %d", page1[0].ID, page1[1].ID)
+	}
+	page2, err := repo.ListAudience(ctx, 1, false, page1[1].ID, 2)
+	if err != nil {
+		t.Fatalf("ListAudience page 2: %v", err)
+	}
+	if got := tokensOf(page2); !reflect.DeepEqual(got, []string{"c", "d"}) {
+		t.Errorf("page 2 tokens = %v, want [c d]", got)
+	}
+	page3, err := repo.ListAudience(ctx, 1, false, page2[1].ID, 2)
+	if err != nil {
+		t.Fatalf("ListAudience page 3: %v", err)
+	}
+	if got := tokensOf(page3); !reflect.DeepEqual(got, []string{"e"}) {
+		t.Errorf("page 3 tokens = %v, want [e] (region 2's row must not leak)", got)
+	}
+	page4, err := repo.ListAudience(ctx, 1, false, page3[0].ID, 2)
+	if err != nil {
+		t.Fatalf("ListAudience page 4: %v", err)
+	}
+	if len(page4) != 0 {
+		t.Errorf("page 4 = %v, want empty", tokensOf(page4))
+	}
+
+	testOnly, err := repo.ListAudience(ctx, 1, true, 0, 10)
+	if err != nil {
+		t.Fatalf("ListAudience test-only: %v", err)
+	}
+	if got := tokensOf(testOnly); !reflect.DeepEqual(got, []string{"c"}) {
+		t.Errorf("test-only tokens = %v, want [c]", got)
+	}
+}
+
+// tokensOf projects a page of registrations down to its tokens, so the
+// paging assertions can compare whole pages in one line.
+func tokensOf(regs []pushreg.Registration) []string {
+	out := make([]string, 0, len(regs))
+	for _, r := range regs {
+		out = append(out, r.Token)
+	}
+	return out
+}
+
+// testCountAudienceSplitsByPlatform asserts the audience size the admin API
+// reports before a send (design spec §2.3) is region-scoped, honors the
+// test-only filter, and splits by platform with Total = IOS + Android.
+func testCountAudienceSplitsByPlatform(t *testing.T, newStore newPushRegStoreFunc) {
+	repo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionsRepo, 1)
+	putStoretestRegion(t, regionsRepo, 2)
+	seed := []pushreg.Upsert{
+		{RegionID: 1, Token: "i1", OperatingSystem: pushreg.OSIOS},
+		{RegionID: 1, Token: "i2", OperatingSystem: pushreg.OSIOS, TestDevice: ptr(true), Description: ptr("QA")},
+		{RegionID: 1, Token: "a1", OperatingSystem: pushreg.OSAndroid},
+		{RegionID: 2, Token: "other", OperatingSystem: pushreg.OSAndroid},
+	}
+	for _, up := range seed {
+		if err := repo.Upsert(ctx, up, base); err != nil {
+			t.Fatalf("Upsert(%s): %v", up.Token, err)
+		}
+	}
+	all, err := repo.CountAudience(ctx, 1, false)
+	if err != nil {
+		t.Fatalf("CountAudience(all): %v", err)
+	}
+	if want := (pushreg.AudienceCount{Total: 3, IOS: 2, Android: 1}); all != want {
+		t.Errorf("all = %+v, want %+v", all, want)
+	}
+	test, err := repo.CountAudience(ctx, 1, true)
+	if err != nil {
+		t.Fatalf("CountAudience(test): %v", err)
+	}
+	if want := (pushreg.AudienceCount{Total: 1, IOS: 1, Android: 0}); test != want {
+		t.Errorf("test = %+v, want %+v", test, want)
 	}
 }

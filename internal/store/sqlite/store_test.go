@@ -2,13 +2,16 @@ package sqlite_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
@@ -105,18 +108,20 @@ func TestMigrateDeclaresTimeColumnsAsInteger(t *testing.T) {
 
 	ctx := context.Background()
 	wantIntegerColumns := map[string][]string{
-		"regions":            {"synced_at", "created_at", "updated_at"},
-		"alerts":             {"start_time", "end_time", "created_at", "updated_at"},
-		"alert_translations": {"created_at", "updated_at"},
-		"users":              {"created_at", "updated_at"},
-		"sessions":           {"created_at", "expires_at"},
-		"push_registrations": {"last_seen_at", "created_at", "updated_at"},
-		"alarms":             {"service_date", "created_at", "updated_at"},
-		"live_activities":    {"service_date", "last_pushed_at", "expires_at", "created_at", "updated_at"},
-		"studies":            {"created_at", "updated_at"},
-		"surveys":            {"start_time", "end_time", "created_at", "updated_at"},
-		"survey_questions":   {"created_at", "updated_at"},
-		"survey_responses":   {"created_at", "updated_at"},
+		"regions":             {"synced_at", "created_at", "updated_at"},
+		"alerts":              {"start_time", "end_time", "created_at", "updated_at"},
+		"alert_translations":  {"created_at", "updated_at"},
+		"users":               {"created_at", "updated_at"},
+		"sessions":            {"created_at", "expires_at"},
+		"push_registrations":  {"last_seen_at", "created_at", "updated_at"},
+		"alarms":              {"service_date", "created_at", "updated_at"},
+		"live_activities":     {"service_date", "last_pushed_at", "expires_at", "created_at", "updated_at"},
+		"studies":             {"created_at", "updated_at"},
+		"surveys":             {"start_time", "end_time", "created_at", "updated_at"},
+		"survey_questions":    {"created_at", "updated_at"},
+		"survey_responses":    {"created_at", "updated_at"},
+		"alert_pushes":        {"started_at", "completed_at", "created_at", "updated_at"},
+		"alert_push_failures": {"created_at"},
 	}
 	for table, columns := range wantIntegerColumns {
 		types, err := columnTypes(ctx, db, table)
@@ -408,4 +413,74 @@ func TestSurveyConformance(t *testing.T) {
 		s := sqlitetest.Open(t)
 		return s.Surveys(), s.Regions()
 	})
+}
+
+// TestAlertPushRepository runs the shared alert push conformance suite
+// against the SQLite adapter (design spec sections 2.6-2.9).
+func TestAlertPushRepository(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAlertPushRepository(t, func(t *testing.T) (alertpush.Repository, alerts.Repository, regions.Repository) {
+		t.Helper()
+		store := sqlitetest.Open(t)
+		return store.AlertPushes(), store.Alerts(), store.Regions()
+	})
+}
+
+// TestAlertPushFailuresStoreOnlyHashes pins design spec section 2.8: the
+// failure table must never hold a plaintext device token. Only reading the
+// stored column back through a raw connection can show this -- the
+// conformance suite never sees the column, and RecordFailure would behave
+// identically if it stored the token itself. This test file is package
+// sqlite_test, so it opens its own *sql.DB on the path OpenAt returns, as
+// TestMigrateCreatesAuthTables does.
+func TestAlertPushFailuresStoreOnlyHashes(t *testing.T) {
+	t.Parallel()
+
+	const token = "PLAINTEXT-TOKEN"
+
+	path, store := sqlitetest.OpenAt(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+	}}, now); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+	alert, alertErr := store.Alerts().Create(ctx, alerts.NewAlert{
+		RegionID: 1, AgencyID: "40", HeaderText: "Route 44 detour",
+		Cause: "CONSTRUCTION", Effect: "DETOUR", Severity: "WARNING", StartTime: now,
+	}, now)
+	if alertErr != nil {
+		t.Fatalf("Create alert: %v", alertErr)
+	}
+	push, pushErr := store.AlertPushes().Create(ctx, alertpush.NewPush{
+		AlertID: alert.ID, RegionID: 1, Audience: alertpush.AudienceAll,
+		Messages: alertpush.Messages{"en": {Title: "Route 44 detour", Body: "Buses skip 3rd Ave."}},
+	}, now)
+	if pushErr != nil {
+		t.Fatalf("Create push: %v", pushErr)
+	}
+	if _, err := store.AlertPushes().RecordFailure(ctx, push.ID, token, "Unregistered", now); err != nil {
+		t.Fatalf("RecordFailure: %v", err)
+	}
+
+	db, openErr := sql.Open("sqlite", path)
+	if openErr != nil {
+		t.Fatalf("sql.Open: %v", openErr)
+	}
+	defer db.Close()
+
+	var stored string
+	if err := db.QueryRowContext(ctx, "SELECT token_sha256 FROM alert_push_failures").Scan(&stored); err != nil {
+		t.Fatalf("SELECT token_sha256: %v", err)
+	}
+	if stored == token {
+		t.Fatal("alert_push_failures.token_sha256 holds the plaintext token")
+	}
+	sum := sha256.Sum256([]byte(token))
+	if want := hex.EncodeToString(sum[:]); stored != want {
+		t.Errorf("token_sha256 = %q, want %q (hex sha256 of the token)", stored, want)
+	}
 }

@@ -30,6 +30,7 @@ const (
 
 // Registration is one registered mobile device, as stored.
 type Registration struct {
+	ID              int64 // row id; the alert push cursor pages on it (design spec §2.3)
 	RegionID        int64
 	Token           string
 	OperatingSystem string // OSIOS | OSAndroid
@@ -39,6 +40,14 @@ type Registration struct {
 	Description     string
 	LastSeenAt      time.Time
 	CreatedAt       time.Time
+}
+
+// AudienceCount is the size of one push audience split by platform
+// (design spec §2.3); Total = IOS + Android.
+type AudienceCount struct {
+	Total   int64
+	IOS     int64
+	Android int64
 }
 
 // Upsert carries one registration write. Pointer fields implement the §4
@@ -70,4 +79,11 @@ type Repository interface {
 	DeleteByToken(ctx context.Context, token string) (int64, error)
 	// Prune deletes rows whose last_seen_at is before cutoff; returns count.
 	Prune(ctx context.Context, cutoff time.Time) (int64, error)
+	// ListAudience returns up to limit registrations in regionID with
+	// id > afterID, ascending by id; testOnly restricts to test devices.
+	// Paging on the monotonic id (not last_seen_at) is what makes the alert
+	// push cursor stable across a long send (design spec §2.3).
+	ListAudience(ctx context.Context, regionID int64, testOnly bool, afterID int64, limit int) ([]Registration, error)
+	// CountAudience is the size of the same set, split by platform.
+	CountAudience(ctx context.Context, regionID int64, testOnly bool) (AudienceCount, error)
 }

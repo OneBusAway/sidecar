@@ -9,6 +9,49 @@ import (
 	"context"
 )
 
+const countPushAudience = `-- name: CountPushAudience :many
+SELECT operating_system, COUNT(*) AS n FROM push_registrations
+WHERE region_id = ?1
+  AND (test_device OR NOT CAST(?2 AS BOOLEAN))
+GROUP BY operating_system
+`
+
+type CountPushAudienceParams struct {
+	RegionID int64
+	TestOnly bool
+}
+
+type CountPushAudienceRow struct {
+	OperatingSystem string
+	N               int64
+}
+
+// The same audience as ListPushAudience, grouped by platform so the admin
+// API can report the iOS/Android split before a send (design spec
+// section 2.3).
+func (q *Queries) CountPushAudience(ctx context.Context, arg CountPushAudienceParams) ([]CountPushAudienceRow, error) {
+	rows, err := q.db.QueryContext(ctx, countPushAudience, arg.RegionID, arg.TestOnly)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountPushAudienceRow{}
+	for rows.Next() {
+		var i CountPushAudienceRow
+		if err := rows.Scan(&i.OperatingSystem, &i.N); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const deletePushRegistration = `-- name: DeletePushRegistration :execrows
 DELETE FROM push_registrations
 WHERE region_id = ?1 AND token = ?2
@@ -41,6 +84,7 @@ func (q *Queries) DeletePushRegistrationsByToken(ctx context.Context, token stri
 
 const getPushRegistration = `-- name: GetPushRegistration :one
 
+
 SELECT id, region_id, token, operating_system, apns_sandbox, locale, test_device, description, last_seen_at, created_at, updated_at FROM push_registrations
 WHERE region_id = ?1 AND token = ?2
 `
@@ -50,6 +94,11 @@ type GetPushRegistrationParams struct {
 	Token    string
 }
 
+// Comments in this file must stay ASCII-only. sqlc expands `*` and renumbers
+// sqlc.arg() by byte offset into each statement's text, and a multi-byte rune
+// anywhere in a preceding comment shifts those offsets: one section-sign
+// character above a query was enough to emit the garbage SQL "SELECTid ..."
+// and fail generation. Cite the design spec as "section N", not with the sign.
 // UpsertPushRegistration is NOT generated here. sqlc v1.31.1's SQLite engine
 // does not extract bind parameters that appear on the right-hand side of an
 // ON CONFLICT ... DO UPDATE SET assignment (confirmed for @name, sqlc.arg(),
@@ -79,6 +128,65 @@ func (q *Queries) GetPushRegistration(ctx context.Context, arg GetPushRegistrati
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const listPushAudience = `-- name: ListPushAudience :many
+SELECT id, region_id, token, operating_system, apns_sandbox, locale, test_device, description, last_seen_at, created_at, updated_at FROM push_registrations
+WHERE region_id = ?1
+  AND id > ?2
+  AND (test_device OR NOT CAST(?3 AS BOOLEAN))
+ORDER BY id
+LIMIT ?4
+`
+
+type ListPushAudienceParams struct {
+	RegionID int64
+	AfterID  int64
+	TestOnly bool
+	Limit    int64
+}
+
+// Pages a region's registrations by id (design spec section 2.3). The
+// predicate (test_device OR NOT test_only) selects everyone when
+// test_only is false and only test devices when it is true.
+func (q *Queries) ListPushAudience(ctx context.Context, arg ListPushAudienceParams) ([]PushRegistration, error) {
+	rows, err := q.db.QueryContext(ctx, listPushAudience,
+		arg.RegionID,
+		arg.AfterID,
+		arg.TestOnly,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PushRegistration{}
+	for rows.Next() {
+		var i PushRegistration
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.Token,
+			&i.OperatingSystem,
+			&i.ApnsSandbox,
+			&i.Locale,
+			&i.TestDevice,
+			&i.Description,
+			&i.LastSeenAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const prunePushRegistrations = `-- name: PrunePushRegistrations :execrows

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
@@ -20,6 +21,10 @@ import (
 const (
 	defaultDB         = "./sidecar.db"
 	defaultRegionsURL = "https://regions.onebusaway.org/regions-v3.json"
+
+	// alertPushCmd names the `alert push` subcommand in its flag set and in
+	// every error it returns, so the operator sees the command they typed.
+	alertPushCmd = "alert push"
 )
 
 // run holds main's logic so tests can supply their own streams, arguments,
@@ -322,7 +327,7 @@ func regionSync(ctx context.Context, repo regions.Repository, url string, now ti
 
 func runAlert(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	if len(args) == 0 {
-		return errors.New("alert requires a subcommand: create, list, show, edit, publish, unpublish, delete, translate")
+		return errors.New("alert requires a subcommand: create, list, show, edit, publish, unpublish, delete, translate, push, pushes")
 	}
 	cmd, cmdArgs := args[0], args[1:]
 	switch cmd {
@@ -342,8 +347,12 @@ func runAlert(ctx context.Context, stdout io.Writer, store *sqlite.Store, now ti
 		return alertDelete(ctx, store, cmdArgs)
 	case "translate":
 		return alertTranslate(ctx, store, now, cmdArgs)
+	case "push":
+		return alertPush(ctx, stdout, store, now, cmdArgs)
+	case "pushes":
+		return alertPushes(ctx, stdout, store, cmdArgs)
 	default:
-		return fmt.Errorf("unknown alert subcommand %q", cmd)
+		return fmt.Errorf("unknown alert subcommand %q; expected create, list, show, edit, publish, unpublish, delete, translate, push, or pushes", cmd)
 	}
 }
 
@@ -789,6 +798,71 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 		if upsertErr := store.Alerts().UpsertTranslation(ctx, id, t, now); upsertErr != nil {
 			return fmt.Errorf("alert translate: description: %w", upsertErr)
 		}
+	}
+	return nil
+}
+
+// alertPush queues a push of a published alert (design spec §2.11). The CLI
+// never talks to the running server: it writes a queued row that the
+// server's dispatcher claims on its next tick, which is what the success
+// message explains -- nothing has been sent when this returns. The id comes
+// first, as it does for every other alert subcommand: `alert push 3
+// --audience test`.
+func alertPush(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
+	id, err := parseAlertIDArg(alertPushCmd, args)
+	if err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet(alertPushCmd, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	audienceFlag := fs.String("audience", string(alertpush.AudienceAll),
+		"who receives it: all (every registered device in the region) or test (admin-marked test devices only); a test alert always uses test")
+	if parseErr := fs.Parse(args[1:]); parseErr != nil {
+		return fmt.Errorf("alert push: %w", parseErr)
+	}
+
+	audience, err := alertpush.ParseAudience(*audienceFlag)
+	if err != nil {
+		return fmt.Errorf("alert push: %w", err)
+	}
+
+	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
+	p, err := enq.Enqueue(ctx, id, audience, now)
+	if err != nil {
+		return wrapAlertErr(alertPushCmd, id, err)
+	}
+	fmt.Fprintf(stdout, "queued push %d for alert %d (audience %s); the sidecar server sends it on its next dispatcher tick (within 15s), or marks it failed if no push transport is configured\n", p.ID, id, p.Audience)
+	return nil
+}
+
+// alertPushes lists an alert's pushes, newest first. Timestamps print in UTC
+// rather than the region's zone: this is send-machinery bookkeeping read
+// next to server logs, not rider-facing scheduling like `alert show`.
+func alertPushes(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
+	id, err := parseAlertIDArg("alert pushes", args)
+	if err != nil {
+		return err
+	}
+	// Distinguish "no such alert" from "that alert has never been pushed";
+	// ListByAlert answers both with an empty slice.
+	if _, getErr := store.Alerts().Get(ctx, id); getErr != nil {
+		return wrapAlertErr("alert pushes", id, getErr)
+	}
+	list, err := store.AlertPushes().ListByAlert(ctx, id)
+	if err != nil {
+		return fmt.Errorf("alert pushes %d: %w", id, err)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(stdout, "no pushes")
+		return nil
+	}
+	fmt.Fprintf(stdout, "%-6s %-9s %-8s %8s %9s %6s  %-20s  %s\n",
+		"id", "status", "audience", "devices", "submitted", "failed", "created", "last error")
+	for _, p := range list {
+		fmt.Fprintf(stdout, "%-6d %-9s %-8s %8d %9d %6d  %-20s  %s\n",
+			p.ID, p.Status, p.Audience, p.DeviceCount, p.SubmittedCount, p.FailedCount,
+			p.CreatedAt.UTC().Format(time.RFC3339), p.LastError)
 	}
 	return nil
 }

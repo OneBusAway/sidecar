@@ -39,9 +39,24 @@ type adminFixture struct {
 	handler http.Handler
 	store   *sqlite.Store
 	cookie  *http.Cookie
+	// deps is the exact Deps the router was built from, so a test can walk
+	// adminRoutes(f.deps) and know it is looking at the same table this
+	// fixture's handler serves.
+	deps Deps
+	// waker records the dispatcher pokes the alert push routes send.
+	waker *recordingWaker
 }
 
 func newAdminFixture(t *testing.T) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWithDeps(t, nil)
+}
+
+// newAdminFixtureWithDeps is newAdminFixture with a hook that adjusts Deps
+// just before the router is built. It exists for the tests that need a
+// deliberately partial wiring -- an alert push repository with no transport,
+// say -- and still want a real store and a real logged-in session.
+func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
 	t.Helper()
 
 	store := sqlitetest.Open(t)
@@ -69,15 +84,23 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		t.Fatalf("create admin user: %v", err)
 	}
 
-	f := &adminFixture{store: store}
-	f.handler = NewRouter(Deps{
-		Alerts:  store.Alerts(),
-		Regions: store.Regions(),
-		Auth:    store.Auth(),
-		Now:     func() time.Time { return testNow },
-		Logger:  discardLogger(),
-		Sleep:   func(time.Duration) {},
-	})
+	f := &adminFixture{store: store, waker: &recordingWaker{}}
+	deps := Deps{
+		Alerts:         store.Alerts(),
+		Regions:        store.Regions(),
+		Auth:           store.Auth(),
+		Now:            func() time.Time { return testNow },
+		Logger:         discardLogger(),
+		Sleep:          func(time.Duration) {},
+		PushRegs:       store.PushRegs(),
+		AlertPushes:    store.AlertPushes(),
+		AlertPushWaker: f.waker,
+	}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	f.deps = deps
+	f.handler = NewRouter(deps)
 	f.cookie = adminLogin(t, f.handler)
 	return f
 }
@@ -171,7 +194,7 @@ func (f *adminFixture) createAlert(t *testing.T, body string) map[string]any {
 // createAlertID posts an alert and returns its id.
 func (f *adminFixture) createAlertID(t *testing.T, body string) int64 {
 	t.Helper()
-	return alertID(t, f.createAlert(t, body))
+	return jsonID(t, f.createAlert(t, body))
 }
 
 // countAlerts is the "nothing was written" check the rejection tests use.
@@ -195,8 +218,11 @@ func (f *adminFixture) storedAlert(t *testing.T, id int64) alerts.Alert {
 	return a
 }
 
-// alertID reads the id out of a decoded alert body.
-func alertID(t *testing.T, m map[string]any) int64 {
+// jsonID reads the "id" field out of any decoded response body. It is
+// deliberately not named for one resource: alerts and alert pushes both
+// answer with an id, and a helper named for the wrong one reads as a bug at
+// the call site.
+func jsonID(t *testing.T, m map[string]any) int64 {
 	t.Helper()
 	v, ok := m["id"].(float64)
 	if !ok {
@@ -211,6 +237,18 @@ func str(t *testing.T, m map[string]any, key string) string {
 	v, ok := m[key].(string)
 	if !ok {
 		t.Fatalf("%s = %v (%T), want a string", key, m[key], m[key])
+	}
+	return v
+}
+
+// num reads a JSON number field, failing if it is absent or the wrong type.
+// JSON numbers decode as float64, so every count assertion goes through this
+// rather than repeating the type switch inline.
+func num(t *testing.T, m map[string]any, key string) float64 {
+	t.Helper()
+	v, ok := m[key].(float64)
+	if !ok {
+		t.Fatalf("%s = %v (%T), want a number", key, m[key], m[key])
 	}
 	return v
 }
@@ -304,9 +342,15 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		"DELETE /api/admin/v1/session": true,
 	}
 
-	routes := adminRoutes(Deps{Logger: discardLogger()})
-	if want := 14; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions)", len(routes), want)
+	// f.deps, not a zero Deps: some routes are conditional on a dependency
+	// being wired (the alert push routes need a repository and a transport),
+	// and enumerating a bare Deps would walk right past them -- a conditional
+	// route registered without requireSession would ship open with every test
+	// in this file still green.
+	routes := adminRoutes(f.deps)
+	if want := 18; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions + 4 pushes)",
+			len(routes), want)
 	}
 
 	seen := map[string]bool{}
@@ -351,7 +395,10 @@ func TestAdminRoutes_EveryWriteIsCrossSiteGuarded(t *testing.T) {
 
 	f := newAdminFixture(t)
 
-	for _, rt := range adminRoutes(Deps{Logger: discardLogger()}) {
+	// f.deps for the same reason as the sweep above: the conditional routes
+	// have to be in the table being walked or the guard is never checked on
+	// them.
+	for _, rt := range adminRoutes(f.deps) {
 		method, target := concreteRoute(t, rt.pattern)
 		if method == http.MethodGet || method == http.MethodHead {
 			continue // the guard deliberately ignores safe methods
@@ -385,6 +432,7 @@ func concreteRoute(t *testing.T, pattern string) (method, target string) {
 	}
 	path = strings.ReplaceAll(path, "{id}", "1")
 	path = strings.ReplaceAll(path, "{lang}", "es")
+	path = strings.ReplaceAll(path, "{pushId}", "1")
 	if strings.ContainsAny(path, "{}") {
 		t.Fatalf("route pattern %q has a wildcard this test does not know how to fill", pattern)
 	}
@@ -417,7 +465,7 @@ func TestAdminAlerts_CreateSuccess(t *testing.T) {
 	got := object(t, rec, http.StatusCreated)
 	assertKeys(t, "alert", got, alertJSONFields)
 
-	id := alertID(t, got)
+	id := jsonID(t, got)
 	if want := alertPath(id, ""); rec.Header().Get("Location") != want {
 		t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), want)
 	}
@@ -672,7 +720,7 @@ func TestAdminAlerts_List(t *testing.T) {
 		t.Helper()
 		var out []int64
 		for _, m := range array(t, rec, http.StatusOK) {
-			out = append(out, alertID(t, m))
+			out = append(out, jsonID(t, m))
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 		return out
@@ -746,7 +794,7 @@ func TestAdminAlerts_List(t *testing.T) {
 		}
 		for _, m := range items {
 			if boolean(t, m, "published") {
-				t.Errorf("alert %d is published; the fixture only created drafts", alertID(t, m))
+				t.Errorf("alert %d is published; the fixture only created drafts", jsonID(t, m))
 			}
 		}
 	})
@@ -765,7 +813,7 @@ func TestAdminAlerts_Get(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		got := object(t, f.do(http.MethodGet, alertPath(id, ""), ""), http.StatusOK)
 		assertKeys(t, "alert", got, alertJSONFields)
-		if alertID(t, got) != id {
+		if jsonID(t, got) != id {
 			t.Errorf("id = %v, want %d", got["id"], id)
 		}
 		if v := str(t, got, "header"); v != "fetch me" {
@@ -801,7 +849,7 @@ func TestAdminAlerts_PatchAppliesOnlyWhatWasSent(t *testing.T) {
 		"start_time": "2026-08-15T14:00:00-07:00", "end_time": "2026-08-20T14:00:00-07:00",
 		"is_test": true
 	}`)
-	id := alertID(t, created)
+	id := jsonID(t, created)
 
 	got := object(t, f.do(http.MethodPatch, alertPath(id, ""),
 		`{"header":"after header","severity":"SEVERE"}`), http.StatusOK)
@@ -1273,7 +1321,13 @@ func (m *recordingMux) Handle(pattern string, _ http.Handler) {
 func TestRegisterAdminRoutes_RegistersExactlyTheTable(t *testing.T) {
 	t.Parallel()
 
-	deps := Deps{Logger: discardLogger()}
+	// Every conditional route must be present in the Deps under test, or a
+	// stray mux.Handle guarded by the same condition would go unnoticed.
+	deps := Deps{
+		Logger:         discardLogger(),
+		AlertPushes:    failingAlertPushes{},
+		AlertPushWaker: &recordingWaker{},
+	}
 	rec := &recordingMux{}
 	registerAdminRoutes(rec, deps)
 
@@ -1352,17 +1406,24 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 
 	repo := newStubAuth()
 	repo.addUser("admin", testHash())
-	h := NewRouter(Deps{
-		Alerts:  failingAlerts{},
-		Regions: failingRegions{},
-		Auth:    repo,
-		Now:     func() time.Time { return testNow },
-		Logger:  discardLogger(),
-		Sleep:   func(time.Duration) {},
-	})
+	// One Deps builds the router and supplies the table, so the routes swept
+	// are exactly the routes served -- including the conditional push routes,
+	// whose repositories fail here like every other.
+	deps := Deps{
+		Alerts:         failingAlerts{},
+		Regions:        failingRegions{},
+		Auth:           repo,
+		Now:            func() time.Time { return testNow },
+		Logger:         discardLogger(),
+		Sleep:          func(time.Duration) {},
+		PushRegs:       failingPushRegs{},
+		AlertPushes:    failingAlertPushes{},
+		AlertPushWaker: &recordingWaker{},
+	}
+	h := NewRouter(deps)
 	cookie := adminLogin(t, h)
 
-	for _, rt := range adminRoutes(Deps{Logger: discardLogger()}) {
+	for _, rt := range adminRoutes(deps) {
 		if strings.HasSuffix(rt.pattern, "/session") {
 			continue // the session routes do not touch these two stores
 		}
@@ -1466,34 +1527,11 @@ func TestParseInstantJSON(t *testing.T) {
 	region := regions.Region{ID: 7, Timezone: "America/Los_Angeles"}
 
 	t.Run("an explicit offset is required", func(t *testing.T) {
-		for _, in := range []string{
-			"2026-08-15T14:00:00",
-			"2026-08-15 14:00:00-07:00",
-			"2026-08-15",
-			"",
-			"tomorrow",
-		} {
-			got, err := parseInstantJSON(in, region)
-			if err == nil {
-				t.Errorf("parseInstantJSON(%q) = %v, nil; want an error naming the region timezone", in, got)
-				continue
-			}
-			assertContains(t, fmt.Sprintf("parseInstantJSON(%q) error", in), err.Error(),
-				"RFC 3339", "explicit offset", "region 7", "America/Los_Angeles")
-		}
+		assertNaiveInstantsRejected(t, region)
 	})
 
 	t.Run("offsets are normalized to UTC", func(t *testing.T) {
-		got, err := parseInstantJSON("2026-08-15T14:00:00-07:00", region)
-		if err != nil {
-			t.Fatalf("parseInstantJSON: %v", err)
-		}
-		if want := time.Date(2026, 8, 15, 21, 0, 0, 0, time.UTC); !got.Equal(want) {
-			t.Errorf("= %v, want %v", got, want)
-		}
-		if got.Location() != time.UTC {
-			t.Errorf("location = %v, want UTC", got.Location())
-		}
+		assertOffsetNormalizedToUTC(t, region)
 	})
 
 	t.Run("Z counts as an explicit offset", func(t *testing.T) {
@@ -1506,14 +1544,59 @@ func TestParseInstantJSON(t *testing.T) {
 	// :" -- a sentence that stops mid-clause and reads like a bug in the error
 	// message rather than the fact it is reporting.
 	t.Run("an unconfigured timezone reads as a sentence", func(t *testing.T) {
-		_, err := parseInstantJSON("2026-08-15T14:00:00", regions.Region{ID: 16})
-		if err == nil {
-			t.Fatal("parseInstantJSON accepted a naive datetime")
-		}
-		assertContains(t, "unconfigured-zone error", err.Error(),
-			"RFC 3339", "explicit offset", "region 16 has no configured timezone")
-		if strings.Contains(err.Error(), "configured as :") {
-			t.Errorf("error still has the truncated clause: %v", err)
-		}
+		assertUnconfiguredZoneReadsAsSentence(t)
 	})
+}
+
+// assertNaiveInstantsRejected walks every input that lacks an explicit
+// offset and pins both halves of the contract: the parse fails, and the
+// error names the region timezone the author would otherwise have guessed.
+func assertNaiveInstantsRejected(t *testing.T, region regions.Region) {
+	t.Helper()
+	for _, in := range []string{
+		"2026-08-15T14:00:00",
+		"2026-08-15 14:00:00-07:00",
+		"2026-08-15",
+		"",
+		"tomorrow",
+	} {
+		got, err := parseInstantJSON(in, region)
+		if err == nil {
+			t.Errorf("parseInstantJSON(%q) = %v, nil; want an error naming the region timezone", in, got)
+			continue
+		}
+		assertContains(t, fmt.Sprintf("parseInstantJSON(%q) error", in), err.Error(),
+			"RFC 3339", "explicit offset", "region 7", "America/Los_Angeles")
+	}
+}
+
+// assertOffsetNormalizedToUTC pins that an accepted instant comes back as
+// the same moment expressed in UTC.
+func assertOffsetNormalizedToUTC(t *testing.T, region regions.Region) {
+	t.Helper()
+	got, err := parseInstantJSON("2026-08-15T14:00:00-07:00", region)
+	if err != nil {
+		t.Fatalf("parseInstantJSON: %v", err)
+	}
+	if want := time.Date(2026, 8, 15, 21, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("= %v, want %v", got, want)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC", got.Location())
+	}
+}
+
+// assertUnconfiguredZoneReadsAsSentence pins the wording of the rejection
+// for a region whose timezone was never synced.
+func assertUnconfiguredZoneReadsAsSentence(t *testing.T) {
+	t.Helper()
+	_, err := parseInstantJSON("2026-08-15T14:00:00", regions.Region{ID: 16})
+	if err == nil {
+		t.Fatal("parseInstantJSON accepted a naive datetime")
+	}
+	assertContains(t, "unconfigured-zone error", err.Error(),
+		"RFC 3339", "explicit offset", "region 16 has no configured timezone")
+	if strings.Contains(err.Error(), "configured as :") {
+		t.Errorf("error still has the truncated clause: %v", err)
+	}
 }

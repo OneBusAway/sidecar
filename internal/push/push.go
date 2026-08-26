@@ -36,6 +36,31 @@ type Sender interface {
 	Send(ctx context.Context, n Notification) error
 }
 
+// Rejection is one token gorush refused synchronously (design spec §2.5):
+// in core.sync mode gorush reports inline failures such as BadDeviceToken
+// or an oversized payload in the response "logs", and those tokens never
+// reach the feedback webhook.
+type Rejection struct {
+	Token  string
+	Reason string
+}
+
+// BatchResult is what the transport reported inline for one batch. An empty
+// Rejected is the normal case in gorush's default async mode, where every
+// failure arrives later via the webhook (§6.5).
+type BatchResult struct {
+	Rejected []Rejection
+}
+
+// BatchSender delivers one notification to many tokens and returns the
+// transport's synchronous rejections. notifID is stamped on the request so
+// asynchronous feedback can be correlated back to the send (design spec
+// §2.8). A nil error means the transport accepted the batch, not that any
+// device received it.
+type BatchSender interface {
+	SendBatch(ctx context.Context, n Notification, notifID string) (BatchResult, error)
+}
+
 // terminalReasons are exactly the spec's list (§6.5). ExpiredToken (also
 // never-retry per Apple) is deliberately excluded to stay spec-faithful;
 // tokens it would have caught die at the 180-day prune instead.

@@ -90,6 +90,8 @@ sidecar-admin alert   create --region N --header TEXT --start RFC3339
                                [--severity S] [--test | --no-test]
                        publish ID | unpublish ID | delete ID
                        translate ID --language es [--header TEXT] [--description TEXT]
+                       push ID [--audience all|test]   # queue a push notification
+                       pushes ID                       # that alert's pushes
 sidecar-admin study   create --region N --name S [--description S]
                        list --region N
 sidecar-admin survey  create --study N --file <path|->
@@ -105,6 +107,122 @@ sidecar-admin user    create --username NAME [--password-stdin]
                        delete --username NAME [--force]
 sidecar-admin migrate  up | status
 ```
+
+### Sending alerts as push notifications
+
+A published alert can also be sent to the region's registered devices as a push
+notification. A push is a record, not a request: enqueueing one inserts a row and
+returns immediately, and the server's dispatcher performs the fan-out in the
+background, paging through the audience so a large send survives a restart. Both
+trigger surfaces — the admin API (and the SPA's push card) and `sidecar-admin` —
+go through the same preconditions, so they cannot drift.
+
+A push is accepted only when the alert is **published**, no other push for that
+alert is still `queued` or `sending`, and the audience is not empty. Several
+*completed* pushes per alert are fine: sending to test devices, checking the
+result, then sending to everyone is the intended workflow.
+
+**Audiences.** `all` is every registration in the alert's region; `test` is only
+those registered with `test_device`. An alert authored with `--test` can only
+ever reach test devices — the server forces the `test` audience whatever was
+asked for, the same rule that keeps test alerts out of the rider-facing feed
+unless `?test=1` is passed.
+
+**Copy** is derived from the alert mechanically and snapshotted into the push row
+when it is enqueued, so editing the alert mid-send does not change what the rest
+of the audience receives, and the record shows what was actually sent. The
+English title is the header and the body is the description; when the description
+is blank the title is empty and the header becomes the body, because a push with
+no body is invisible on the lock screen. Titles are clamped to 48 runes and
+bodies to 120, truncated on a rune boundary with a trailing `…`. A translation is
+used only while it is fresh — the same staleness rule the feed applies — and the
+field it does not cover falls back to English. Each device's locale is normalized
+against the languages in the snapshot; anything that does not match gets English.
+
+#### Admin API
+
+```text
+POST   /api/admin/v1/alerts/{id}/pushes            {"audience":"all"|"test"}
+GET    /api/admin/v1/alerts/{id}/pushes
+DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}
+GET    /api/admin/v1/alerts/{id}/push_audience
+```
+
+Session-authenticated admin routes like the rest of `/api/admin/v1`. `POST`
+answers `202` with the queued push and wakes the dispatcher immediately; `GET
+…/pushes` answers `200` with that alert's pushes, newest first; `DELETE` cancels
+one and answers `204`; `GET …/push_audience` answers `200` with the `all` and
+`test` device counts (split by platform) and a `forced_test` flag for a test
+alert. Errors are `{"error": "..."}`: `400` for a malformed body or an audience
+that is neither `all` nor `test`, `404` for an unknown alert, an unknown push, or
+a `pushId` belonging to a different alert, and `409` for each precondition
+(unpublished alert, a push already in flight, empty audience) and for canceling a
+push that has already finished.
+
+**These four routes are registered only when `SIDECAR_GORUSH_URL` is set.**
+Without a transport the admin UI reports that push notifications are not
+configured on this server, rather than letting an operator queue a send that
+could only fail. The feedback accounting below keeps working either way.
+
+#### Sending from `sidecar-admin`
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db alert push 3 --audience test
+./bin/sidecar-admin --db ./sidecar.db alert pushes 3
+```
+
+`alert push` prints the id of the row it queued. The CLI never talks to the
+running server, so nothing is sent until the dispatcher's next tick — within
+about 15 seconds. A sidecar started without a gorush URL still runs the
+dispatcher, and marks each push it claims `failed` with `no push transport
+configured`, so a CLI-queued push never sits `queued` forever.
+
+#### Reading the counts
+
+- `device_count` is the audience size measured when the send started. It is 0
+  while the push is still queued.
+- `submitted_count` is how many tokens gorush accepted. That is the only positive
+  state there is: nothing in the chain confirms end delivery.
+- `failed_count` is how many were later reported undeliverable. It is never
+  subtracted from `submitted_count` — a device can be in both, which is more
+  honest than claiming to know the outcome.
+
+gorush runs asynchronously in both `compose.yaml` and `render.yaml` (it forces
+`core.sync` off unless its queue engine is local), so a batch returns `success:
+ok` with an empty `logs` array and every failure arrives later on the feedback
+webhook. Each batch is stamped with a `notif_id` of `alertpush:<push id>`, which
+is what lets a bounce be counted against the push that caused it. Under
+`core.sync` the rejections come back inline instead and are counted at send time;
+both paths feed the same counter, and a webhook gorush replays is deduplicated
+rather than double-counted.
+
+Failures are stored as a SHA-256 hash of the token and a reason, never the token
+itself: the hash is only a deduplication key, nothing reads it back, and a
+plaintext copy would outlive the registration's retention window. Those rows
+cascade-delete with their push, and the pushes cascade with the alert.
+
+#### Resuming, retrying, canceling
+
+The dispatcher ticks every 15 seconds and commits a cursor after each page of
+500 registrations, so a crash mid-send resumes at the last committed page and
+re-sends at most that one page. A row left `sending` and untouched for 15 minutes
+is treated as stuck and reclaimed by the next cycle. (A restart does not wait
+that out: the server's first cycle after boot adopts every in-flight row at
+once, so a deploy mid-send resumes in seconds.) The stuck clock is also what paces
+retries: a transport error leaves the push `sending` with its attempt counted and
+its cursor where it was, and after five *consecutive* failures the push is marked
+`failed`. A page that succeeds resets the counter, so a long send is not killed
+by five scattered errors over its lifetime. Store read errors are not counted as
+attempts; they say nothing about the transport. A store *write* failure after a
+page has gone out — the cursor commit that records it — does count, because
+otherwise a store that never accepts that write would re-send the same page on
+every reclaim forever.
+
+Canceling a `queued` push stops it before it starts. Canceling one mid-send stops
+it at the next page boundary — batches already handed to gorush are on their way
+and cannot be recalled. Canceling an already-finished push is a `409`. The
+dispatcher also cancels a push on its own if the alert was deleted or unpublished
+between enqueue and send.
 
 ## Surveys
 
@@ -444,10 +562,22 @@ authenticated webhook is not rate limited -- gorush reports one failure per
 dead token, and a mass uninstall arrives as a burst that a throttle would
 turn into lost prune signals.
 
+The same endpoint is where an alert push's asynchronous failures are counted:
+a payload carrying a `notif_id` of `alertpush:<push id>` increments that
+push's `failed_count` and records the token's hash, whether or not the
+failure reason is a terminal one (see *Sending alerts as push notifications*).
+
 Without the secret the endpoint still works, but is rate limited per client
 IP as an abuse ceiling and should be restricted to the gorush host at the
 proxy. A dropped prune is not lost data: the token is cleaned up by the
-180-day sweep, or by the next failure gorush reports.
+180-day sweep, or by the next failure gorush reports. The push accounting is
+the one thing an open webhook lets an anonymous caller *write*: someone who
+guesses a `notif_id` can inflate a push's failure counters. What bounds that
+is the throttle and the fact that there is nothing there to corrupt beyond a
+report -- the rows hold a counter and token hashes, nothing reads either back
+to make a delivery decision, and both cascade away with the push and its
+alert. A deployment that cares about the accuracy of its own fan-out numbers
+sets the shared secret; that is what the setting is for.
 
 #### Render
 

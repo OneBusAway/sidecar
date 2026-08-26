@@ -81,3 +81,68 @@ export interface Region {
 export interface SessionUser {
 	username: string;
 }
+
+/**
+ * A push's lifecycle. `queued` and `sending` are the in-flight pair; the other
+ * three are terminal and never change again (see `isInFlight` in lib/pushes).
+ */
+export type PushStatus = 'queued' | 'sending' | 'sent' | 'failed' | 'canceled';
+
+/**
+ * Who a push goes to. `test` is every device registered against a test alert's
+ * region by the apps' internal builds; `all` is everyone.
+ */
+export type PushAudienceKind = 'all' | 'test';
+
+/** One language's rendered notification text. */
+export interface PushMessage {
+	title: string;
+	body: string;
+}
+
+/** One push of one alert, as the admin API returns it. */
+export interface AlertPush {
+	id: number;
+	alert_id: number;
+	region_id: number;
+	audience: PushAudienceKind;
+	status: PushStatus;
+	/**
+	 * The audience size fixed when the push started, so it is 0 until then.
+	 * `submitted_count` can legitimately EXCEED it: a page that was resumed
+	 * after a crash re-sends a bounded duplicate batch.
+	 */
+	device_count: number;
+	submitted_count: number;
+	failed_count: number;
+	attempts: number;
+	/** Always a string. `''` means no error, never null. */
+	last_error: string;
+	/** Language code to text, always including `'en'`. */
+	messages: Record<string, PushMessage>;
+	/** Grouped per-device failures, top 10 by count. Empty when there are none. */
+	failure_reasons: { reason: string; count: number }[];
+	created_at: string;
+	/** null until the dispatcher picks the push up. */
+	started_at: string | null;
+	/** null until the push reaches a terminal status. */
+	completed_at: string | null;
+}
+
+/** How many devices one audience covers, split by platform. */
+export interface AudienceCount {
+	total: number;
+	ios: number;
+	android: number;
+}
+
+/** The body of `GET /alerts/{id}/push_audience`. */
+export interface PushAudience {
+	all: AudienceCount;
+	test: AudienceCount;
+	/**
+	 * True for a test alert, which can only ever go to test devices. The SPA
+	 * hides the audience choice rather than offering one the API would reject.
+	 */
+	forced_test: boolean;
+}

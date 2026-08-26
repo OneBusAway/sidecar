@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -59,6 +60,19 @@ type Deps struct {
 	// PushLimiter is the §2.6 throttle for the push_registrations path.
 	// NewRouter defaults it (30/minute per IP); tests inject tighter ones.
 	PushLimiter *ratelimit.Limiter
+
+	// AlertPushes backs the feedback webhook's alert-push failure accounting
+	// (design spec §2.8) and, together with AlertPushWaker, the admin
+	// alert-push routes (§2.9). main always sets it: the webhook must keep
+	// accounting even when no transport is configured.
+	AlertPushes alertpush.Repository
+	// AlertPushWaker is the dispatcher, poked after every enqueue so a send
+	// starts at once rather than at the next tick. main sets it only when a
+	// push transport is configured, so it doubles as the "pushes can be
+	// sent" signal: the admin routes are registered only when both this and
+	// AlertPushes are non-nil, and the SPA shows "not configured" instead of
+	// letting an operator queue a push that can only fail.
+	AlertPushWaker alertpush.Waker
 
 	// FeedbackSecret, when non-empty, is the bearer token /webhooks/gorush
 	// requires. Empty keeps the endpoint open, because a deployment whose
@@ -335,6 +349,16 @@ func NewRouter(deps Deps) http.Handler {
 		if len(missing) > 0 {
 			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
 		}
+		// The alert push routes count the audience before they enqueue
+		// (design spec §2.9); Alerts, Regions and Now are already guaranteed
+		// above, so the registry is the one thing left that would nil-deref
+		// inside the first handler instead of at boot.
+		if alertPushRoutesEnabled(deps) {
+			if missing := missingDeps(map[string]bool{"Deps.PushRegs": deps.PushRegs == nil}); len(missing) > 0 {
+				panic("httpapi: " + strings.Join(missing, ", ") +
+					" required when Deps.AlertPushes and Deps.AlertPushWaker are set")
+			}
+		}
 		registerAdminRoutes(mux, deps)
 	}
 	return mux
@@ -363,7 +387,7 @@ func adminRoutes(deps Deps) []adminRoute {
 	alertsAdmin := &adminAlertsHandler{deps: deps}
 	regionsAdmin := &adminRegionsHandler{deps: deps}
 
-	return []adminRoute{
+	routes := []adminRoute{
 		// Login has no session to require yet; the cross-site guard is what
 		// protects it (design spec §4.4).
 		{"POST /api/admin/v1/session", session.login, false},
@@ -388,6 +412,29 @@ func adminRoutes(deps Deps) []adminRoute {
 		{"GET /api/admin/v1/regions", regionsAdmin.list, true},
 		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, true},
 	}
+
+	// The alert push routes are conditional (design spec §2.9) but still
+	// come from this one table: a route mounted outside it would be
+	// invisible to the tests that prove every admin route carries its
+	// middleware.
+	if alertPushRoutesEnabled(deps) {
+		pushesAdmin := &adminPushesHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"POST /api/admin/v1/alerts/{id}/pushes", pushesAdmin.create, true},
+			adminRoute{"GET /api/admin/v1/alerts/{id}/pushes", pushesAdmin.list, true},
+			adminRoute{"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, true},
+			adminRoute{"GET /api/admin/v1/alerts/{id}/push_audience", pushesAdmin.audience, true},
+		)
+	}
+	return routes
+}
+
+// alertPushRoutesEnabled reports whether a push can actually be sent. The
+// waker is the dispatcher, which main supplies only when a transport is
+// configured: without it the routes must not exist, so an operator gets
+// "not configured" from the SPA rather than a push that sits queued forever.
+func alertPushRoutesEnabled(deps Deps) bool {
+	return deps.AlertPushes != nil && deps.AlertPushWaker != nil
 }
 
 // routeRegistrar is the one method registerAdminRoutes needs from

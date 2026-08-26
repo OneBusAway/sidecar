@@ -14,6 +14,7 @@ import (
 	"github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
@@ -48,6 +49,17 @@ func cli(t *testing.T, dbPath string, args ...string) (string, string, error) {
 	full := append([]string{"--db", dbPath}, args...)
 	err := run(strings.NewReader(""), &stdout, &stderr, full)
 	return stdout.String(), stderr.String(), err
+}
+
+// cliErrContains runs the CLI and fails the test unless it returned an error
+// whose message contains want -- the shape every rejection assertion in the
+// alert-push tests takes, where "any error at all" would be too weak.
+func cliErrContains(t *testing.T, dbPath, want string, args ...string) {
+	t.Helper()
+	_, stderr, err := cli(t, dbPath, args...)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("%v err = %v (stderr %q), want an error containing %q", args, err, stderr, want)
+	}
 }
 
 // parseCreatedID extracts the id `alert create` prints on success.
@@ -907,4 +919,56 @@ func TestRegionList_ShowsCentroid(t *testing.T) {
 	if !strings.Contains(stdout, "centroid=—") {
 		t.Errorf("region list = %q, want an em dash for the unsynced region", stdout)
 	}
+}
+
+// TestAlertPushEnqueuesAndLists covers `alert push` end to end -- the
+// preconditions it inherits from alertpush.Enqueuer (published, in-flight,
+// audience) and the row `alert pushes` reads back. Nothing is sent: the CLI
+// only writes the queued row the server's dispatcher claims.
+func TestAlertPushEnqueuesAndLists(t *testing.T) {
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	ctx := context.Background()
+	if err := store.PushRegs().Upsert(ctx, pushreg.Upsert{RegionID: 1, Token: "tok", OperatingSystem: pushreg.OSIOS}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--agency-id", "1", "--header", "Hdr", "--start", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := parseCreatedID(t, out)
+	idArg := strconv.FormatInt(id, 10)
+
+	if emptyOut, _, listErr := cli(t, dbPath, "alert", "pushes", idArg); listErr != nil || !strings.Contains(emptyOut, "no pushes") {
+		t.Fatalf("pushes before any push: out %q err %v", emptyOut, listErr)
+	}
+	cliErrContains(t, dbPath, "not found", "alert", "pushes", "999")
+	cliErrContains(t, dbPath, "not published", "alert", "push", idArg)
+
+	if _, _, pubErr := cli(t, dbPath, "alert", "publish", idArg); pubErr != nil {
+		t.Fatal(pubErr)
+	}
+	out, _, err = cli(t, dbPath, "alert", "push", idArg)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if !strings.HasPrefix(out, "queued push 1 for alert") || !strings.Contains(out, "audience all") {
+		t.Errorf("stdout = %q", out)
+	}
+	cliErrContains(t, dbPath, "already queued", "alert", "push", idArg)
+	// The in-flight check must run before the audience check.
+	cliErrContains(t, dbPath, "already queued", "alert", "push", idArg, "--audience", "test")
+
+	out, _, err = cli(t, dbPath, "alert", "pushes", idArg)
+	if err != nil {
+		t.Fatalf("pushes: %v", err)
+	}
+	if !strings.Contains(out, "queued") || !strings.Contains(out, "all") {
+		t.Errorf("pushes stdout = %q", out)
+	}
+	cliErrContains(t, dbPath, "not found", "alert", "push", "999")
+	// The audience must be rejected on its own terms: a push is in flight
+	// here, so a bare "err != nil" would pass even if an unknown value were
+	// silently coerced to "all".
+	cliErrContains(t, dbPath, "audience must be", "alert", "push", idArg, "--audience", "everyone")
 }

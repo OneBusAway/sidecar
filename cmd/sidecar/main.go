@@ -23,6 +23,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -77,6 +78,12 @@ const (
 
 	// alarmCheckInterval is the alarm scheduler's cycle cadence (spec §5.3).
 	alarmCheckInterval = time.Minute
+	// alertPushInterval is the alert push dispatcher's tick (design spec
+	// §2.6). The admin API wakes the dispatcher directly after every
+	// enqueue, so this ticker is only the at-least-once safety net: it
+	// picks up rows the CLI created (it has no handle on a running server)
+	// and rows a crash orphaned mid-send.
+	alertPushInterval = 15 * time.Second
 	// pushRegPruneEvery and pushRegMaxAge bound the push_registrations
 	// table: prune once a day (spec §12) any row unseen for 180 days (spec
 	// §4).
@@ -189,11 +196,6 @@ func run(stdout, stderr io.Writer, args []string) error {
 	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
 	go regions.RunSyncLoop(ctx, client, store.Regions(), *refresh, time.Now, logger)
 
-	// Hoisted out of the ServerConfig literal so the alarm scheduler below
-	// shares the same obaapi.Client that vehicle search uses, rather than
-	// constructing a second one.
-	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret)
-
 	go pushreg.RunPruneLoop(ctx, store.PushRegs(), pushRegPruneEvery, pushRegMaxAge, time.Now, logger)
 
 	// The scheduler always runs, even with no push transport: its Expire
@@ -201,11 +203,18 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// §13); only the fire step needs a sender.
 	var sender push.Sender
 	var laSender push.LiveActivitySender
+	// batchSender is the same *push.Gorush as sender, kept separately
+	// because the dispatcher wants the batch interface, and assigned only
+	// inside the branch that builds one: assigning a nil *push.Gorush would
+	// leave a non-nil interface wrapping a nil pointer, defeating both the
+	// dispatcher's own Sender == nil check and the waker gate below.
+	var batchSender push.BatchSender
 	if *gorushURL == "" {
-		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms and Live Activities will be stored and reaped but never pushed")
+		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms and Live Activities will be stored and reaped but never pushed, and alert pushes will fail immediately")
 	} else {
 		g := push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
 		sender = g
+		batchSender = g
 		if *apnsTopic == "" {
 			// Gorush.SendLiveActivity refuses every call without a topic, and
 			// the updater treats a refused send as a transport blip it must
@@ -217,6 +226,36 @@ func run(stdout, stderr io.Writer, args []string) error {
 			laSender = g
 		}
 	}
+
+	// Alert push fan-out (spec §4, §12 row 3). The dispatcher runs even with
+	// no transport (design spec §2.6): the CLI can enqueue a push without a
+	// server, and those rows must be resolved -- failed with a reason an
+	// operator can read -- rather than left queued forever. Only the admin
+	// routes are gated on a transport, via Deps.AlertPushWaker below.
+	dispatcher := &alertpush.Dispatcher{
+		Repo:     store.AlertPushes(),
+		Alerts:   store.Alerts(),
+		PushRegs: store.PushRegs(),
+		Sender:   batchSender,
+		Now:      time.Now,
+		Logger:   logger,
+	}
+	go dispatcher.RunLoop(ctx, alertPushInterval)
+
+	// The waker, unlike the dispatcher itself, is set only when a transport
+	// exists: it is what registers the admin push routes (design spec
+	// §2.9), and an operator must not be offered a queue button that can
+	// only produce failed pushes.
+	var waker alertpush.Waker
+	if batchSender != nil {
+		waker = dispatcher
+	}
+
+	// Hoisted out of the ServerConfig literal so the alarm scheduler below
+	// shares the same obaapi.Client that vehicle search uses, rather than
+	// constructing a second one.
+	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
+
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),
 		Regions: store.Regions(),
@@ -262,7 +301,11 @@ func run(stdout, stderr io.Writer, args []string) error {
 // not in httpapi, because cmd/ is the one place in this repo allowed to
 // touch the wall clock directly (design spec §2.3); everywhere else gets it
 // injected.
-func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, webhookSecret string) httpapi.Deps {
+// A nil waker means no push transport is configured, which is what keeps the
+// admin alert-push routes unregistered (design spec §2.9); Deps.AlertPushes
+// is wired either way, because the feedback webhook must keep accounting
+// failures against pushes the CLI enqueued (design spec §2.12).
+func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, webhookSecret string, waker alertpush.Waker) httpapi.Deps {
 	if webhookSecret == "" {
 		logger.Warn("no --gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET set; " +
 			"POST /webhooks/gorush is open to anyone (rate limited); restrict it at the proxy")
@@ -315,6 +358,8 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, w
 		Surveys:          store.Surveys(),
 		GhostBus:         store.GhostBus(),
 		LiveActivities:   store.LiveActivities(),
+		AlertPushes:      store.AlertPushes(),
+		AlertPushWaker:   waker,
 	}
 }
 

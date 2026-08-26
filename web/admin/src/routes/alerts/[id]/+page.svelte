@@ -12,7 +12,15 @@
 		regionName,
 		type AlertFormValues,
 	} from '$lib/alerts';
-	import type { Alert, Translation } from '$lib/types';
+	import {
+		audienceOptions,
+		isInFlight,
+		progressLabel,
+		sendButtonLabel,
+		sendConfirmMessage,
+		statusTone,
+	} from '$lib/pushes';
+	import type { Alert, PushAudienceKind, Translation } from '$lib/types';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -158,6 +166,92 @@
 			tBusy = false;
 		}
 	}
+
+	// --- Push notification (design spec §2.10) -------------------------------
+
+	let pushError = $state('');
+	let pushBusy = $state(false);
+	/**
+	 * The audience the operator picked, or null for "hasn't picked one".
+	 *
+	 * The default lives in `chosenAudience` rather than here, so that it
+	 * follows the server: a stored 'all' would go stale the moment the alert is
+	 * edited into a test alert, and 'all' is then an audience the API refuses.
+	 */
+	let pushAudience = $state<PushAudienceKind | null>(null);
+
+	const pushOptions = $derived(
+		data.audience === null ? [] : audienceOptions(data.audience),
+	);
+	/**
+	 * What Send actually sends: the operator's choice when it is still on
+	 * offer, else the first option -- 'all' normally, 'test' when the server
+	 * says this alert's audience is forced.
+	 */
+	const chosenAudience = $derived(
+		pushOptions.find((o) => o.value === pushAudience)?.value ??
+			pushOptions[0]?.value ??
+			'test',
+	);
+	/**
+	 * True while any push may still change. It disables Send -- the API allows
+	 * only one push in flight per alert -- and drives the poll below.
+	 */
+	const pushInFlight = $derived(data.pushes.some(isInFlight));
+
+	/**
+	 * A queued push is handed to a dispatcher that ticks every 15 seconds and
+	 * then reports progress as it batches, so the counts move without anything
+	 * happening in this tab. Polling stops the moment nothing is in flight,
+	 * which is what keeps an idle alert page from re-reading forever.
+	 */
+	$effect(() => {
+		if (!pushInFlight) return;
+		const timer = setInterval(() => void invalidateAll(), 3000);
+		return () => clearInterval(timer);
+	});
+
+	async function sendPush() {
+		if (
+			data.audience === null ||
+			!confirm(sendConfirmMessage(chosenAudience, data.audience))
+		) {
+			return;
+		}
+		pushBusy = true;
+		pushError = '';
+		try {
+			await api.post(`/alerts/${alert.id}/pushes`, {
+				audience: chosenAudience,
+			});
+			// 202 carries the new push, but the history is re-read anyway: the
+			// dispatcher may already have moved it on, and the response is a
+			// snapshot of the instant it was inserted.
+			await reload();
+		} catch (err) {
+			pushError = message(err, 'could not queue the push');
+		} finally {
+			pushBusy = false;
+		}
+	}
+
+	async function cancelPush(id: number) {
+		if (!confirm(`Cancel push #${id}? Notifications already sent stay sent.`)) {
+			return;
+		}
+		pushBusy = true;
+		pushError = '';
+		try {
+			await api.del(`/alerts/${alert.id}/pushes/${id}`);
+			// 204, and a cancel races the dispatcher (409 once the push has
+			// finished), so the real status only comes from re-reading.
+			await reload();
+		} catch (err) {
+			pushError = message(err, 'could not cancel this push');
+		} finally {
+			pushBusy = false;
+		}
+	}
 </script>
 
 <div class="head">
@@ -205,6 +299,114 @@
 	</button>
 	<a href={resolve('/')}>Back to alerts</a>
 </div>
+
+<section class="card">
+	<h2>Push notification</h2>
+
+	{#if data.audience === null}
+		<p class="note">
+			Push notifications are not configured on this server (no gorush URL).
+		</p>
+	{:else}
+		{#if pushError}<p class="error" role="alert">{pushError}</p>{/if}
+
+		{#if !alert.published}
+			<p class="note">Publish the alert to send it as a push notification.</p>
+		{:else if data.audience.forced_test}
+			<p class="note">
+				This is a test alert, so the only audience on offer is {pushOptions[0]
+					.label}. The API refuses any other audience for it.
+			</p>
+		{:else}
+			<fieldset>
+				<legend>Audience</legend>
+				{#each pushOptions as option (option.value)}
+					<label class="radio">
+						<input
+							type="radio"
+							name="push-audience"
+							value={option.value}
+							checked={chosenAudience === option.value}
+							onchange={() => (pushAudience = option.value)}
+						/>
+						{option.label}
+					</label>
+				{/each}
+			</fieldset>
+		{/if}
+
+		<div class="actions">
+			<button
+				type="button"
+				disabled={!alert.published || pushBusy || pushInFlight}
+				onclick={sendPush}
+			>
+				{data.audience === null
+					? 'Send push'
+					: sendButtonLabel(chosenAudience, data.audience)}
+			</button>
+			{#if pushInFlight}
+				<span class="zone">A push is in flight; the counts refresh here.</span>
+			{/if}
+		</div>
+
+		{#if data.pushes.length === 0}
+			<p class="empty">This alert has never been pushed.</p>
+		{:else}
+			<table>
+				<thead>
+					<tr>
+						<th>Push</th>
+						<th>Status</th>
+						<th>Audience</th>
+						<th>Progress</th>
+						<th>Queued</th>
+						<th>Errors</th>
+						<th></th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each data.pushes as push (push.id)}
+						<tr>
+							<td>#{push.id}</td>
+							<td>
+								<span class="badge {statusTone(push.status)}"
+									>{push.status}</span
+								>
+							</td>
+							<td>{push.audience}</td>
+							<td>{progressLabel(push)}</td>
+							<td>{formatInstantForRegion(push.created_at, zone)}</td>
+							<td>
+								{#if push.last_error}<div class="err">
+										{push.last_error}
+									</div>{/if}
+								{#each push.failure_reasons as reason (reason.reason)}
+									<div class="zone">{reason.reason} ({reason.count})</div>
+								{/each}
+								{#if !push.last_error && push.failure_reasons.length === 0}
+									—
+								{/if}
+							</td>
+							<td class="rowactions">
+								{#if isInFlight(push)}
+									<button
+										type="button"
+										class="danger"
+										disabled={pushBusy}
+										onclick={() => cancelPush(push.id)}
+									>
+										Cancel
+									</button>
+								{/if}
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/if}
+	{/if}
+</section>
 
 <h2>Details</h2>
 
@@ -443,6 +645,55 @@
 		margin: 0 0 0.75rem;
 		font-size: 0.9rem;
 		color: #4a5560;
+	}
+
+	.card {
+		margin: 0 0 1.5rem;
+		padding: 0.9rem 1.1rem;
+		border: 1px solid #dde2e6;
+		border-radius: 4px;
+		background: #fff;
+	}
+
+	.card h2 {
+		margin-top: 0;
+	}
+
+	.card .actions {
+		margin-bottom: 0.75rem;
+	}
+
+	.card table {
+		margin-bottom: 0;
+	}
+
+	fieldset {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 1.25rem;
+		margin: 0 0 0.9rem;
+		padding: 0.5rem 0.8rem 0.7rem;
+		border: 1px solid #dde2e6;
+		border-radius: 4px;
+	}
+
+	legend {
+		font-size: 0.85rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: #5a6570;
+	}
+
+	label.radio {
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 0.4rem;
+		font-weight: 400;
+	}
+
+	.err {
+		color: #7f1d1a;
 	}
 
 	.error {
