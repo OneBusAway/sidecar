@@ -14,6 +14,7 @@ import (
 	"github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
@@ -906,5 +907,65 @@ func TestRegionList_ShowsCentroid(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "centroid=—") {
 		t.Errorf("region list = %q, want an em dash for the unsynced region", stdout)
+	}
+}
+
+// TestAlertPushEnqueuesAndLists covers `alert push` end to end -- the
+// preconditions it inherits from alertpush.Enqueuer (published, in-flight,
+// audience) and the row `alert pushes` reads back. Nothing is sent: the CLI
+// only writes the queued row the server's dispatcher claims.
+func TestAlertPushEnqueuesAndLists(t *testing.T) {
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	ctx := context.Background()
+	if err := store.PushRegs().Upsert(ctx, pushreg.Upsert{RegionID: 1, Token: "tok", OperatingSystem: pushreg.OSIOS}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--agency-id", "1", "--header", "Hdr", "--start", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := parseCreatedID(t, out)
+
+	if emptyOut, _, listErr := cli(t, dbPath, "alert", "pushes", strconv.FormatInt(id, 10)); listErr != nil || !strings.Contains(emptyOut, "no pushes") {
+		t.Fatalf("pushes before any push: out %q err %v", emptyOut, listErr)
+	}
+	if _, _, listErr := cli(t, dbPath, "alert", "pushes", "999"); listErr == nil || !strings.Contains(listErr.Error(), "not found") {
+		t.Errorf("pushes for unknown alert err = %v, want not found", listErr)
+	}
+	if _, stderr, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10)); pushErr == nil || !strings.Contains(pushErr.Error(), "not published") {
+		t.Fatalf("push unpublished: err %v stderr %s", pushErr, stderr)
+	}
+	if _, _, pubErr := cli(t, dbPath, "alert", "publish", strconv.FormatInt(id, 10)); pubErr != nil {
+		t.Fatal(pubErr)
+	}
+	out, _, err = cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10))
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if !strings.HasPrefix(out, "queued push 1 for alert") || !strings.Contains(out, "audience all") {
+		t.Errorf("stdout = %q", out)
+	}
+	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10)); pushErr == nil || !strings.Contains(pushErr.Error(), "already queued") {
+		t.Errorf("second push err = %v, want in-flight error", pushErr)
+	}
+	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10), "--audience", "test"); pushErr == nil || !strings.Contains(pushErr.Error(), "already queued") {
+		t.Errorf("in-flight check must run before the audience check: %v", pushErr)
+	}
+	out, _, err = cli(t, dbPath, "alert", "pushes", strconv.FormatInt(id, 10))
+	if err != nil {
+		t.Fatalf("pushes: %v", err)
+	}
+	if !strings.Contains(out, "queued") || !strings.Contains(out, "all") {
+		t.Errorf("pushes stdout = %q", out)
+	}
+	if _, _, pushErr := cli(t, dbPath, "alert", "push", "999"); pushErr == nil || !strings.Contains(pushErr.Error(), "not found") {
+		t.Errorf("unknown alert err = %v", pushErr)
+	}
+	// The audience must be rejected on its own terms: a push is in flight
+	// here, so a bare "err != nil" would pass even if an unknown value were
+	// silently coerced to "all".
+	if _, _, pushErr := cli(t, dbPath, "alert", "push", strconv.FormatInt(id, 10), "--audience", "everyone"); pushErr == nil || !strings.Contains(pushErr.Error(), "audience must be") {
+		t.Errorf("bad audience err = %v, want an audience rejection", pushErr)
 	}
 }
