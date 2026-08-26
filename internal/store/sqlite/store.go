@@ -22,6 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
+	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -182,6 +183,12 @@ func (s *Store) LiveActivities() liveactivities.Repository {
 // Surveys returns the surveys.Repository backed by this store.
 func (s *Store) Surveys() surveys.Repository {
 	return &surveyRepo{db: s.db, q: s.q}
+}
+
+// AlertPushes returns the alertpush.Repository backed by this store
+// (spec §4, design spec §3).
+func (s *Store) AlertPushes() alertpush.Repository {
+	return &alertPushRepo{db: s.db, q: s.q}
 }
 
 // GhostBus returns the ghostbus.Repository backed by this store (spec §8).
