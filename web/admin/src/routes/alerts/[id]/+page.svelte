@@ -16,6 +16,7 @@
 		audienceOptions,
 		isInFlight,
 		progressLabel,
+		sendButtonLabel,
 		sendConfirmMessage,
 		statusTone,
 	} from '$lib/pushes';
@@ -313,8 +314,8 @@
 			<p class="note">Publish the alert to send it as a push notification.</p>
 		{:else if data.audience.forced_test}
 			<p class="note">
-				This is a test alert, so it can only go to its test devices ({data
-					.audience.test.total}). The API refuses any other audience for it.
+				This is a test alert, so the only audience on offer is {pushOptions[0]
+					.label}. The API refuses any other audience for it.
 			</p>
 		{:else}
 			<fieldset>
@@ -340,7 +341,9 @@
 				disabled={!alert.published || pushBusy || pushInFlight}
 				onclick={sendPush}
 			>
-				Send push
+				{data.audience === null
+					? 'Send push'
+					: sendButtonLabel(chosenAudience, data.audience)}
 			</button>
 			{#if pushInFlight}
 				<span class="zone">A push is in flight; the counts refresh here.</span>

@@ -15,6 +15,7 @@ import {
 	loadAudience,
 	loadPushes,
 	progressLabel,
+	sendButtonLabel,
 	sendConfirmMessage,
 	statusTone,
 } from './pushes';
@@ -84,6 +85,27 @@ describe('progressLabel', () => {
 		expect(
 			progressLabel({ device_count: 10, submitted_count: 12, failed_count: 1 }),
 		).toBe('12 sent · 1 failed · of 10');
+	});
+});
+
+describe('sendButtonLabel', () => {
+	// The button is the last thing read before the click, so the count has to
+	// be on it and not only in the dialog it opens (design spec §2.10).
+	it('names the audience size', () => {
+		expect(sendButtonLabel('all', audience)).toBe('Send push to 1,200 devices');
+		expect(sendButtonLabel('test', audience)).toBe(
+			'Send push to 3 test devices',
+		);
+	});
+
+	it('is singular for one device', () => {
+		const one: PushAudience = {
+			all: { total: 1, ios: 1, android: 0 },
+			test: { total: 1, ios: 0, android: 1 },
+			forced_test: false,
+		};
+		expect(sendButtonLabel('all', one)).toBe('Send push to 1 device');
+		expect(sendButtonLabel('test', one)).toBe('Send push to 1 test device');
 	});
 });
 

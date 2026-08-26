@@ -113,7 +113,10 @@ function mount(opts: {
 	});
 }
 
-const sendButton = () => screen.getByRole('button', { name: 'Send push' });
+// Matched on the prefix: the label carries the audience size, which several
+// tests assert exactly.
+const sendButton = () =>
+	screen.getByRole('button', { name: /^Send push/ }) as HTMLButtonElement;
 
 beforeEach(() => {
 	postMock.mockReset().mockResolvedValue(undefined);
@@ -132,7 +135,7 @@ describe('the push card', () => {
 	it('says push is not configured when the routes are missing', () => {
 		mount({ audience: null });
 		expect(screen.getByText(/not configured on this server/)).toBeVisible();
-		expect(screen.queryByRole('button', { name: 'Send push' })).toBeNull();
+		expect(screen.queryByRole('button', { name: /^Send push/ })).toBeNull();
 	});
 
 	it('refuses to send an unpublished alert', () => {
@@ -145,7 +148,9 @@ describe('the push card', () => {
 		const user = userEvent.setup();
 		mount({});
 
-		// 'all' is the default: the audience options put it first.
+		// 'all' is the default: the audience options put it first, and the
+		// button says so before it is pressed (design spec §2.10).
+		expect(sendButton()).toHaveAccessibleName('Send push to 1,200 devices');
 		await user.click(sendButton());
 		expect(postMock).toHaveBeenCalledWith('/alerts/7/pushes', {
 			audience: 'all',
@@ -153,6 +158,9 @@ describe('the push card', () => {
 		expect(invalidateAllMock).toHaveBeenCalledTimes(1);
 
 		await user.click(screen.getByLabelText('Test devices (3)'));
+		// The label follows the radio, so the button and the confirm() it opens
+		// can never name different audiences.
+		expect(sendButton()).toHaveAccessibleName('Send push to 3 test devices');
 		await user.click(sendButton());
 		expect(postMock).toHaveBeenLastCalledWith('/alerts/7/pushes', {
 			audience: 'test',
@@ -172,9 +180,22 @@ describe('the push card', () => {
 	});
 
 	it('hides the audience choice for a forced-test alert', () => {
-		mount({ audience: { ...AUDIENCE, forced_test: true } });
+		// A four-digit test fleet, so a raw interpolation ("1200") fails where
+		// the shared formatter ("1,200") passes.
+		mount({
+			audience: {
+				...AUDIENCE,
+				test: { total: 1200, ios: 900, android: 300 },
+				forced_test: true,
+			},
+		});
 		expect(screen.queryByLabelText(/^Everyone/)).toBeNull();
-		expect(screen.getByText(/only go to its test devices/)).toBeVisible();
+		expect(
+			screen.getByText(/the only audience on offer is Test devices \(1,200\)/),
+		).toBeVisible();
+		expect(sendButton()).toHaveAccessibleName(
+			'Send push to 1,200 test devices',
+		);
 	});
 
 	it('cancels the in-flight push by id and blocks a second send', async () => {

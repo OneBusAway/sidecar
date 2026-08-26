@@ -79,6 +79,30 @@ export function progressLabel(
 }
 
 /**
+ * audiencePhrase names an audience by size: "1,200 devices", "3 test devices".
+ *
+ * The button and the confirm() share it deliberately -- the operator reads the
+ * count twice and must see the same number both times, or the dialog looks
+ * like it is confirming something other than what they clicked.
+ */
+function audiencePhrase(kind: PushAudienceKind, a: PushAudience): string {
+	const n = kind === 'test' ? a.test.total : a.all.total;
+	return kind === 'test' ? devices(n, 'test device') : devices(n);
+}
+
+/**
+ * sendButtonLabel is the Send button's text, which names the audience size
+ * (design spec §2.10). The button is the last thing read before the click, so
+ * the count belongs on it and not only in the dialog behind it.
+ */
+export function sendButtonLabel(
+	kind: PushAudienceKind,
+	a: PushAudience,
+): string {
+	return `Send push to ${audiencePhrase(kind, a)}`;
+}
+
+/**
  * sendConfirmMessage is the text of the confirm() shown before queueing, and
  * names the number of real devices about to be woken up. A push cannot be
  * unsent, so the size is the one fact the dialog must carry.
@@ -87,9 +111,7 @@ export function sendConfirmMessage(
 	kind: PushAudienceKind,
 	a: PushAudience,
 ): string {
-	const n = kind === 'test' ? a.test.total : a.all.total;
-	const what = kind === 'test' ? devices(n, 'test device') : devices(n);
-	return `Send this alert as a push notification to ${what}?`;
+	return `Send this alert as a push notification to ${audiencePhrase(kind, a)}?`;
 }
 
 /**
