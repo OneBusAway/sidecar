@@ -112,6 +112,10 @@ type Repository interface {
 	// 'unavailable' in the same UPDATE. Returns the post-increment count.
 	RecordSnapshotFailure(ctx context.Context, id int64, now time.Time) (int64, error)
 	ListForExport(ctx context.Context, regionID int64, sinceUnix int64) ([]Report, error) // created_at >= sinceUnix; 0 = all
+	// GetByPublicID resolves one report within a region. The region is a
+	// query condition: a report in another region is ErrNotFound, never a
+	// row the caller has to remember to check.
+	GetByPublicID(ctx context.Context, regionID int64, publicID string) (Report, error)
 }
 
 // ValidWaitDuration reports whether v is one of the §8 choices. slices is

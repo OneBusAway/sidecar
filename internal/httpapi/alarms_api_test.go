@@ -632,6 +632,12 @@ func (erroringAlarmsRepo) RecordFailure(context.Context, int64) (int64, error) {
 func (erroringAlarmsRepo) ResetFailures(context.Context, int64) error {
 	panic("erroringAlarmsRepo.ResetFailures: unused by these tests")
 }
+func (erroringAlarmsRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.ListByRegion: unused by these tests")
+}
+func (erroringAlarmsRepo) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.GetInRegion: unused by these tests")
+}
 
 // TestCreate_StoreErrorSanitizesUserPushIDAndToken covers the create-error
 // log path: a failed Create's error can embed both user_push_id (the query

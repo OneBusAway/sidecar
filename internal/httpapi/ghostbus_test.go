@@ -64,6 +64,9 @@ func (f *fakeGhostBusRepo) RecordSnapshotFailure(context.Context, int64, time.Ti
 func (f *fakeGhostBusRepo) ListForExport(context.Context, int64, int64) ([]ghostbus.Report, error) {
 	panic("not used by handler tests")
 }
+func (f *fakeGhostBusRepo) GetByPublicID(context.Context, int64, string) (ghostbus.Report, error) {
+	panic("not used by handler tests")
+}
 
 // newGhostBusTestServer builds a router with the ghost bus route registered
 // over a real (sqlite) regions store and the given fake repo. Nil limiters

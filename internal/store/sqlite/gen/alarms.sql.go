@@ -154,12 +154,91 @@ func (q *Queries) FindV1Alarm(ctx context.Context, arg FindV1AlarmParams) (Alarm
 	return i, err
 }
 
+const getAlarmInRegion = `-- name: GetAlarmInRegion :one
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms WHERE id = ?1 AND region_id = ?2
+`
+
+type GetAlarmInRegionParams struct {
+	ID       int64
+	RegionID int64
+}
+
+func (q *Queries) GetAlarmInRegion(ctx context.Context, arg GetAlarmInRegionParams) (Alarm, error) {
+	row := q.db.QueryRowContext(ctx, getAlarmInRegion, arg.ID, arg.RegionID)
+	var i Alarm
+	err := row.Scan(
+		&i.ID,
+		&i.RegionID,
+		&i.Token,
+		&i.ApiVersion,
+		&i.UserPushID,
+		&i.OperatingSystem,
+		&i.ApnsSandbox,
+		&i.StopID,
+		&i.TripID,
+		&i.ServiceDate,
+		&i.VehicleID,
+		&i.StopSequence,
+		&i.SecondsBefore,
+		&i.Message,
+		&i.FailureCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listAlarms = `-- name: ListAlarms :many
 SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms ORDER BY id
 `
 
 func (q *Queries) ListAlarms(ctx context.Context) ([]Alarm, error) {
 	rows, err := q.db.QueryContext(ctx, listAlarms)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Alarm{}
+	for rows.Next() {
+		var i Alarm
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.Token,
+			&i.ApiVersion,
+			&i.UserPushID,
+			&i.OperatingSystem,
+			&i.ApnsSandbox,
+			&i.StopID,
+			&i.TripID,
+			&i.ServiceDate,
+			&i.VehicleID,
+			&i.StopSequence,
+			&i.SecondsBefore,
+			&i.Message,
+			&i.FailureCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAlarmsByRegion = `-- name: ListAlarmsByRegion :many
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms WHERE region_id = ?1 ORDER BY id
+`
+
+func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Alarm, error) {
+	rows, err := q.db.QueryContext(ctx, listAlarmsByRegion, regionID)
 	if err != nil {
 		return nil, err
 	}

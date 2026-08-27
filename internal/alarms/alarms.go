@@ -90,6 +90,14 @@ type Repository interface {
 	List(ctx context.Context) ([]Alarm, error)                  // scheduler sweep, all regions
 	RecordFailure(ctx context.Context, id int64) (int64, error) // ++failure_count, returns streak
 	ResetFailures(ctx context.Context, id int64) error
+	// ListByRegion returns one region's alarms, oldest first. The admin API
+	// reads it; the scheduler still uses List, which sweeps every region.
+	ListByRegion(ctx context.Context, regionID int64) ([]Alarm, error)
+	// GetInRegion takes the region as a query condition rather than
+	// comparing it afterwards, so an alarm addressed through the wrong
+	// region is ErrNotFound in SQL and cannot become a Go check somebody
+	// later deletes (design spec section 3.2).
+	GetInRegion(ctx context.Context, regionID, id int64) (Alarm, error)
 }
 
 // NormalizeSecondsBefore applies the §5.2 rule: absent, non-numeric, or

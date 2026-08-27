@@ -50,3 +50,7 @@ RETURNING snapshot_attempts;
 SELECT * FROM ghost_bus_reports
 WHERE region_id = @region_id AND created_at >= @since
 ORDER BY id;
+
+-- name: GetGhostBusReportByPublicID :one
+SELECT * FROM ghost_bus_reports
+WHERE region_id = @region_id AND public_identifier = @public_identifier;

@@ -170,3 +170,32 @@ func (r *alarmRepo) ResetFailures(ctx context.Context, id int64) error {
 	}
 	return nil
 }
+
+// ListByRegion returns one region's alarms, oldest first, for the admin API.
+func (r *alarmRepo) ListByRegion(ctx context.Context, regionID int64) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListAlarmsByRegion(ctx, regionID)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list alarms (region %d): %w", regionID, err)
+	}
+	out := make([]alarms.Alarm, len(rows))
+	for i, row := range rows {
+		out[i] = alarmFromRow(row)
+	}
+	return out, nil
+}
+
+// GetInRegion reports alarms.ErrNotFound for an unknown id -- including an
+// id that exists but in a different region, which is the region-scoping
+// guarantee: the query, not a Go comparison, is what makes an alarm
+// addressed through the wrong region indistinguishable from one that does
+// not exist.
+func (r *alarmRepo) GetInRegion(ctx context.Context, regionID, id int64) (alarms.Alarm, error) {
+	row, err := r.q.GetAlarmInRegion(ctx, gen.GetAlarmInRegionParams{ID: id, RegionID: regionID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return alarms.Alarm{}, fmt.Errorf("sqlite: get alarm %d (region %d): %w", id, regionID, alarms.ErrNotFound)
+		}
+		return alarms.Alarm{}, fmt.Errorf("sqlite: get alarm %d (region %d): %w", id, regionID, err)
+	}
+	return alarmFromRow(row), nil
+}

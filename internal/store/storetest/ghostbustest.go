@@ -29,6 +29,21 @@ func RunGhostBusRepository(t *testing.T, newStore func(*testing.T) (ghostbus.Rep
 	t.Run("FailureCapMarksUnavailable", func(t *testing.T) { testGhostBusFailureCap(t, newStore) })
 	t.Run("CaptureRoundTrip", func(t *testing.T) { testGhostBusCaptureRoundTrip(t, newStore) })
 	t.Run("ExportSinceFilter", func(t *testing.T) { testGhostBusExportSince(t, newStore) })
+	t.Run("GetByPublicIDIsRegionScoped", func(t *testing.T) { testGhostBusGetByPublicID(t, newStore) })
+}
+
+// seedGhostBusRegions upserts the two regions testGhostBusGetByPublicID
+// uses. Region 0 is deliberately one of them: it is a real region (Tampa
+// Bay), so a repository that treats 0 as "no region" fails here.
+func seedGhostBusRegions(t *testing.T, repo regions.Repository) {
+	t.Helper()
+	err := repo.UpsertFromDirectory(context.Background(), []regions.Region{
+		{ID: 0, Name: "Tampa Bay", OBABaseURL: "https://tampa.example/", Language: "en", Active: true},
+		{ID: 1, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Language: "en", Active: true},
+	}, base)
+	if err != nil {
+		t.Fatalf("seed regions: %v", err)
+	}
 }
 
 // createGhostBusRegion inserts a region row for ghost bus fixtures, using
@@ -279,5 +294,44 @@ func testGhostBusExportSince(t *testing.T, newStore newGhostBusStoreFunc) {
 	all, err := repo.ListForExport(ctx, regionID, 0)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("since=0 returned %d rows err=%v, want 2", len(all), err)
+	}
+}
+
+// testGhostBusGetByPublicID pins the tenancy fence the admin API leans on:
+// the region is a query condition, not something a handler compares after
+// the fact (design spec section 3.2).
+func testGhostBusGetByPublicID(t *testing.T, newStore newGhostBusStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	seedGhostBusRegions(t, regionRepo) // reuse this file's existing seeder
+
+	inA, err := repo.Create(ctx, ghostbus.NewReport{
+		RegionID: 0, PublicID: "pub-a", UserIdentifier: "u1", TripIdentifier: "t1",
+		ServiceDate: 1767225600000, RouteIdentifier: "r1", StopIdentifier: "s1",
+		WaitDurationMinutes: 10,
+	}, base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, createErr := repo.Create(ctx, ghostbus.NewReport{
+		RegionID: 1, PublicID: "pub-b", UserIdentifier: "u2", TripIdentifier: "t2",
+		ServiceDate: 1767225600000, RouteIdentifier: "r2", StopIdentifier: "s2",
+		WaitDurationMinutes: 10,
+	}, base); createErr != nil {
+		t.Fatalf("Create: %v", createErr)
+	}
+
+	got, err := repo.GetByPublicID(ctx, 0, "pub-a")
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if got.ID != inA.ID {
+		t.Errorf("id = %d, want %d", got.ID, inA.ID)
+	}
+	if _, err := repo.GetByPublicID(ctx, 0, "pub-b"); !errors.Is(err, ghostbus.ErrNotFound) {
+		t.Errorf("across regions: err = %v, want ErrNotFound", err)
+	}
+	if _, err := repo.GetByPublicID(ctx, 0, "nope"); !errors.Is(err, ghostbus.ErrNotFound) {
+		t.Errorf("unknown public id: err = %v, want ErrNotFound", err)
 	}
 }
