@@ -375,8 +375,8 @@ func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	// route registered without requirePrincipal would ship open with every
 	// test in this file still green.
 	routes := adminRoutes(f.deps)
-	if want := 19; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes)",
+	if want := 22; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys)",
 			len(routes), want)
 	}
 

@@ -442,6 +442,18 @@ type tenancySpec struct {
 	// bodyFor builds the request body, given the region-B fixture ids. Nil
 	// means no body.
 	bodyFor func(fx tenancyFixtureIDs) string
+	// skipTenancyWalk marks a route the walk cannot exercise at all:
+	// scopeKeyAdmin (the key-management family) grants operators access to
+	// every region without ever consulting canAccessRegion, so driving such
+	// a route as the operator can never produce the 404 this walk asserts
+	// on -- there is no tenancy fence here for it to find. The real fence
+	// for this family is the route's own allow-list, which refuses a region
+	// key before tenancy is ever reached; that is covered instead by
+	// TestAPIKeys_RegionKeyCannotReachKeyManagement. The entry still has to
+	// exist so the walk's "every scoped route has a fixture" check stays
+	// meaningful for routes that are skipped on purpose rather than merely
+	// forgotten.
+	skipTenancyWalk bool
 }
 
 func (s tenancySpec) body(fx tenancyFixtureIDs) string {
@@ -481,6 +493,11 @@ var tenancyFixtures = map[string]tenancySpec{
 	"GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes":             {},
 	"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}": {},
 	"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience":      {},
+
+	// The key-management family: see skipTenancyWalk.
+	"POST /api/admin/v1/regions/{regionId}/api_keys":           {skipTenancyWalk: true},
+	"GET /api/admin/v1/regions/{regionId}/api_keys":            {skipTenancyWalk: true},
+	"DELETE /api/admin/v1/regions/{regionId}/api_keys/{keyId}": {skipTenancyWalk: true},
 }
 
 // seedTenancyFixtures creates, in region B, one of every resource the walk
@@ -581,6 +598,10 @@ func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, b
 // consulted, and the operator reaches every region, so the loader is again the
 // only fence left standing.
 //
+// The key-management family (scopeKeyAdmin) is not walked at all; see
+// skipTenancyWalk for why there is no tenancy fence there for this walk to
+// find.
+//
 // Every route gets its own freshly seeded region B, so one route's verdict
 // never depends on what an earlier one did (or destroyed) -- the per-route
 // message is what an implementer reads when a single route breaks.
@@ -601,6 +622,9 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 			continue
 		}
 		walked[rt.pattern] = true
+		if spec.skipTenancyWalk {
+			continue
+		}
 
 		fx := f.seedTenancyFixtures(t) // a fresh region B = 0 for this route alone
 		before := f.storedAlert(t, fx.alertID)

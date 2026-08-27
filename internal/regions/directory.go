@@ -184,7 +184,7 @@ func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) 
 	// Strip ASCII control characters from the name: it is later printed to
 	// an admin's terminal by `sidecar-admin region list`, where escape
 	// sequences are an injection vector.
-	name := stripControlChars(e.RegionName)
+	name := StripControlChars(e.RegionName)
 	if name == "" || e.OBABaseURL == "" {
 		return Region{}, false
 	}
@@ -207,10 +207,14 @@ func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) 
 	}, true
 }
 
-// stripControlChars removes ASCII control characters (0x00-0x1F and the 0x7F
-// DEL) from s, leaving everything else -- including non-ASCII text --
-// untouched.
-func stripControlChars(s string) string {
+// StripControlChars removes ASCII control characters (0x00-0x1F and the
+// 0x7F DEL) from s, leaving everything else -- including non-ASCII text --
+// untouched. It guards every string that arrives from outside and later
+// reaches an operator's terminal: directory names, and the name on a region
+// API key, which a compromised service principal controls and which
+// `sidecar-admin key list` prints to the terminal of the operator
+// investigating that compromise.
+func StripControlChars(s string) string {
 	if !strings.ContainsFunc(s, isASCIIControl) {
 		return s
 	}

@@ -459,6 +459,18 @@ func adminRoutes(deps Deps) []adminRoute {
 			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey, scopeRegion},
 		)
 	}
+
+	// The key-management family is the one place a service principal is
+	// granted anything, and the one family a region key must never reach --
+	// hence scopeKeyAdmin rather than scopeRegion (design spec §5.6).
+	if deps.APIKeys != nil {
+		keysAdmin := &adminAPIKeysHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/api_keys", keysAdmin.create, operatorOrService, scopeKeyAdmin},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/api_keys", keysAdmin.list, operatorOrService, scopeKeyAdmin},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/api_keys/{keyId}", keysAdmin.revoke, operatorOrService, scopeKeyAdmin},
+		)
+	}
 	return routes
 }
 
@@ -540,11 +552,9 @@ func adminFeatures(deps Deps) []string {
 		features = append(features, "push_registrations")
 	}
 	if deps.APIKeys != nil {
-		// APIKeys also backs bearer authentication, so this reads true one
-		// task ahead of the key-management routes themselves. That is the
-		// right way round: main wires the repository or it wires neither,
-		// and a consumer that believes the family exists is corrected by the
-		// same 404 any unregistered route gives.
+		// APIKeys also backs bearer authentication, and now the
+		// key-management routes themselves; the two are wired from the same
+		// field, so this cannot drift from adminRoutes' own APIKeys gate.
 		features = append(features, "api_keys")
 	}
 	return features
