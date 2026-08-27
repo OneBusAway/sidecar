@@ -143,19 +143,31 @@ type Repository interface {
 	CreateStudy(ctx context.Context, regionID int64, name, description string, now time.Time) (Study, error)
 	GetStudy(ctx context.Context, id int64) (Study, error) // ErrNotFound
 	ListStudies(ctx context.Context, regionID int64) ([]Study, error)
+	// UpdateStudy renames a study. The region is a query condition, so a
+	// study in another region is ErrNotFound and nothing is written
+	// (design spec section 3.2).
+	UpdateStudy(ctx context.Context, regionID, id int64, name, description string, now time.Time) (Study, error)
 
 	CreateSurvey(ctx context.Context, studyID int64, def Definition, now time.Time) (Survey, error) // ErrNotFound for the study
-	GetSurvey(ctx context.Context, id int64) (Survey, error)                                        // ErrNotFound; with Questions and Study
-	ListSurveys(ctx context.Context, regionID int64) ([]Survey, error)                              // every survey, authoring
-	ListActiveSurveys(ctx context.Context, regionID int64, now time.Time) ([]Survey, error)         // spec §7.1 filter
-	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error)      // ErrNotFound, ErrQuestionsFrozen
-	DeleteSurvey(ctx context.Context, id int64) error                                               // ErrNotFound, ErrHasResponses
+	// CreateSurveyInRegion is CreateSurvey with the study's region as a
+	// JOIN condition: a study_id that arrived in a request body but belongs
+	// to another region is ErrNotFound. Body-borne ids never go through a
+	// load-then-compare.
+	CreateSurveyInRegion(ctx context.Context, regionID, studyID int64, def Definition, now time.Time) (Survey, error)
+	GetSurvey(ctx context.Context, id int64) (Survey, error)                                   // ErrNotFound; with Questions and Study
+	ListSurveys(ctx context.Context, regionID int64) ([]Survey, error)                         // every survey, authoring
+	ListActiveSurveys(ctx context.Context, regionID int64, now time.Time) ([]Survey, error)    // spec §7.1 filter
+	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error) // ErrNotFound, ErrQuestionsFrozen
+	DeleteSurvey(ctx context.Context, id int64) error                                          // ErrNotFound, ErrHasResponses
 	CountResponses(ctx context.Context, surveyID int64) (int64, error)
 
 	CreateResponse(ctx context.Context, in NewResponse, now time.Time) (Response, error)                    // ErrNotFound for the survey
 	GetResponse(ctx context.Context, publicID string) (Response, error)                                     // ErrNotFound
 	AmendResponse(ctx context.Context, publicID string, incoming []Answer, now time.Time) (Response, error) // ErrNotFound, ErrTooManyAnswers
 	ListResponses(ctx context.Context, surveyID int64) ([]Response, error)
+	// GetResponseInRegion resolves one response through its survey's study's
+	// region, in a single query.
+	GetResponseInRegion(ctx context.Context, regionID int64, publicID string) (Response, error)
 }
 
 // canonicalJSON is the one place json.RawMessage values are normalized, so

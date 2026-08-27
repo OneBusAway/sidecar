@@ -212,12 +212,66 @@ func (q *Queries) GetResponseByPublicID(ctx context.Context, publicID string) (S
 	return i, err
 }
 
+const getResponseByPublicIDInRegion = `-- name: GetResponseByPublicIDInRegion :one
+SELECT survey_responses.id, survey_responses.survey_id, survey_responses.public_id, survey_responses.user_identifier, survey_responses.stop_identifier, survey_responses.stop_latitude, survey_responses.stop_longitude, survey_responses.answers, survey_responses.created_at, survey_responses.updated_at FROM survey_responses
+JOIN surveys ON surveys.id = survey_responses.survey_id
+JOIN studies ON studies.id = surveys.study_id
+WHERE survey_responses.public_id = ?1
+  AND studies.region_id = ?2
+`
+
+type GetResponseByPublicIDInRegionParams struct {
+	PublicID string
+	RegionID int64
+}
+
+func (q *Queries) GetResponseByPublicIDInRegion(ctx context.Context, arg GetResponseByPublicIDInRegionParams) (SurveyResponse, error) {
+	row := q.db.QueryRowContext(ctx, getResponseByPublicIDInRegion, arg.PublicID, arg.RegionID)
+	var i SurveyResponse
+	err := row.Scan(
+		&i.ID,
+		&i.SurveyID,
+		&i.PublicID,
+		&i.UserIdentifier,
+		&i.StopIdentifier,
+		&i.StopLatitude,
+		&i.StopLongitude,
+		&i.Answers,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getStudy = `-- name: GetStudy :one
 SELECT id, region_id, name, description, created_at, updated_at FROM studies WHERE id = ?1
 `
 
 func (q *Queries) GetStudy(ctx context.Context, id int64) (Study, error) {
 	row := q.db.QueryRowContext(ctx, getStudy, id)
+	var i Study
+	err := row.Scan(
+		&i.ID,
+		&i.RegionID,
+		&i.Name,
+		&i.Description,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getStudyInRegion = `-- name: GetStudyInRegion :one
+SELECT id, region_id, name, description, created_at, updated_at FROM studies WHERE id = ?1 AND region_id = ?2
+`
+
+type GetStudyInRegionParams struct {
+	ID       int64
+	RegionID int64
+}
+
+func (q *Queries) GetStudyInRegion(ctx context.Context, arg GetStudyInRegionParams) (Study, error) {
+	row := q.db.QueryRowContext(ctx, getStudyInRegion, arg.ID, arg.RegionID)
 	var i Study
 	err := row.Scan(
 		&i.ID,
@@ -528,6 +582,40 @@ func (q *Queries) UpdateResponseAnswers(ctx context.Context, arg UpdateResponseA
 		&i.StopLatitude,
 		&i.StopLongitude,
 		&i.Answers,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateStudy = `-- name: UpdateStudy :one
+UPDATE studies SET name = ?1, description = ?2, updated_at = ?3
+WHERE id = ?4 AND region_id = ?5
+RETURNING id, region_id, name, description, created_at, updated_at
+`
+
+type UpdateStudyParams struct {
+	Name        string
+	Description string
+	Now         int64
+	ID          int64
+	RegionID    int64
+}
+
+func (q *Queries) UpdateStudy(ctx context.Context, arg UpdateStudyParams) (Study, error) {
+	row := q.db.QueryRowContext(ctx, updateStudy,
+		arg.Name,
+		arg.Description,
+		arg.Now,
+		arg.ID,
+		arg.RegionID,
+	)
+	var i Study
+	err := row.Scan(
+		&i.ID,
+		&i.RegionID,
+		&i.Name,
+		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

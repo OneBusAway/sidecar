@@ -13,6 +13,14 @@ SELECT * FROM studies WHERE id = @id;
 -- name: ListStudiesByRegion :many
 SELECT * FROM studies WHERE region_id = @region_id ORDER BY id ASC;
 
+-- name: UpdateStudy :one
+UPDATE studies SET name = @name, description = @description, updated_at = @now
+WHERE id = @id AND region_id = @region_id
+RETURNING *;
+
+-- name: GetStudyInRegion :one
+SELECT * FROM studies WHERE id = @id AND region_id = @region_id;
+
 -- name: CreateSurvey :one
 INSERT INTO surveys (
   study_id, name, available, start_time, end_time,
@@ -85,6 +93,13 @@ RETURNING *;
 
 -- name: GetResponseByPublicID :one
 SELECT * FROM survey_responses WHERE public_id = @public_id;
+
+-- name: GetResponseByPublicIDInRegion :one
+SELECT survey_responses.* FROM survey_responses
+JOIN surveys ON surveys.id = survey_responses.survey_id
+JOIN studies ON studies.id = surveys.study_id
+WHERE survey_responses.public_id = @public_id
+  AND studies.region_id = @region_id;
 
 -- name: UpdateResponseAnswers :one
 UPDATE survey_responses SET answers = @answers, updated_at = @now
