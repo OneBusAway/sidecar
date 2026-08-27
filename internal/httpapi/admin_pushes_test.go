@@ -381,13 +381,13 @@ var pushRoutePatterns = []string{
 	"GET /api/admin/v1/alerts/{id}/push_audience",
 }
 
-// TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker is the wiring
+// TestAdminPushRoutesRequireAPrincipalAndAreAbsentWithoutWaker is the wiring
 // half of §2.9. The waker is the dispatcher, and main supplies it only when a
 // transport is configured, so it doubles as the "a push can actually be sent"
 // signal: without it the routes must not exist at all, rather than accepting
 // a push that could only ever sit queued. With it, every one of the four is a
-// normal session-required, cross-site-guarded admin route.
-func TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker(t *testing.T) {
+// normal principal-required, cross-site-guarded admin route.
+func TestAdminPushRoutesRequireAPrincipalAndAreAbsentWithoutWaker(t *testing.T) {
 	t.Parallel()
 
 	t.Run("absent without a waker", func(t *testing.T) {
@@ -395,9 +395,9 @@ func TestAdminPushRoutesRequireSessionAndAreAbsentWithoutWaker(t *testing.T) {
 		assertPushRoutesAbsentWithoutWaker(t)
 	})
 
-	t.Run("listed and session-required when fully wired", func(t *testing.T) {
+	t.Run("listed and principal-required when fully wired", func(t *testing.T) {
 		t.Parallel()
-		assertPushRoutesListedAndSessionRequired(t)
+		assertPushRoutesListedAndPrincipalRequired(t)
 	})
 }
 
@@ -423,13 +423,13 @@ func assertPushRoutesAbsentWithoutWaker(t *testing.T) {
 	}
 }
 
-// assertPushRoutesListedAndSessionRequired pins membership only. What each
-// route then *does* about a missing session and a cross-site write is proven
-// for all eighteen routes by TestAdminRoutes_EveryRouteRequiresASession and
-// TestAdminRoutes_EveryWriteIsCrossSiteGuarded, which walk this same table;
-// the one thing those sweeps cannot notice is a route quietly dropping out of
-// it, which is what this half pins.
-func assertPushRoutesListedAndSessionRequired(t *testing.T) {
+// assertPushRoutesListedAndPrincipalRequired pins membership only. What each
+// route then *does* about a missing principal and a cross-site write is
+// proven for all eighteen routes by TestAdminRoutes_EveryRouteRequiresAPrincipal
+// and TestAdminRoutes_EveryWriteIsCrossSiteGuarded, which walk this same
+// table; the one thing those sweeps cannot notice is a route quietly dropping
+// out of it, which is what this half pins.
+func assertPushRoutesListedAndPrincipalRequired(t *testing.T) {
 	t.Helper()
 	f := newAdminFixture(t)
 
@@ -440,8 +440,8 @@ func assertPushRoutesListedAndSessionRequired(t *testing.T) {
 			continue
 		}
 		listed[rt.pattern] = true
-		if !rt.requiresSession {
-			t.Errorf("route %q: requiresSession = false, want true", rt.pattern)
+		if rt.allowed == nil {
+			t.Errorf("route %q: allowed = nil, want a principal requirement", rt.pattern)
 		}
 	}
 	for _, want := range pushRoutePatterns {

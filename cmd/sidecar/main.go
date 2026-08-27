@@ -344,6 +344,7 @@ func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, w
 		Alerts:           store.Alerts(),
 		Regions:          store.Regions(),
 		Auth:             store.Auth(),
+		APIKeys:          store.APIKeys(),
 		Now:              time.Now,
 		Logger:           logger,
 		AdminUI:          adminui.FS(),

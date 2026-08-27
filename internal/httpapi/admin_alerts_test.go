@@ -89,6 +89,7 @@ func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
 		Alerts:         store.Alerts(),
 		Regions:        store.Regions(),
 		Auth:           store.Auth(),
+		APIKeys:        store.APIKeys(),
 		Now:            func() time.Time { return testNow },
 		Logger:         discardLogger(),
 		Sleep:          func(time.Duration) {},
@@ -320,24 +321,24 @@ func alertPath(id int64, suffix string) string {
 // route wiring
 // ---------------------------------------------------------------------------
 
-// TestAdminRoutes_EveryRouteRequiresASession is the assurance that no admin
+// TestAdminRoutes_EveryRouteRequiresAPrincipal is the assurance that no admin
 // route can reach a handler without its middleware. http.ServeMux cannot be
 // enumerated, so registerAdminRoutes registers from a table and this test
 // walks the same table: a route added tomorrow is covered the moment it
-// exists. The table declares which routes are deliberately session-free
+// exists. The table declares which routes are deliberately principal-free
 // (login and logout, for documented reasons); every other one is proven to
 // answer 401 unauthenticated through the fully wired router, so a route
-// registered without requireSession fails here rather than shipping open.
-func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
+// registered without requirePrincipal fails here rather than shipping open.
+func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
 
-	// The only two routes allowed to skip requireSession, and why: login has
-	// no session yet, and logout must stay idempotent for a SPA tidying up
-	// after a 401 (design spec §4.4/§4.5). The set is pinned rather than
+	// The only two routes allowed to skip requirePrincipal, and why: login
+	// has no session yet, and logout must stay idempotent for a SPA tidying
+	// up after a 401 (design spec §4.4/§4.5). The set is pinned rather than
 	// derived so a third route cannot quietly join it.
-	sessionFree := map[string]bool{
+	principalFree := map[string]bool{
 		"POST /api/admin/v1/session":   true,
 		"DELETE /api/admin/v1/session": true,
 	}
@@ -345,8 +346,8 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 	// f.deps, not a zero Deps: some routes are conditional on a dependency
 	// being wired (the alert push routes need a repository and a transport),
 	// and enumerating a bare Deps would walk right past them -- a conditional
-	// route registered without requireSession would ship open with every test
-	// in this file still green.
+	// route registered without requirePrincipal would ship open with every
+	// test in this file still green.
 	routes := adminRoutes(f.deps)
 	if want := 18; len(routes) != want {
 		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions + 4 pushes)",
@@ -360,11 +361,12 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		}
 		seen[rt.pattern] = true
 
-		wantSession := !sessionFree[rt.pattern]
-		if rt.requiresSession != wantSession {
-			t.Errorf("route %q: requiresSession = %v, want %v", rt.pattern, rt.requiresSession, wantSession)
+		wantPrincipal := !principalFree[rt.pattern]
+		if (rt.allowed != nil) != wantPrincipal {
+			t.Errorf("route %q: allowed = %v, want a principal requirement = %v",
+				rt.pattern, rt.allowed, wantPrincipal)
 		}
-		if !wantSession {
+		if !wantPrincipal {
 			continue
 		}
 
@@ -380,9 +382,44 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		}
 	}
 
-	for pattern := range sessionFree {
+	for pattern := range principalFree {
 		if !seen[pattern] {
 			t.Errorf("route table lost %q", pattern)
+		}
+	}
+}
+
+// TestAdminRoutes_PrincipalAllowLists walks the table with each kind of
+// credential and asserts each route answers 403 exactly when the kind is not
+// in its allowed set. A route that quietly widened its allow-list -- letting
+// a region key send a push, say -- fails here rather than in production.
+func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	regionKey := f.mintRegionKey(t, regionPuget)
+	servicePrincipal := f.mintPrincipal(t)
+
+	kinds := []struct {
+		kind   principalKind
+		header string
+	}{
+		{principalRegionKey, "Bearer " + regionKey},
+		{principalService, "Bearer " + servicePrincipal},
+	}
+
+	for _, rt := range adminRoutes(f.deps) {
+		if rt.allowed == nil {
+			continue // login and logout
+		}
+		method, target := concreteRoute(t, rt.pattern)
+		for _, k := range kinds {
+			rec := sendBearer(f.handler, method, target, "", k.header)
+			forbidden := rec.Code == http.StatusForbidden && bodyText(rec) == `{"error":"forbidden"}`
+			if allowed := rt.allowed.has(k.kind); allowed == forbidden {
+				t.Errorf("%s %s with %s: status = %d body = %s; allowed = %v",
+					method, target, k.kind, rec.Code, rec.Body.String(), allowed)
+			}
 		}
 	}
 }

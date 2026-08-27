@@ -370,8 +370,8 @@ func TestCrossSiteGuard(t *testing.T) {
 
 // TestCrossSiteGuard_AppliesToLogin pins the spec §4.4 requirement that the
 // guard covers POST /session too: login CSRF logs a victim into the
-// attacker's account, and login deliberately sits outside requireSession, so
-// a guard bolted onto requireSession would leave this route open.
+// attacker's account, and login deliberately sits outside requirePrincipal,
+// so a guard bolted onto requirePrincipal would leave this route open.
 func TestCrossSiteGuard_AppliesToLogin(t *testing.T) {
 	t.Parallel()
 
@@ -402,10 +402,11 @@ func TestCrossSiteGuard_AppliesToLogin(t *testing.T) {
 
 const unauthorizedBody = `{"error":"authentication required"}`
 
-// TestRequireSession covers the cookie-to-user path: every way of arriving
-// without a live session is a 401 with one message, and the middleware must
-// actually consult the store rather than waving requests through.
-func TestRequireSession(t *testing.T) {
+// TestAuthenticateSession covers the cookie-to-operator path through
+// requirePrincipal: every way of arriving without a live session is a 401
+// with one message, and the middleware must actually consult the store rather
+// than waving requests through.
+func TestAuthenticateSession(t *testing.T) {
 	t.Parallel()
 
 	liveToken, liveHash, err := auth.NewToken()
@@ -485,12 +486,13 @@ func TestRequireSession(t *testing.T) {
 			}}
 
 			var gotUser string
+			var gotKind principalKind
 			var gotOK bool
 			var called bool
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
-				u, ok := userFrom(r.Context())
-				gotUser, gotOK = u.Username, ok
+				p, ok := principalFrom(r.Context())
+				gotUser, gotKind, gotOK = p.user.Username, p.kind, ok
 				w.WriteHeader(http.StatusOK)
 			})
 
@@ -499,7 +501,7 @@ func TestRequireSession(t *testing.T) {
 				req.AddCookie(tt.cookie)
 			}
 			rec := httptest.NewRecorder()
-			mw.requireSession(next).ServeHTTP(rec, req)
+			mw.requirePrincipal(operatorOnly, next).ServeHTTP(rec, req)
 
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tt.wantStatus, rec.Body.String())
@@ -517,19 +519,22 @@ func TestRequireSession(t *testing.T) {
 				t.Fatal("next handler did not run for a live session")
 			}
 			if !gotOK {
-				t.Fatal("userFrom(ctx) reported no user for a live session")
+				t.Fatal("principalFrom(ctx) reported no principal for a live session")
+			}
+			if gotKind != principalOperator {
+				t.Errorf("principalFrom(ctx).kind = %v, want %v", gotKind, principalOperator)
 			}
 			if gotUser != tt.wantUser {
-				t.Errorf("userFrom(ctx).Username = %q, want %q", gotUser, tt.wantUser)
+				t.Errorf("principalFrom(ctx).user.Username = %q, want %q", gotUser, tt.wantUser)
 			}
 		})
 	}
 }
 
-// TestRequireSession_ExpiredSessionIsPurged pins the half of §3.2's contract
+// TestAuthenticateSession_ExpiredSessionIsPurged pins the half of §3.2's contract
 // the middleware depends on: it does not distinguish expired from unknown
 // because GetSession deletes the expired row itself.
-func TestRequireSession_ExpiredSessionIsPurged(t *testing.T) {
+func TestAuthenticateSession_ExpiredSessionIsPurged(t *testing.T) {
 	t.Parallel()
 
 	token, hash, err := auth.NewToken()
@@ -593,13 +598,19 @@ func TestFeedRoutesStayUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestUserFrom_NoUser guards the accessor itself: a context that never went
-// through requireSession must report ok=false, not a zero-value user that a
-// caller could mistake for an authenticated admin.
-func TestUserFrom_NoUser(t *testing.T) {
+// TestPrincipalFrom_NoPrincipal guards the accessor itself: a context that
+// never went through requirePrincipal must report ok=false, not a zero-value
+// principal a caller could mistake for an authenticated admin. The zero kind
+// is checked too, since that is what keeps such a value out of every
+// allow-list even if a caller ignores the boolean.
+func TestPrincipalFrom_NoPrincipal(t *testing.T) {
 	t.Parallel()
 
-	if u, ok := userFrom(context.Background()); ok {
-		t.Errorf("userFrom(background) = (%+v, true), want ok=false", u)
+	p, ok := principalFrom(context.Background())
+	if ok {
+		t.Errorf("principalFrom(background) = (%+v, true), want ok=false", p)
+	}
+	if p.kind != principalKind(0) {
+		t.Errorf("principalFrom(background).kind = %v, want the zero kind", p.kind)
 	}
 }

@@ -772,23 +772,45 @@ func TestAdminRoutesUnregisteredWithoutAuth(t *testing.T) {
 	}
 }
 
-// TestWhoami_WithoutAuthenticatedUser exercises the tripwire directly, since
-// the router never lets a request reach whoami without requireSession. If
-// someone "simplifies" this branch into a 200 with an empty username, a route
-// that lost its middleware would answer cheerfully instead of failing.
-func TestWhoami_WithoutAuthenticatedUser(t *testing.T) {
+// TestWhoami_WithoutAnOperatorPrincipal exercises both tripwires directly,
+// since the router never lets a request reach whoami without
+// requirePrincipal and an operatorOnly allow-list. If someone "simplifies"
+// either branch into a 200 with an empty username, a route that lost its
+// middleware -- or its allow-list -- would answer cheerfully instead of
+// failing.
+func TestWhoami_WithoutAnOperatorPrincipal(t *testing.T) {
 	t.Parallel()
 
-	h := &sessionHandler{deps: Deps{Logger: discardLogger()}}
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/session", nil)
-	rec := httptest.NewRecorder()
-	h.whoami(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	tests := []struct {
+		name string
+		ctx  func(context.Context) context.Context
+	}{
+		{"no principal at all", func(ctx context.Context) context.Context { return ctx }},
+		{"a region key", func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, principalContextKey,
+				principal{kind: principalRegionKey, regionID: 1, keyID: 2})
+		}},
+		{"a service principal", func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, principalContextKey, principal{kind: principalService, keyID: 3})
+		}},
 	}
-	if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
-		t.Errorf("body = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := &sessionHandler{deps: Deps{Logger: discardLogger()}}
+			req := httptest.NewRequestWithContext(tt.ctx(context.Background()),
+				http.MethodGet, "/api/admin/v1/session", nil)
+			rec := httptest.NewRecorder()
+			h.whoami(rec, req)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+			}
+			if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
+				t.Errorf("body = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

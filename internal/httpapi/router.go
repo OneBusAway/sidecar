@@ -19,6 +19,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
@@ -41,9 +42,18 @@ type Deps struct {
 	// Auth backs the admin session endpoints. When it is nil the admin routes
 	// are not registered at all, so a feed-only deployment (or a feed-only
 	// test) never has to supply one.
-	Auth   auth.Repository
-	Now    func() time.Time
-	Logger *slog.Logger
+	Auth auth.Repository
+	// APIKeys backs bearer authentication and the region API key routes
+	// (design spec §4.2, §5.6). Nil means bearer auth is not configured: any
+	// Authorization header is a 401 -- never a fall-through to the session
+	// cookie -- and the key routes are not registered. main always sets it.
+	APIKeys apikey.Repository
+	// BearerFailLimiter bounds FAILED bearer attempts per peer address.
+	// NewRouter defaults it (60/minute); successful calls are never charged,
+	// so a busy consumer is unmetered.
+	BearerFailLimiter *ratelimit.Limiter
+	Now               func() time.Time
+	Logger            *slog.Logger
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -325,7 +335,7 @@ func NewRouter(deps Deps) http.Handler {
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served
 	// unauthenticated (the login page is part of it) and must never pass
-	// through crossSiteGuard or requireSession, both of which assume a JSON
+	// through crossSiteGuard or requirePrincipal, both of which assume a JSON
 	// API. Nil AdminUI means the binary was built without it, so the routes
 	// are simply not registered.
 	if deps.AdminUI != nil {
@@ -349,6 +359,11 @@ func NewRouter(deps Deps) http.Handler {
 		if len(missing) > 0 {
 			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
 		}
+		// Charged only on a failed bearer attempt (see rejectBearer), so this
+		// bucket never meters a working consumer.
+		if deps.BearerFailLimiter == nil {
+			deps.BearerFailLimiter = ratelimit.New(bearerFailuresPerMinute, time.Minute)
+		}
 		// The alert push routes count the audience before they enqueue
 		// (design spec §2.9); Alerts, Regions and Now are already guaranteed
 		// above, so the registry is the one thing left that would nil-deref
@@ -368,15 +383,17 @@ func NewRouter(deps Deps) http.Handler {
 //
 // The routes are a table rather than a run of mux.Handle calls for one
 // reason: http.ServeMux cannot be enumerated, so a route registered without
-// requireSession would be invisible to every test in this package. The table
-// is the thing a test can walk, which is what makes "every admin route needs a
-// session" checkable rather than merely intended.
+// requirePrincipal would be invisible to every test in this package. The
+// table is the thing a test can walk, which is what makes "every admin route
+// names the credentials it accepts" checkable rather than merely intended.
 type adminRoute struct {
 	pattern string
 	handler http.HandlerFunc
-	// requiresSession is false for exactly two routes, both deliberate and
-	// both documented at their entry in adminRoutes.
-	requiresSession bool
+	// allowed is the set of principal kinds this route accepts. A nil set
+	// means no principal is required at all, which is true of exactly two
+	// routes, both deliberate and both documented at their entry in
+	// adminRoutes.
+	allowed principalSet
 }
 
 // adminRoutes is the admin API route table (design spec §5). It takes Deps so
@@ -390,27 +407,32 @@ func adminRoutes(deps Deps) []adminRoute {
 	routes := []adminRoute{
 		// Login has no session to require yet; the cross-site guard is what
 		// protects it (design spec §4.4).
-		{"POST /api/admin/v1/session", session.login, false},
-		// Logout sits outside requireSession so it stays idempotent: the SPA
-		// calls it to tidy up after a 401, and answering that with another
-		// 401 gives the client nothing it can act on. It is not a hole -- the
-		// handler only ever deletes the session named by the token the caller
-		// presented, and the cross-site guard still covers it.
-		{"DELETE /api/admin/v1/session", session.logout, false},
-		{"GET /api/admin/v1/session", session.whoami, true},
+		{"POST /api/admin/v1/session", session.login, nil},
+		// Logout sits outside requirePrincipal so it stays idempotent: the
+		// SPA calls it to tidy up after a 401, and answering that with
+		// another 401 gives the client nothing it can act on. It is not a
+		// hole -- the handler only ever deletes the session named by the
+		// token the caller presented, and the cross-site guard still covers
+		// it.
+		{"DELETE /api/admin/v1/session", session.logout, nil},
+		// whoami answers "which operator am I", which only an operator has.
+		{"GET /api/admin/v1/session", session.whoami, operatorOnly},
 
-		{"GET /api/admin/v1/alerts", alertsAdmin.list, true},
-		{"POST /api/admin/v1/alerts", alertsAdmin.create, true},
-		{"GET /api/admin/v1/alerts/{id}", alertsAdmin.get, true},
-		{"PATCH /api/admin/v1/alerts/{id}", alertsAdmin.patch, true},
-		{"DELETE /api/admin/v1/alerts/{id}", alertsAdmin.delete, true},
-		{"POST /api/admin/v1/alerts/{id}/publish", alertsAdmin.setPublished(true), true},
-		{"POST /api/admin/v1/alerts/{id}/unpublish", alertsAdmin.setPublished(false), true},
-		{"PUT /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, true},
-		{"DELETE /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, true},
+		{"GET /api/admin/v1/alerts", alertsAdmin.list, operatorOrKey},
+		{"POST /api/admin/v1/alerts", alertsAdmin.create, operatorOrKey},
+		{"GET /api/admin/v1/alerts/{id}", alertsAdmin.get, operatorOrKey},
+		{"PATCH /api/admin/v1/alerts/{id}", alertsAdmin.patch, operatorOrKey},
+		{"DELETE /api/admin/v1/alerts/{id}", alertsAdmin.delete, operatorOrKey},
+		{"POST /api/admin/v1/alerts/{id}/publish", alertsAdmin.setPublished(true), operatorOrKey},
+		{"POST /api/admin/v1/alerts/{id}/unpublish", alertsAdmin.setPublished(false), operatorOrKey},
+		{"PUT /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, operatorOrKey},
+		{"DELETE /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, operatorOrKey},
 
-		{"GET /api/admin/v1/regions", regionsAdmin.list, true},
-		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, true},
+		// The region list is cross-region by construction: it is the one
+		// admin route that hands back every region at once, so a key scoped
+		// to a single region has no business reading it.
+		{"GET /api/admin/v1/regions", regionsAdmin.list, operatorOnly},
+		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, operatorOrKey},
 	}
 
 	// The alert push routes are conditional (design spec §2.9) but still
@@ -419,11 +441,15 @@ func adminRoutes(deps Deps) []adminRoute {
 	// middleware.
 	if alertPushRoutesEnabled(deps) {
 		pushesAdmin := &adminPushesHandler{deps: deps}
+		// Sending and cancelling a push are operator-only: they reach every
+		// rider's device, which is the one blast radius a leaked region key
+		// must not have (design spec §4.5). Reading what was sent, and
+		// counting the audience beforehand, stay open to a region key.
 		routes = append(routes,
-			adminRoute{"POST /api/admin/v1/alerts/{id}/pushes", pushesAdmin.create, true},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/pushes", pushesAdmin.list, true},
-			adminRoute{"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, true},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/push_audience", pushesAdmin.audience, true},
+			adminRoute{"POST /api/admin/v1/alerts/{id}/pushes", pushesAdmin.create, operatorOnly},
+			adminRoute{"GET /api/admin/v1/alerts/{id}/pushes", pushesAdmin.list, operatorOrKey},
+			adminRoute{"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOnly},
+			adminRoute{"GET /api/admin/v1/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey},
 		)
 	}
 	return routes
@@ -449,16 +475,17 @@ type routeRegistrar interface {
 
 // registerAdminRoutes mounts the admin JSON API. Every route passes through
 // crossSiteGuard -- including POST /session, which is the whole reason the
-// guard is separate from requireSession (design spec §4.4) -- and everything
-// except login and logout also requires a live session.
+// guard is separate from requirePrincipal (design spec §4.4) -- and
+// everything except login and logout also requires an authenticated
+// principal drawn from the route's own allow-list.
 //
 // Every registration must come from adminRoutes; see routeRegistrar.
 func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 	mw := &authMiddleware{deps: deps}
 	for _, route := range adminRoutes(deps) {
 		var h http.Handler = route.handler
-		if route.requiresSession {
-			h = mw.requireSession(h)
+		if route.allowed != nil {
+			h = mw.requirePrincipal(route.allowed, h)
 		}
 		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
