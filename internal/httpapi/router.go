@@ -512,6 +512,29 @@ func adminRoutes(deps Deps) []adminRoute {
 			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/api_keys/{keyId}", keysAdmin.revoke, operatorOrService, scopeKeyAdmin},
 		)
 	}
+
+	// The alarm read-only surface (design spec section 5.4), gated on the same
+	// deps.Alarms field the rider-facing v1/v2 alarm routes above are gated
+	// on. NewRouter already panics at boot when Deps.Alarms is set without
+	// PushRegs, Regions, and Now, so no additional guard belongs here.
+	if deps.Alarms != nil {
+		alarmsAdmin := &adminAlarmsHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alarms", alarmsAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alarms/{id}", alarmsAdmin.get, operatorOrKey, scopeRegion},
+		)
+	}
+
+	// Push registration counts (design spec section 5.5), gated on
+	// deps.PushRegs directly rather than on deps.Alarms: a deployment can run
+	// push registrations without alarms, and this route's only dependency is
+	// the registration store.
+	if deps.PushRegs != nil {
+		pushRegsAdmin := &adminPushRegsHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/push_registrations/count", pushRegsAdmin.count, operatorOrKey, scopeRegion},
+		)
+	}
 	return routes
 }
 

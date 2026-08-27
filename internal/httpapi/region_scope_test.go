@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -488,6 +489,9 @@ type tenancyFixtureIDs struct {
 	// other would 404 for the wrong reason (no such row at all) rather than
 	// the tenancy fence this walk exists to prove.
 	reportPublicID string
+	// alarmID is a departure alarm's row id, addressed by GET
+	// .../alarms/{id}.
+	alarmID int64
 }
 
 // tenancyFixtures is keyed by route pattern. Every scoped route needs an
@@ -554,6 +558,21 @@ var tenancyFixtures = map[string]tenancySpec{
 	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports":            {wantEmptyList: true},
 	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports.csv":        {wantEmptyCSV: true},
 	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports/{publicId}": {},
+
+	// Alarms are read-only, like responses and ghost bus reports above: no
+	// admin create route exists (alarms are created only through the
+	// rider-facing v1/v2 endpoints), so the list entry is the
+	// collection-empty shape and the get entry is the default zero value --
+	// GetInRegion's own region_id condition is the fence under test, not a
+	// Go-level load-then-compare.
+	"GET /api/admin/v1/regions/{regionId}/alarms":      {wantEmptyList: true},
+	"GET /api/admin/v1/regions/{regionId}/alarms/{id}": {},
+
+	// The registration count route has no resource of its own beyond the
+	// region in the path -- like GET/PATCH /regions/{regionId} above -- so it
+	// is walked with region B in the path and canAccessRegion is the fence
+	// under test.
+	"GET /api/admin/v1/regions/{regionId}/push_registrations/count": {ownRegion: true},
 }
 
 // seedTenancyFixtures creates, in region B, one of every resource the walk
@@ -610,10 +629,22 @@ func (f *adminFixture) seedTenancyFixtures(t *testing.T) tenancyFixtureIDs {
 		t.Fatalf("seed tenancy ghost bus report: %v", err)
 	}
 
+	// Alarms have no admin create route either -- they are created only
+	// through the rider-facing v1/v2 endpoints -- so this is seeded through
+	// the repository directly, same as the response and report above.
+	alarm, err := f.store.Alarms().Create(context.Background(), alarms.NewAlarm{
+		RegionID: regionB, Token: fmt.Sprintf("tenancy-alarm-%d", alertID), APIVersion: 2,
+		UserPushID: "tenancy-push-id", OperatingSystem: "ios", StopID: "1_1", TripID: "1_1",
+		SecondsBefore: 600, Message: "tenancy alarm",
+	}, testNow)
+	if err != nil {
+		t.Fatalf("seed tenancy alarm: %v", err)
+	}
+
 	return tenancyFixtureIDs{
 		alertID: alertID, pushID: jsonID(t, created),
 		studyID: studyID, surveyID: surveyID, responsePublicID: resp.PublicID,
-		reportPublicID: report.PublicID,
+		reportPublicID: report.PublicID, alarmID: alarm.ID,
 	}
 }
 
@@ -641,6 +672,8 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 		id = fx.studyID
 	case strings.Contains(path, "/surveys"):
 		id = fx.surveyID
+	case strings.Contains(path, "/alarms"):
+		id = fx.alarmID
 	}
 	path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(id, 10))
 	path = strings.ReplaceAll(path, "{pushId}", strconv.FormatInt(fx.pushID, 10))

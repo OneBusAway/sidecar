@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -406,8 +407,8 @@ func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	// route registered without requirePrincipal would ship open with every
 	// test in this file still green.
 	routes := adminRoutes(f.deps)
-	if want := 37; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys + 9 surveys + 3 responses + 3 ghost bus reports)",
+	if want := 40; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys + 9 surveys + 3 responses + 3 ghost bus reports + 2 alarms + 1 push registration count)",
 			len(routes), want)
 	}
 
@@ -1575,6 +1576,33 @@ func (failingGhostBus) GetByPublicID(context.Context, int64, string) (ghostbus.R
 	return ghostbus.Report{}, errStoreBroken
 }
 
+// failingAlarms fails every call, for the same reason failingAlerts does:
+// every method fails, so the sweep below cannot pass on a route by accident
+// because the one method it happened to reach still worked.
+type failingAlarms struct{}
+
+func (failingAlarms) Create(context.Context, alarms.NewAlarm, time.Time) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+func (failingAlarms) FindV1(context.Context, alarms.V1Key) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+func (failingAlarms) Delete(context.Context, int64, string) error { return errStoreBroken }
+func (failingAlarms) DeleteByID(context.Context, int64) error     { return errStoreBroken }
+func (failingAlarms) List(context.Context) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) RecordFailure(context.Context, int64) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingAlarms) ResetFailures(context.Context, int64) error { return errStoreBroken }
+func (failingAlarms) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+
 // TestAdminAPI_StoreFailuresAre500 pins the last rule of the API contract: a
 // broken store is a logged 500 with one fixed body on every route, never a 4xx
 // that would send an operator hunting for a client mistake, and never the
@@ -1605,6 +1633,7 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		AlertPushWaker: &recordingWaker{},
 		Surveys:        failingSurveys{},
 		GhostBus:       failingGhostBus{},
+		Alarms:         failingAlarms{},
 	}
 	h := NewRouter(deps)
 	cookie := adminLogin(t, h)

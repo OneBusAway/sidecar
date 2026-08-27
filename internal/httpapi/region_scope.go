@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -287,4 +288,31 @@ func loadReport(w http.ResponseWriter, r *http.Request, deps Deps) (ghostbus.Rep
 		return ghostbus.Report{}, false
 	}
 	return rep, true
+}
+
+// loadAlarm resolves {id} within the request's region through
+// GetInRegion's own region_id condition, exactly like loadResponse and
+// loadReport above: the region is a SQL condition, not a Go-level
+// load-then-compare, so an alarm addressed through the wrong region is
+// ErrNotFound in SQL and cannot become a check a later refactor drops.
+func loadAlarm(w http.ResponseWriter, r *http.Request, deps Deps) (alarms.Alarm, bool) {
+	region, ok := mustRegion(w, r, deps)
+	if !ok {
+		return alarms.Alarm{}, false
+	}
+	id, err := pathInt64(r, "id")
+	if err != nil {
+		writeJSONError(w, deps.Logger, http.StatusBadRequest, err.Error())
+		return alarms.Alarm{}, false
+	}
+	a, err := deps.Alarms.GetInRegion(r.Context(), region.ID, id)
+	if err != nil {
+		if errors.Is(err, alarms.ErrNotFound) {
+			writeJSONError(w, deps.Logger, http.StatusNotFound, "alarm not found")
+			return alarms.Alarm{}, false
+		}
+		serverErrorJSON(w, deps.Logger, "get alarm", err)
+		return alarms.Alarm{}, false
+	}
+	return a, true
 }

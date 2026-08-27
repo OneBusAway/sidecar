@@ -58,10 +58,19 @@ func (f *adminFixture) seedPublishedAlert(t *testing.T, regionID int64, isTest b
 // admin test device, which is the only membership the "test" audience has.
 func (f *adminFixture) seedRegistration(t *testing.T, regionID int64, token string, testDevice bool) {
 	t.Helper()
+	f.seedRegistrationOn(t, regionID, token, "ios", testDevice)
+}
+
+// seedRegistrationOn is seedRegistration with an explicit platform. It is a
+// second helper rather than a widened seedRegistration signature, so every
+// existing alert-push test that calls seedRegistration keeps compiling
+// unchanged.
+func (f *adminFixture) seedRegistrationOn(t *testing.T, regionID int64, token, platform string, testDevice bool) {
+	t.Helper()
 	if err := f.store.PushRegs().Upsert(context.Background(), pushreg.Upsert{
 		RegionID:        regionID,
 		Token:           token,
-		OperatingSystem: "ios",
+		OperatingSystem: platform,
 		TestDevice:      &testDevice,
 	}, testNow); err != nil {
 		t.Fatalf("seed registration %q in region %d: %v", token, regionID, err)
