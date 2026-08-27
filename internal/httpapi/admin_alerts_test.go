@@ -1445,11 +1445,33 @@ func (failingRegions) SetLocalFields(context.Context, int64, regions.LocalFields
 	return errStoreBroken
 }
 
+// scopedRegions is failingRegions with a working Get, and only Get.
+//
+// It exists because the region scope calls Regions.Get before any scoped
+// handler runs: with failingRegions the middleware would answer 500 first, and
+// the sweep below would pass on sixteen of nineteen routes without ever
+// reaching the handler error path it is written to pin. Every other method
+// still fails, so the region handlers' own store errors are unaffected.
+type scopedRegions struct{ failingRegions }
+
+// Get answers for any id with the region concreteRoute addresses, so the
+// scope resolves and the request lands in the handler.
+func (scopedRegions) Get(_ context.Context, id int64) (regions.Region, error) {
+	return regions.Region{
+		ID: id, Name: "Scoped", DefaultAgencyID: "1", Timezone: "America/Los_Angeles",
+	}, nil
+}
+
 // TestAdminAPI_StoreFailuresAre500 pins the last rule of the API contract: a
 // broken store is a logged 500 with one fixed body on every route, never a 4xx
 // that would send an operator hunting for a client mistake, and never the
-// driver's own message on the client's screen. The auth store still works, so
-// these are the handlers' own error paths rather than the middleware's.
+// driver's own message on the client's screen.
+//
+// Regions.Get deliberately SUCCEEDS here (scopedRegions): the region scope
+// runs before every scoped handler, so a failing Get would answer 500 from the
+// middleware and this sweep would never reach the handler error paths it
+// exists to pin. The scope's own 500 is covered separately by
+// TestRequireRegion_StoreFailureIs500.
 func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 	t.Parallel()
 
@@ -1460,7 +1482,7 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 	// whose repositories fail here like every other.
 	deps := Deps{
 		Alerts:         failingAlerts{},
-		Regions:        failingRegions{},
+		Regions:        scopedRegions{},
 		Auth:           repo,
 		Now:            func() time.Time { return testNow },
 		Logger:         discardLogger(),
@@ -1475,6 +1497,12 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 	for _, rt := range adminRoutes(deps) {
 		if strings.HasSuffix(rt.pattern, "/session") {
 			continue // the session routes do not touch these two stores
+		}
+		if rt.pattern == "GET /api/admin/v1/regions/{regionId}" {
+			// The one scoped route with no store call of its own: it renders
+			// the region the middleware already loaded, so there is no
+			// handler error path here to break.
+			continue
 		}
 		method, target := concreteRoute(t, rt.pattern)
 		body := ""

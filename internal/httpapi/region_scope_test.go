@@ -8,6 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/OneBusAway/sidecar/internal/alertpush"
+	"github.com/OneBusAway/sidecar/internal/alerts"
 )
 
 // ---------------------------------------------------------------------------
@@ -175,6 +179,44 @@ func TestRequireRegion_WithoutAPrincipalIs500(t *testing.T) {
 	}
 	if reached {
 		t.Error("the handler ran without a principal")
+	}
+}
+
+// TestRequireRegion_StoreFailureIs500 is the branch TestAdminAPI_StoreFailuresAre500
+// deliberately no longer covers: a broken region store must be a 500, never
+// the scope's own 404. Reporting "region not found" would send an operator
+// hunting for a directory-sync problem that is really a database outage --
+// and would hand a caller a lie about which regions exist.
+func TestRequireRegion_StoreFailureIs500(t *testing.T) {
+	t.Parallel()
+
+	repo := newStubAuth()
+	repo.addUser("admin", testHash())
+	h := NewRouter(Deps{
+		Alerts:  failingAlerts{},
+		Regions: failingRegions{}, // Get fails, so the scope itself breaks
+		Auth:    repo,
+		Now:     func() time.Time { return testNow },
+		Logger:  discardLogger(),
+		Sleep:   func(time.Duration) {},
+	})
+	cookie := adminLogin(t, h)
+
+	for _, target := range []string{
+		"/api/admin/v1/regions/1",
+		"/api/admin/v1/regions/1/alerts",
+		"/api/admin/v1/regions/1/alerts/1",
+	} {
+		rec := sendTo(h, http.MethodGet, target, "", cookie)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("GET %s: status = %d, want 500; body = %s", target, rec.Code, rec.Body.String())
+			continue
+		}
+		// The body is the load-bearing half: 404 and 500 are both plausible
+		// here, and only the body says which one the scope chose.
+		if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
+			t.Errorf("GET %s: body = %q, want %q", target, got, want)
+		}
 	}
 }
 
@@ -489,6 +531,46 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 	return method, path
 }
 
+// assertRegionBIntact fails if the request the walk just made changed anything
+// in region B. It is checked per route rather than once at the end for two
+// reasons: a route that answers 404 *after* performing its side effect is
+// attributed to itself, and a route that destroys the fixture cannot make the
+// routes after it pass for the wrong reason ("no such alert").
+func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, before alerts.Alert, alertsBefore int, what string) {
+	t.Helper()
+	ctx := context.Background()
+
+	if after := f.countAlerts(t); after != alertsBefore {
+		t.Errorf("%s: wrote %d alert row(s)", what, after-alertsBefore)
+	}
+	stored, err := f.store.Alerts().Get(ctx, fx.alertID)
+	if err != nil {
+		t.Errorf("%s: region B's alert is gone: %v", what, err)
+		return
+	}
+	if stored.HeaderText != before.HeaderText {
+		t.Errorf("%s: region B's alert header = %q, want %q", what, stored.HeaderText, before.HeaderText)
+	}
+	if stored.Published != before.Published {
+		t.Errorf("%s: region B's alert published = %v, want %v", what, stored.Published, before.Published)
+	}
+	if len(stored.Translations) != len(before.Translations) {
+		t.Errorf("%s: region B's alert has %d translation rows, want %d",
+			what, len(stored.Translations), len(before.Translations))
+	}
+
+	p, err := f.store.AlertPushes().Get(ctx, fx.pushID)
+	if err != nil {
+		t.Errorf("%s: region B's push is gone: %v", what, err)
+		return
+	}
+	// Existence is not enough: cancel leaves the row in place, so a handler
+	// that cancelled and then answered 404 would pass an existence check.
+	if p.Status == alertpush.StatusCanceled {
+		t.Errorf("%s: region B's push was canceled through region A", what)
+	}
+}
+
 // TestRouteTable_TenancyWalk calls every scoped route against fixtures created
 // in region B. Reads are 404 (or an empty list); writes are 404 and change
 // nothing. A route added to adminRoutes without a fixture entry fails here,
@@ -498,13 +580,15 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 // the allow-list would refuse the key with a 403 before tenancy was ever
 // consulted, and the operator reaches every region, so the loader is again the
 // only fence left standing.
+//
+// Every route gets its own freshly seeded region B, so one route's verdict
+// never depends on what an earlier one did (or destroyed) -- the per-route
+// message is what an implementer reads when a single route breaks.
 func TestRouteTable_TenancyWalk(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
 	keyForA := f.mintRegionKey(t, regionPuget) // region A = 1
-	fx := f.seedTenancyFixtures(t)             // creates everything in region B = 0
-	alertsBefore := f.countAlerts(t)
 
 	walked := map[string]bool{}
 	for _, rt := range adminRoutes(f.deps) {
@@ -517,6 +601,10 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 			continue
 		}
 		walked[rt.pattern] = true
+
+		fx := f.seedTenancyFixtures(t) // a fresh region B = 0 for this route alone
+		before := f.storedAlert(t, fx.alertID)
+		alertsBefore := f.countAlerts(t)
 		method, target := f.tenancyTarget(t, rt.pattern, spec, fx)
 
 		var rec *httptest.ResponseRecorder
@@ -526,17 +614,17 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 			rec = f.do(method, target, spec.body(fx))
 		}
 
-		if spec.wantEmptyList {
+		switch {
+		case spec.wantEmptyList:
 			list := array(t, rec, http.StatusOK)
 			if len(list) != 0 {
 				t.Errorf("%s %s: returned %d region-B rows to a region-A caller", method, target, len(list))
 			}
-			continue
-		}
-		if rec.Code != http.StatusNotFound {
+		case rec.Code != http.StatusNotFound:
 			t.Errorf("%s %s with a region-A caller against region-B data: status = %d, want 404; body = %s",
 				method, target, rec.Code, rec.Body.String())
 		}
+		f.assertRegionBIntact(t, fx, before, alertsBefore, method+" "+target)
 	}
 
 	// A fixture entry for a route that no longer exists is a rule nobody is
@@ -545,26 +633,5 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 		if !walked[pattern] {
 			t.Errorf("tenancyFixtures has an entry for %q, which is not a scoped route", pattern)
 		}
-	}
-
-	// Nothing the walk sent may have written a row either: the refused POST
-	// must not have created an alert in anybody's region.
-	if after := f.countAlerts(t); after != alertsBefore {
-		t.Errorf("the walk created %d alert(s)", after-alertsBefore)
-	}
-
-	// Nothing the walk sent may have touched region B's alert.
-	stored := f.storedAlert(t, fx.alertID)
-	if stored.HeaderText != "Route 40 detour" {
-		t.Errorf("region B's alert header = %q; a cross-region write went through", stored.HeaderText)
-	}
-	if !stored.Published {
-		t.Error("region B's alert was unpublished through region A")
-	}
-	if len(stored.Translations) == 0 {
-		t.Error("region B's translation was deleted through region A")
-	}
-	if _, err := f.store.AlertPushes().Get(context.Background(), fx.pushID); err != nil {
-		t.Errorf("region B's push is gone after the walk: %v", err)
 	}
 }
