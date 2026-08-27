@@ -17,10 +17,20 @@ import (
 // arrived as -- reformatting one as RFC 3339 would break the dedupe key.
 // CreatedAt and SnapshotCapturedAt are real instants and go through
 // formatInstant.
+//
+// PublicID's wire name is "public_identifier", matching the CSV export's
+// first column and the ghost_bus_reports.public_identifier column, NOT the
+// "public_id" survey responses use for the same concept: this family has
+// no repo-wide convention to match (the survey CSV export even uses a
+// third name, response_id, for its own public id), so within this family
+// the CSV and the admin JSON name the same value the same way. This
+// endpoint is unreleased and OBACloud will consume it (design spec section
+// 7), so the name is picked once here rather than changed later as a
+// breaking change.
 type ghostBusReportJSON struct {
 	ID                       int64           `json:"id"`
 	RegionID                 int64           `json:"region_id"`
-	PublicID                 string          `json:"public_id"`
+	PublicID                 string          `json:"public_identifier"`
 	UserIdentifier           string          `json:"user_identifier"`
 	TripIdentifier           string          `json:"trip_identifier"`
 	ServiceDate              int64           `json:"service_date"`
