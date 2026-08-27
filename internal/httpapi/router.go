@@ -485,6 +485,22 @@ func adminRoutes(deps Deps) []adminRoute {
 		)
 	}
 
+	// The ghost bus report read surface (design spec section 5): the JSON
+	// list, the CSV export, and lookup by public id. Gated on deps.GhostBus,
+	// the same field that gates the rider-facing create route above, whose
+	// block already guarantees Deps.Now and Deps.Regions. Read-only: reports
+	// are rider-submitted, so there is no admin write route here and the
+	// rider-facing create route's 422 already_reported contract is
+	// untouched.
+	if deps.GhostBus != nil {
+		ghostBusAdmin := &adminGhostBusHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports", ghostBusAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports.csv", ghostBusAdmin.csv, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports/{publicId}", ghostBusAdmin.get, operatorOrKey, scopeRegion},
+		)
+	}
+
 	// The key-management family is the one place a service principal is
 	// granted anything, and the one family a region key must never reach --
 	// hence scopeKeyAdmin rather than scopeRegion (design spec §5.6).

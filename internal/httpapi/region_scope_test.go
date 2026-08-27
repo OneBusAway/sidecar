@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
@@ -436,6 +438,11 @@ type tenancySpec struct {
 	// array rather than 404, because the region itself IS the caller's and
 	// the proof is that region B's rows are not in it.
 	wantEmptyList bool
+	// wantEmptyCSV is wantEmptyList for a CSV collection route: it answers
+	// 200 with a header-only document (no data rows), for the same reason
+	// wantEmptyList exists -- the region is the caller's own, and the proof
+	// is that region B's row is not in it.
+	wantEmptyCSV bool
 	// ownRegion marks a route whose only resource is the region in the path.
 	// There is nothing foreign to name in such a URL, so the walk puts region
 	// B in the path instead and the fence under test is canAccessRegion.
@@ -475,6 +482,12 @@ type tenancyFixtureIDs struct {
 	// /survey_responses/{publicId} route addresses responses by that string,
 	// never by the row id.
 	responsePublicID string
+	// reportPublicID is a ghost bus report's public id, distinct from
+	// responsePublicID above: the two families use different tables and
+	// different {publicId} routes, and reusing one fixture's id for the
+	// other would 404 for the wrong reason (no such row at all) rather than
+	// the tenancy fence this walk exists to prove.
+	reportPublicID string
 }
 
 // tenancyFixtures is keyed by route pattern. Every scoped route needs an
@@ -534,6 +547,13 @@ var tenancyFixtures = map[string]tenancySpec{
 	"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses":      {},
 	"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses.csv":  {},
 	"GET /api/admin/v1/regions/{regionId}/survey_responses/{publicId}": {},
+
+	// Ghost bus reports are read-only, like responses above: no create route
+	// exists here (reports are rider-submitted), so every entry is either
+	// the collection-empty shape or the default zero value.
+	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports":            {wantEmptyList: true},
+	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports.csv":        {wantEmptyCSV: true},
+	"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports/{publicId}": {},
 }
 
 // seedTenancyFixtures creates, in region B, one of every resource the walk
@@ -577,9 +597,23 @@ func (f *adminFixture) seedTenancyFixtures(t *testing.T) tenancyFixtureIDs {
 		t.Fatalf("seed tenancy response: %v", err)
 	}
 
+	// Ghost bus reports have no admin create route either -- they are
+	// rider-submitted -- so this is seeded through the repository directly,
+	// same as the response above. The public id and trip identifier are
+	// keyed off alertID, which is unique per call.
+	report, err := f.store.GhostBus().Create(context.Background(), ghostbus.NewReport{
+		RegionID: regionB, PublicID: fmt.Sprintf("tenancy-ghostbus-%d", alertID),
+		UserIdentifier: "tenancy-dev", TripIdentifier: fmt.Sprintf("tenancy-trip-%d", alertID),
+		ServiceDate: testNow.UnixMilli(), WaitDurationMinutes: 15,
+	}, testNow)
+	if err != nil {
+		t.Fatalf("seed tenancy ghost bus report: %v", err)
+	}
+
 	return tenancyFixtureIDs{
 		alertID: alertID, pushID: jsonID(t, created),
 		studyID: studyID, surveyID: surveyID, responsePublicID: resp.PublicID,
+		reportPublicID: report.PublicID,
 	}
 }
 
@@ -611,7 +645,15 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 	path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(id, 10))
 	path = strings.ReplaceAll(path, "{pushId}", strconv.FormatInt(fx.pushID, 10))
 	path = strings.ReplaceAll(path, "{lang}", "es")
-	path = strings.ReplaceAll(path, "{publicId}", fx.responsePublicID)
+	// Two distinct {publicId} families share this table: a survey response's
+	// public id and a ghost bus report's. Picking the wrong one would still
+	// 404 -- but for "no such row anywhere", not the tenancy fence this walk
+	// exists to prove, so the substitution has to match the family.
+	publicID := fx.responsePublicID
+	if strings.Contains(path, "/ghost_bus_reports/") {
+		publicID = fx.reportPublicID
+	}
+	path = strings.ReplaceAll(path, "{publicId}", publicID)
 	if strings.ContainsAny(path, "{}") {
 		t.Fatalf("route pattern %q has a wildcard the tenancy walk cannot fill", pattern)
 	}
@@ -757,6 +799,19 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 			list := array(t, rec, http.StatusOK)
 			if len(list) != 0 {
 				t.Errorf("%s %s: returned %d region-B rows to a region-A caller", method, target, len(list))
+			}
+		case spec.wantEmptyCSV:
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s %s: status = %d, want 200; body = %s", method, target, rec.Code, rec.Body.String())
+				break
+			}
+			rows, err := csv.NewReader(strings.NewReader(rec.Body.String())).ReadAll()
+			if err != nil {
+				t.Fatalf("%s %s: parse csv: %v (body=%q)", method, target, err, rec.Body.String())
+			}
+			if len(rows) != 1 {
+				t.Errorf("%s %s: returned %d row(s) (header + %d region-B data row(s)) to a region-A caller",
+					method, target, len(rows), len(rows)-1)
 			}
 		case rec.Code != http.StatusNotFound:
 			t.Errorf("%s %s with a region-A caller against region-B data: status = %d, want 404; body = %s",

@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
@@ -262,4 +263,28 @@ func loadResponse(w http.ResponseWriter, r *http.Request, deps Deps) (surveys.Re
 		return surveys.Response{}, false
 	}
 	return resp, true
+}
+
+// loadReport resolves {publicId} within the request's region in the single
+// query GetByPublicID's own region_id condition performs. Like loadResponse
+// (and unlike loadAlert, loadStudy and loadSurvey), this is not a
+// load-then-compare: the region fence lives in the repository's SQL, so
+// there is no Go-level "does this row belong to me" check a later refactor
+// could accidentally drop.
+func loadReport(w http.ResponseWriter, r *http.Request, deps Deps) (ghostbus.Report, bool) {
+	region, ok := mustRegion(w, r, deps)
+	if !ok {
+		return ghostbus.Report{}, false
+	}
+	publicID := r.PathValue("publicId")
+	rep, err := deps.GhostBus.GetByPublicID(r.Context(), region.ID, publicID)
+	if err != nil {
+		if errors.Is(err, ghostbus.ErrNotFound) {
+			writeJSONError(w, deps.Logger, http.StatusNotFound, "ghost bus report not found")
+			return ghostbus.Report{}, false
+		}
+		serverErrorJSON(w, deps.Logger, "get ghost bus report", err)
+		return ghostbus.Report{}, false
+	}
+	return rep, true
 }
