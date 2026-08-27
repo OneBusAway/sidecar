@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -57,10 +56,12 @@ type translationJSON struct {
 	Description *string `json:"description"`
 }
 
-// createAlertRequest is the POST /alerts body.
+// createAlertRequest is the POST /regions/{regionId}/alerts body.
 type createAlertRequest struct {
-	// RegionID is a pointer because region 0 is a real region (Tampa Bay):
-	// an absent region_id must be an error, not a silent write to region 0.
+	// RegionID survives only so that a stale client sending it is refused
+	// rather than silently retargeted: the region is the path now. It stays a
+	// pointer because region 0 is a real region (Tampa Bay), so "absent" and
+	// "0" have to stay distinguishable for the refusal to be accurate.
 	RegionID    *int64  `json:"region_id"`
 	AgencyID    string  `json:"agency_id"`
 	Header      string  `json:"header"`
@@ -108,24 +109,19 @@ type adminAlertsHandler struct {
 	deps Deps
 }
 
-// list handles GET /api/admin/v1/alerts.
+// list handles GET /api/admin/v1/regions/{regionId}/alerts.
 //
-// `region` is a filter, not a resource lookup: absent means every region, and
-// an unknown id is an empty list rather than a 404. Absent cannot be spelled
-// as region 0, because region 0 is Tampa Bay.
+// The region is the collection's scope, not a filter: there is no way to ask
+// for every region's alerts at once, and no query parameter is consulted. A
+// caller that still sends ?region= is ignored rather than obeyed -- obeying it
+// would let a region key read across the fence its path segment just passed.
 func (h *adminAlertsHandler) list(w http.ResponseWriter, r *http.Request) {
-	var filter alerts.ListFilter
-	if raw := r.URL.Query()["region"]; len(raw) > 0 {
-		id, err := strconv.ParseInt(raw[0], 10, 64)
-		if err != nil {
-			writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
-				fmt.Sprintf("invalid region %q: must be an integer", raw[0]))
-			return
-		}
-		filter.RegionID = &id
+	region, ok := mustRegion(w, r, h.deps)
+	if !ok {
+		return
 	}
 
-	list, err := h.deps.Alerts.List(r.Context(), filter)
+	list, err := h.deps.Alerts.List(r.Context(), alerts.ListFilter{RegionID: &region.ID})
 	if err != nil {
 		h.storeError(w, "list alerts", err)
 		return
@@ -140,37 +136,37 @@ func (h *adminAlertsHandler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, h.deps.Logger, http.StatusOK, out)
 }
 
-// get handles GET /api/admin/v1/alerts/{id}.
+// get handles GET /api/admin/v1/regions/{regionId}/alerts/{id}.
 func (h *adminAlertsHandler) get(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
-		return
-	}
-	a, err := h.deps.Alerts.Get(r.Context(), id)
-	if err != nil {
-		h.storeError(w, "get alert", err)
+	a, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 	writeJSON(w, h.deps.Logger, http.StatusOK, toAlertJSON(a))
 }
 
-// create handles POST /api/admin/v1/alerts.
+// create handles POST /api/admin/v1/regions/{regionId}/alerts.
 //
-// Everything that can be checked is checked before the write -- region,
-// timestamps, window, resolved agency id, enums -- so a rejected create never
-// leaves a partial row behind and the client gets a message naming the actual
-// problem. The repository re-validates as a backstop; see storeError for why a
-// backstop failure is a 500 rather than a 400.
+// Everything that can be checked is checked before the write -- timestamps,
+// window, resolved agency id, enums -- so a rejected create never leaves a
+// partial row behind and the client gets a message naming the actual problem.
+// The repository re-validates as a backstop; see storeError for why a backstop
+// failure is a 500 rather than a 400.
 func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
+	region, ok := mustRegion(w, r, h.deps)
+	if !ok {
+		return
+	}
 	var req createAlertRequest
 	if err := decodeJSON(w, r, maxAdminBody, &req); err != nil {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.RegionID == nil {
+	if req.RegionID != nil {
+		// Rejected, not ignored: a stale client that still sends region_id
+		// must not believe it targeted a region (design spec section 5.1).
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
-			"region_id is required (region 0 is a real region, so there is no default)")
+			"region_id is not accepted; the region comes from the path")
 		return
 	}
 	if req.Header == "" {
@@ -179,12 +175,6 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	region, err := h.deps.Regions.Get(ctx, *req.RegionID)
-	if err != nil {
-		writeRegionError(w, h.deps.Logger, "get region", *req.RegionID, err)
-		return
-	}
-
 	startTime, err := parseInstantJSON(req.StartTime, region)
 	if err != nil {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
@@ -253,20 +243,23 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Location", fmt.Sprintf("/api/admin/v1/alerts/%d", created.ID))
+	w.Header().Set("Location", fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d", region.ID, created.ID))
 	writeJSON(w, h.deps.Logger, http.StatusCreated, toAlertJSON(created))
 }
 
-// patch handles PATCH /api/admin/v1/alerts/{id}, mapping the request 1:1 onto
-// alerts.Patch.
+// patch handles PATCH /api/admin/v1/regions/{regionId}/alerts/{id}, mapping
+// the request 1:1 onto alerts.Patch.
 //
 // The window is validated against the *merged* view -- the stored row with the
 // patch applied -- so editing only the end time is still checked against the
 // alert's existing start, and vice versa.
 func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	region, ok := mustRegion(w, r, h.deps)
+	if !ok {
+		return
+	}
+	current, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 	var req patchAlertRequest
@@ -281,12 +274,6 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	current, err := h.deps.Alerts.Get(ctx, id)
-	if err != nil {
-		h.storeError(w, "get alert", err)
-		return
-	}
-
 	patch := alerts.Patch{
 		DescriptionText: req.Description,
 		URL:             req.URL,
@@ -316,13 +303,9 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.StartTime != nil || req.EndTime != nil {
-		// Only needed for the timestamp error message, so it is only fetched
-		// when a timestamp is actually being parsed.
-		region, regErr := h.deps.Regions.Get(ctx, current.RegionID)
-		if regErr != nil {
-			writeRegionError(w, h.deps.Logger, "get region", current.RegionID, regErr)
-			return
-		}
+		// The context region, not a fresh lookup: loadAlert has already
+		// established that the alert is in it, and the region is only needed
+		// so a naive-datetime rejection can name the zone.
 		if req.StartTime != nil {
 			start, startErr := parseInstantJSON(*req.StartTime, region)
 			if startErr != nil {
@@ -377,21 +360,20 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, updateErr := h.deps.Alerts.Update(ctx, id, patch, h.deps.Now()); updateErr != nil {
+	if _, updateErr := h.deps.Alerts.Update(ctx, current.ID, patch, h.deps.Now()); updateErr != nil {
 		h.storeError(w, "update alert", updateErr)
 		return
 	}
-	h.respondWithAlert(w, r, id, "get updated alert")
+	h.respondWithAlert(w, r, current.ID, "get updated alert")
 }
 
-// delete handles DELETE /api/admin/v1/alerts/{id}.
+// delete handles DELETE /api/admin/v1/regions/{regionId}/alerts/{id}.
 func (h *adminAlertsHandler) delete(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	a, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
-	if err := h.deps.Alerts.Delete(r.Context(), id); err != nil {
+	if err := h.deps.Alerts.Delete(r.Context(), a.ID); err != nil {
 		h.storeError(w, "delete alert", err)
 		return
 	}
@@ -406,29 +388,28 @@ func (h *adminAlertsHandler) setPublished(published bool) http.HandlerFunc {
 		op = "unpublish alert"
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		id, err := pathID(r)
-		if err != nil {
-			writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		a, ok := loadAlert(w, r, h.deps)
+		if !ok {
 			return
 		}
-		if err := h.deps.Alerts.SetPublished(r.Context(), id, published, h.deps.Now()); err != nil {
+		if err := h.deps.Alerts.SetPublished(r.Context(), a.ID, published, h.deps.Now()); err != nil {
 			h.storeError(w, op, err)
 			return
 		}
-		h.respondWithAlert(w, r, id, op)
+		h.respondWithAlert(w, r, a.ID, op)
 	}
 }
 
-// putTranslation handles PUT /api/admin/v1/alerts/{id}/translations/{lang}.
+// putTranslation handles
+// PUT /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang}.
 //
 // Each provided field is stored with the SHA-256 of the alert's *current*
 // English text for that field. Editing the English afterwards changes its
 // hash, which marks the translation stale and makes the feed withhold it --
 // riders read accurate English rather than outdated translated text.
 func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	current, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 	language, err := pathLanguage(r)
@@ -448,12 +429,6 @@ func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Reque
 	}
 
 	ctx := r.Context()
-	current, err := h.deps.Alerts.Get(ctx, id)
-	if err != nil {
-		h.storeError(w, "get alert", err)
-		return
-	}
-
 	for _, t := range []struct {
 		text   *string
 		field  alerts.Field
@@ -465,7 +440,7 @@ func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Reque
 		if t.text == nil {
 			continue
 		}
-		upsertErr := h.deps.Alerts.UpsertTranslation(ctx, id, alerts.Translation{
+		upsertErr := h.deps.Alerts.UpsertTranslation(ctx, current.ID, alerts.Translation{
 			Language:     language,
 			Field:        t.field,
 			Text:         *t.text,
@@ -477,15 +452,15 @@ func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	h.respondWithAlert(w, r, id, "get translated alert")
+	h.respondWithAlert(w, r, current.ID, "get translated alert")
 }
 
-// deleteTranslation handles DELETE /api/admin/v1/alerts/{id}/translations/{lang},
+// deleteTranslation handles
+// DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang},
 // removing every field row for that language.
 func (h *adminAlertsHandler) deleteTranslation(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	a, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 	language, err := pathLanguage(r)
@@ -493,7 +468,7 @@ func (h *adminAlertsHandler) deleteTranslation(w http.ResponseWriter, r *http.Re
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	if delErr := h.deps.Alerts.DeleteTranslation(r.Context(), id, language); delErr != nil {
+	if delErr := h.deps.Alerts.DeleteTranslation(r.Context(), a.ID, language); delErr != nil {
 		h.storeError(w, "delete translation", delErr)
 		return
 	}
@@ -652,15 +627,4 @@ func pathLanguage(r *http.Request) (string, error) {
 		return "", fmt.Errorf("invalid language %q: must be a BCP-47 tag such as es", raw)
 	}
 	return language, nil
-}
-
-// pathID parses the {id} path wildcard, returning a caller-safe message the
-// HTTP layer maps to 400.
-func pathID(r *http.Request) (int64, error) {
-	raw := r.PathValue("id")
-	v, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid id %q: must be an integer", raw)
-	}
-	return v, nil
 }

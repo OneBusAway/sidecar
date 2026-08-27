@@ -394,6 +394,11 @@ type adminRoute struct {
 	// routes, both deliberate and both documented at their entry in
 	// adminRoutes.
 	allowed principalSet
+	// scope is which region middleware wraps the handler. It is a column of
+	// the table rather than a wrapper spelled at each entry so a test can
+	// assert it agrees with the pattern: a route carrying {regionId} without
+	// a scope would parse a region id nobody had checked the caller against.
+	scope routeScope
 }
 
 // adminRoutes is the admin API route table (design spec §5). It takes Deps so
@@ -407,32 +412,34 @@ func adminRoutes(deps Deps) []adminRoute {
 	routes := []adminRoute{
 		// Login has no session to require yet; the cross-site guard is what
 		// protects it (design spec §4.4).
-		{"POST /api/admin/v1/session", session.login, nil},
+		{"POST /api/admin/v1/session", session.login, nil, scopeNone},
 		// Logout sits outside requirePrincipal so it stays idempotent: the
 		// SPA calls it to tidy up after a 401, and answering that with
 		// another 401 gives the client nothing it can act on. It is not a
 		// hole -- the handler only ever deletes the session named by the
 		// token the caller presented, and the cross-site guard still covers
 		// it.
-		{"DELETE /api/admin/v1/session", session.logout, nil},
+		{"DELETE /api/admin/v1/session", session.logout, nil, scopeNone},
 		// whoami answers "which operator am I", which only an operator has.
-		{"GET /api/admin/v1/session", session.whoami, operatorOnly},
-
-		{"GET /api/admin/v1/alerts", alertsAdmin.list, operatorOrKey},
-		{"POST /api/admin/v1/alerts", alertsAdmin.create, operatorOrKey},
-		{"GET /api/admin/v1/alerts/{id}", alertsAdmin.get, operatorOrKey},
-		{"PATCH /api/admin/v1/alerts/{id}", alertsAdmin.patch, operatorOrKey},
-		{"DELETE /api/admin/v1/alerts/{id}", alertsAdmin.delete, operatorOrKey},
-		{"POST /api/admin/v1/alerts/{id}/publish", alertsAdmin.setPublished(true), operatorOrKey},
-		{"POST /api/admin/v1/alerts/{id}/unpublish", alertsAdmin.setPublished(false), operatorOrKey},
-		{"PUT /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, operatorOrKey},
-		{"DELETE /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, operatorOrKey},
+		{"GET /api/admin/v1/session", session.whoami, operatorOnly, scopeNone},
 
 		// The region list is cross-region by construction: it is the one
 		// admin route that hands back every region at once, so a key scoped
-		// to a single region has no business reading it.
-		{"GET /api/admin/v1/regions", regionsAdmin.list, operatorOnly},
-		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, operatorOrKey},
+		// to a single region has no business reading it -- and it is the one
+		// region route that therefore cannot be region-scoped.
+		{"GET /api/admin/v1/regions", regionsAdmin.list, operatorOnly, scopeNone},
+		{"GET /api/admin/v1/regions/{regionId}", regionsAdmin.get, operatorOrKey, scopeRegion},
+		{"PATCH /api/admin/v1/regions/{regionId}", regionsAdmin.patch, operatorOrKey, scopeRegion},
+
+		{"GET /api/admin/v1/regions/{regionId}/alerts", alertsAdmin.list, operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts", alertsAdmin.create, operatorOrKey, scopeRegion},
+		{"GET /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.get, operatorOrKey, scopeRegion},
+		{"PATCH /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.patch, operatorOrKey, scopeRegion},
+		{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.delete, operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/publish", alertsAdmin.setPublished(true), operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/unpublish", alertsAdmin.setPublished(false), operatorOrKey, scopeRegion},
+		{"PUT /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, operatorOrKey, scopeRegion},
+		{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, operatorOrKey, scopeRegion},
 	}
 
 	// The alert push routes are conditional (design spec §2.9) but still
@@ -446,10 +453,10 @@ func adminRoutes(deps Deps) []adminRoute {
 		// must not have (design spec §4.5). Reading what was sent, and
 		// counting the audience beforehand, stay open to a region key.
 		routes = append(routes,
-			adminRoute{"POST /api/admin/v1/alerts/{id}/pushes", pushesAdmin.create, operatorOnly},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/pushes", pushesAdmin.list, operatorOrKey},
-			adminRoute{"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOnly},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.create, operatorOnly, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOnly, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey, scopeRegion},
 		)
 	}
 	return routes
@@ -479,16 +486,60 @@ type routeRegistrar interface {
 // everything except login and logout also requires an authenticated
 // principal drawn from the route's own allow-list.
 //
+// The region scope is wrapped INSIDE requirePrincipal, because deciding
+// whether a caller may reach a region means first knowing who the caller is.
+//
 // Every registration must come from adminRoutes; see routeRegistrar.
 func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 	mw := &authMiddleware{deps: deps}
 	for _, route := range adminRoutes(deps) {
 		var h http.Handler = route.handler
+		switch route.scope {
+		case scopeRegion:
+			h = mw.requireRegion(h)
+		case scopeKeyAdmin:
+			h = mw.requireKeyAdminRegion(h)
+		case scopeNone:
+			// No {regionId} to fence; the route-table test proves the
+			// pattern agrees.
+		}
 		if route.allowed != nil {
 			h = mw.requirePrincipal(route.allowed, h)
 		}
 		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
+}
+
+// adminFeatures lists the admin route families registered in this
+// deployment (design spec section 5.1), so a consumer can tell "family not
+// enabled here" from a 404. It is derived from the same Deps fields the
+// route table gates on, so the two cannot drift.
+func adminFeatures(deps Deps) []string {
+	features := []string{"alerts"}
+	if alertPushRoutesEnabled(deps) {
+		features = append(features, "pushes")
+	}
+	if deps.Surveys != nil {
+		features = append(features, "surveys")
+	}
+	if deps.GhostBus != nil {
+		features = append(features, "ghost_bus_reports")
+	}
+	if deps.Alarms != nil {
+		features = append(features, "alarms")
+	}
+	if deps.PushRegs != nil {
+		features = append(features, "push_registrations")
+	}
+	if deps.APIKeys != nil {
+		// APIKeys also backs bearer authentication, so this reads true one
+		// task ahead of the key-management routes themselves. That is the
+		// right way round: main wires the repository or it wires neither,
+		// and a consumer that believes the family exists is corrected by the
+		// same 404 any unregistered route gives.
+		features = append(features, "api_keys")
+	}
+	return features
 }
 
 // missingDeps returns the names of the absent dependencies, sorted so the

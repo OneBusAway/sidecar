@@ -17,6 +17,10 @@ type contextKey int
 const (
 	// principalContextKey holds the principal requirePrincipal attached.
 	principalContextKey contextKey = iota + 1
+	// regionContextKey holds the regions.Region a region scope loaded. It is
+	// the only region a scoped handler may act on: fetching one by hand is
+	// how tenancy becomes a check per handler instead of a check per route.
+	regionContextKey
 )
 
 // crossSiteGuard rejects state-changing requests that the browser itself

@@ -75,7 +75,7 @@ func TestBearer_ValidRegionKeyAuthenticates(t *testing.T) {
 	f := newAdminFixture(t)
 	raw := f.mintRegionKey(t, regionPuget)
 
-	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
@@ -91,7 +91,7 @@ func TestBearer_ValidPrincipalAuthenticates(t *testing.T) {
 	f := newAdminFixture(t)
 	raw := f.mintPrincipal(t)
 
-	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
 	}
@@ -158,7 +158,7 @@ func TestBearer_MalformedHeadersAre401(t *testing.T) {
 			// An empty header value must be "a bearer attempt that failed",
 			// not "no header at all"; Set with "" would drop it, so the map
 			// is written directly.
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/alerts", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/regions/1/alerts", nil)
 			req.Host = "sidecar.test"
 			req.Header["Authorization"] = []string{tc.header}
 			rec := httptest.NewRecorder()
@@ -183,7 +183,7 @@ func TestBearer_DuplicateHeaderIs401(t *testing.T) {
 	f := newAdminFixture(t)
 	live := f.mintRegionKey(t, regionPuget)
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/alerts", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/regions/1/alerts", nil)
 	req.Host = "sidecar.test"
 	req.Header["Authorization"] = []string{"Bearer " + live, "Bearer " + live}
 	rec := httptest.NewRecorder()
@@ -220,7 +220,7 @@ func TestBearer_RevokedKeyIsLoggedDistinctly(t *testing.T) {
 		t.Fatalf("RevokeRegionKey: %v", err)
 	}
 
-	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
@@ -244,7 +244,7 @@ func TestBearer_NoFailDelay(t *testing.T) {
 		d.FailDelay = time.Hour
 		d.Sleep = func(time.Duration) { slept++ }
 	})
-	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer obask_1_nope")
+	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_nope")
 	if slept != 0 {
 		t.Errorf("Sleep called %d times on a bearer failure, want 0", slept)
 	}
@@ -262,21 +262,21 @@ func TestBearer_ThrottleChargesFailuresOnly(t *testing.T) {
 
 	// Ten successes do not consume the bucket.
 	for i := 0; i < 10; i++ {
-		if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw); rec.Code != http.StatusOK {
+		if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw); rec.Code != http.StatusOK {
 			t.Fatalf("success %d: status = %d, want 200", i, rec.Code)
 		}
 	}
 	// Two failures fit; the third is refused outright.
 	for i := 0; i < 2; i++ {
-		if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer obask_1_nope"); rec.Code != http.StatusUnauthorized {
+		if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_nope"); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("failure %d: status = %d, want 401", i, rec.Code)
 		}
 	}
-	if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer obask_1_nope"); rec.Code != http.StatusTooManyRequests {
+	if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_nope"); rec.Code != http.StatusTooManyRequests {
 		t.Errorf("third failure: status = %d, want 429", rec.Code)
 	}
 	// A valid key still works: the throttle bounds guessing, not service.
-	if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw); rec.Code != http.StatusOK {
+	if rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw); rec.Code != http.StatusOK {
 		t.Errorf("valid key after throttling: status = %d, want 200", rec.Code)
 	}
 }
@@ -302,20 +302,20 @@ func TestBearer_TouchAtMostHourly(t *testing.T) {
 		return list[0].LastUsedAt
 	}
 
-	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	first := read()
 	if first == nil || !first.Equal(testNow) {
 		t.Fatalf("first use: LastUsedAt = %v, want %v", first, testNow)
 	}
 
 	now = testNow.Add(59 * time.Minute)
-	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if got := read(); got == nil || !got.Equal(testNow) {
 		t.Errorf("after 59m: LastUsedAt = %v, want it unchanged at %v", got, testNow)
 	}
 
 	now = testNow.Add(time.Hour)
-	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if got := read(); got == nil || !got.Equal(now) {
 		t.Errorf("after 60m: LastUsedAt = %v, want %v", got, now)
 	}
@@ -338,7 +338,7 @@ func TestBearer_PrefixRowMismatchIs401(t *testing.T) {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 
-	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer "+raw)
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer "+raw)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
 	}
@@ -353,7 +353,7 @@ func TestBearer_NilAPIKeysRejects(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixtureWithDeps(t, func(d *Deps) { d.APIKeys = nil })
-	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/alerts", "", "Bearer obask_1_whatever")
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_whatever")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
@@ -370,7 +370,7 @@ func TestBearer_NilAPIKeysWithCookieStillRejects(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixtureWithDeps(t, func(d *Deps) { d.APIKeys = nil })
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/alerts", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/regions/1/alerts", nil)
 	req.Host = "sidecar.test"
 	req.Header.Set("Authorization", "Bearer obask_1_whatever")
 	req.AddCookie(f.cookie)
@@ -398,7 +398,7 @@ func TestBearer_CrossSiteGuardStillApplies(t *testing.T) {
 	raw := f.mintRegionKey(t, regionPuget)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/api/admin/v1/alerts", strings.NewReader(minimalAlert(regionPuget, "x")))
+		"/api/admin/v1/regions/1/alerts", strings.NewReader(minimalAlertBody("x")))
 	req.Host = "sidecar.test"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example")
@@ -530,5 +530,67 @@ func TestPrincipalSets(t *testing.T) {
 		if got := tc.set.has(tc.kind); got != tc.want {
 			t.Errorf("%s: has(%v) = %v, want %v", tc.name, tc.kind, got, tc.want)
 		}
+	}
+}
+
+// TestRejectBearer_NilLimiterFailsOpen. The throttle is an abuse brake, not
+// the authentication decision: a middleware built without a limiter must
+// still answer 401 rather than nil-deref. NewRouter always supplies one, so
+// only a hand-built authMiddleware -- which this package's tests construct --
+// can reach it.
+func TestRejectBearer_NilLimiterFailsOpen(t *testing.T) {
+	t.Parallel()
+
+	mw := &authMiddleware{deps: Deps{
+		Now:    func() time.Time { return testNow },
+		Logger: discardLogger(),
+		// APIKeys and BearerFailLimiter both nil: bearer auth is not
+		// configured, so every header is a rejection, and there is no bucket
+		// to charge it against.
+	}}
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("the handler ran on a rejected bearer request")
+	})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/admin/v1/regions/1/alerts", nil)
+	req.Header.Set("Authorization", "Bearer obask_1_whatever")
+	rec := httptest.NewRecorder()
+	mw.requirePrincipal(operatorOrKey, next).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+	}
+	if got, want := bodyText(rec), `{"error":"invalid api key"}`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+// TestRejectBearer_ThrottledFailuresAreNotLogged. This is the repo's one
+// unauthenticated code path that reaches the key tables, so a flood of
+// garbage headers must not be able to write a Warn line per request: the
+// bucket is consulted before the log, capping the failure lines at the same
+// 60/minute/peer the responses are capped at. The throttled requests still
+// say so at Debug, which production's Info handler drops.
+func TestRejectBearer_ThrottledFailuresAreNotLogged(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	f := newAdminFixtureWithDeps(t, func(d *Deps) {
+		d.BearerFailLimiter = ratelimit.New(1, time.Minute)
+		d.Logger = slog.New(slog.NewTextHandler(&buf, nil)) // Info, as production
+	})
+
+	for range 5 {
+		sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_nope")
+	}
+	if got := strings.Count(buf.String(), "bearer authentication failed"); got != 1 {
+		t.Errorf("logged %d failure lines for 5 attempts against a 1/minute bucket, want 1:\n%s",
+			got, buf.String())
+	}
+	// The last request must still have been refused, so the cap is on the
+	// logging rather than on the enforcement.
+	rec := sendBearer(f.handler, http.MethodGet, "/api/admin/v1/regions/1/alerts", "", "Bearer obask_1_nope")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", rec.Code)
 	}
 }

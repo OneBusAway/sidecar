@@ -150,13 +150,29 @@ func (h *authMiddleware) touch(r *http.Request, lastUsed *time.Time, write func(
 //
 // Nothing logged here may contain any part of the credential's random
 // segment; only its length, its parsed kind, and the prefix's region id.
+//
+// The bucket is consulted BEFORE the Warn line is written, so a flood of
+// garbage headers cannot amplify itself into the log: this is the one
+// unauthenticated entry point that reaches the key tables, and one Warn per
+// request would let an attacker write to the operator's disk for free. The
+// throttled path still says so, at Debug -- the same level every other
+// "reason the client is not told" in this package uses, so the capped Warn
+// stream stays the production signal while an operator debugging a 429 can
+// see the brake engage.
+//
+// A nil limiter fails OPEN: the throttle is an abuse brake, not the
+// authentication decision, and refusing to answer 401 because no bucket was
+// wired would turn a missing dependency into an outage. NewRouter always
+// supplies one; a hand-built authMiddleware (tests) need not.
 func (h *authMiddleware) rejectBearer(w http.ResponseWriter, r *http.Request, reason string, fields ...any) (principal, bool) {
-	attrs := append([]any{"reason_text", reason, "remote", clientIP(r), "path", r.URL.Path}, fields...)
-	h.deps.Logger.Warn("httpapi: bearer authentication failed", attrs...)
-	if !h.deps.BearerFailLimiter.Allow(clientIP(r), h.deps.Now()) {
+	if h.deps.BearerFailLimiter != nil && !h.deps.BearerFailLimiter.Allow(clientIP(r), h.deps.Now()) {
+		h.deps.Logger.Debug("httpapi: bearer failures throttled",
+			"remote", clientIP(r), "path", r.URL.Path)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return principal{}, false
 	}
+	attrs := append([]any{"reason_text", reason, "remote", clientIP(r), "path", r.URL.Path}, fields...)
+	h.deps.Logger.Warn("httpapi: bearer authentication failed", attrs...)
 	writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, invalidAPIKeyBody)
 	return principal{}, false
 }

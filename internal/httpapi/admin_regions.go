@@ -37,7 +37,7 @@ type regionJSON struct {
 	OBAAPIKey       string   `json:"oba_api_key"`
 }
 
-// patchRegionRequest is the PATCH /regions/{id} body. Fields are pointers so
+// patchRegionRequest is the PATCH /regions/{regionId} body. Fields are pointers so
 // an omitted one keeps its current value; the store writes all three columns
 // in one statement, so the handler has to merge before writing.
 type patchRegionRequest struct {
@@ -69,17 +69,42 @@ func (h *adminRegionsHandler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, h.deps.Logger, http.StatusOK, out)
 }
 
-// patch handles PATCH /api/admin/v1/regions/{id}.
-//
-// An unknown id is a 404 rather than an implicit insert: regions come from the
-// directory, and SetLocalFields on a missing row would report success while
-// writing nothing.
-func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+// get handles GET /api/admin/v1/regions/{regionId}. It is the one region
+// endpoint a region key may call, and it carries "features" so a consumer
+// can distinguish "this family is not enabled here" from a 404 on a route
+// that was never registered (design spec section 5.1).
+func (h *adminRegionsHandler) get(w http.ResponseWriter, r *http.Request) {
+	region, ok := mustRegion(w, r, h.deps)
+	if !ok {
 		return
 	}
+	writeJSON(w, h.deps.Logger, http.StatusOK, regionDetailJSON{
+		regionJSON: toRegionJSON(region, h.deps.OBADefaultKeySet),
+		Features:   adminFeatures(h.deps),
+	})
+}
+
+// regionDetailJSON is regionJSON plus the deployment's feature list. It is
+// only ever returned by the single-region endpoint; the list endpoint keeps
+// the flat shape, because features are a property of the deployment rather
+// than of any one region.
+type regionDetailJSON struct {
+	regionJSON
+	Features []string `json:"features"`
+}
+
+// patch handles PATCH /api/admin/v1/regions/{regionId}.
+//
+// The region comes from the scope middleware, so an unknown id was already
+// answered with the scope's single 404 -- never an implicit insert, since
+// regions come from the directory and SetLocalFields on a missing row would
+// report success while writing nothing.
+func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
+	current, ok := mustRegion(w, r, h.deps)
+	if !ok {
+		return
+	}
+	id := current.ID
 
 	var req patchRegionRequest
 	if decodeErr := decodeJSON(w, r, maxAdminBody, &req); decodeErr != nil {
@@ -93,12 +118,6 @@ func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	current, err := h.deps.Regions.Get(ctx, id)
-	if err != nil {
-		writeRegionError(w, h.deps.Logger, "get region", id, err)
-		return
-	}
-
 	agencyID := current.DefaultAgencyID
 	if req.DefaultAgencyID != nil {
 		// An empty value is allowed: it clears the default, after which

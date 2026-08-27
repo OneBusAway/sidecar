@@ -68,9 +68,9 @@ func (f *adminFixture) seedRegistration(t *testing.T, regionID int64, token stri
 	}
 }
 
-// pushesPath is POST/GET /alerts/{id}/pushes.
-func pushesPath(alertID int64) string {
-	return fmt.Sprintf("/api/admin/v1/alerts/%d/pushes", alertID)
+// pushesPath is POST/GET /regions/{regionId}/alerts/{id}/pushes.
+func pushesPath(regionID, alertID int64) string {
+	return fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d/pushes", regionID, alertID)
 }
 
 // pushJSONFields pins the exact wire field names the SPA is written against;
@@ -91,7 +91,7 @@ func TestAdminCreatePushQueuesAndWakes(t *testing.T) {
 	id := f.seedPublishedAlert(t, regionPuget, false)
 	f.seedRegistration(t, regionPuget, "tok-1", false)
 
-	got := object(t, f.do(http.MethodPost, pushesPath(id), `{"audience":"all"}`), http.StatusAccepted)
+	got := object(t, f.do(http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`), http.StatusAccepted)
 	assertKeys(t, "pushJSON", got, pushJSONFields)
 
 	if v := str(t, got, "status"); v != "queued" {
@@ -168,7 +168,7 @@ func TestAdminCreatePushAcceptsAnEmptyBody(t *testing.T) {
 	id := f.seedPublishedAlert(t, regionPuget, false)
 	f.seedRegistration(t, regionPuget, "tok-1", false)
 
-	got := object(t, f.do(http.MethodPost, pushesPath(id), ""), http.StatusAccepted)
+	got := object(t, f.do(http.MethodPost, pushesPath(regionPuget, id), ""), http.StatusAccepted)
 	if v := str(t, got, "audience"); v != "all" {
 		t.Errorf("audience = %q, want %q (an absent audience means all)", v, "all")
 	}
@@ -190,20 +190,21 @@ func TestAdminCreatePushPreconditions(t *testing.T) {
 	f.seedRegistration(t, regionPuget, "qa", true)
 
 	cases := []struct {
-		name    string
-		alertID int64
-		body    string
-		want    int
+		name     string
+		regionID int64
+		alertID  int64
+		body     string
+		want     int
 	}{
-		{"unpublished", draft, `{}`, http.StatusConflict},
-		{"unknown alert", 9999, `{}`, http.StatusNotFound},
-		{"bad audience", published, `{"audience":"everyone"}`, http.StatusBadRequest},
-		{"malformed body", published, `{`, http.StatusBadRequest},
+		{"unpublished", regionPuget, draft, `{}`, http.StatusConflict},
+		{"unknown alert", regionPuget, 9999, `{}`, http.StatusNotFound},
+		{"bad audience", regionPuget, published, `{"audience":"everyone"}`, http.StatusBadRequest},
+		{"malformed body", regionPuget, published, `{`, http.StatusBadRequest},
 		// A published alert in regionTampa, which has no registrations.
-		{"empty audience", emptyRegionAlert, `{}`, http.StatusConflict},
+		{"empty audience", regionTampa, emptyRegionAlert, `{}`, http.StatusConflict},
 	}
 	for _, c := range cases {
-		res := f.do(http.MethodPost, pushesPath(c.alertID), c.body)
+		res := f.do(http.MethodPost, pushesPath(c.regionID, c.alertID), c.body)
 		if res.Code != c.want {
 			t.Errorf("%s: status = %d, want %d (%s)", c.name, res.Code, c.want, res.Body)
 		}
@@ -214,15 +215,15 @@ func TestAdminCreatePushPreconditions(t *testing.T) {
 
 	// A test alert is forced onto the test audience however the request is
 	// spelled: "is_test" is the author's promise that no rider sees this.
-	forced := object(t, f.do(http.MethodPost, pushesPath(testAlert), `{"audience":"all"}`), http.StatusAccepted)
+	forced := object(t, f.do(http.MethodPost, pushesPath(regionPuget, testAlert), `{"audience":"all"}`), http.StatusAccepted)
 	if v := str(t, forced, "audience"); v != "test" {
 		t.Errorf("test alert audience = %q, want %q", v, "test")
 	}
 
-	if res := f.do(http.MethodPost, pushesPath(published), `{}`); res.Code != http.StatusAccepted {
+	if res := f.do(http.MethodPost, pushesPath(regionPuget, published), `{}`); res.Code != http.StatusAccepted {
 		t.Fatalf("first push: status = %d, want 202 (%s)", res.Code, res.Body)
 	}
-	inFlight := f.do(http.MethodPost, pushesPath(published), `{}`)
+	inFlight := f.do(http.MethodPost, pushesPath(regionPuget, published), `{}`)
 	if inFlight.Code != http.StatusConflict {
 		t.Errorf("second push while in flight: status = %d, want 409 (%s)", inFlight.Code, inFlight.Body)
 	}
@@ -261,14 +262,14 @@ func (f *adminFixture) assertStatus(t *testing.T, method, target, body string, w
 	}
 }
 
-// audiencePath is GET /alerts/{id}/push_audience.
-func audiencePath(alertID int64) string {
-	return fmt.Sprintf("/api/admin/v1/alerts/%d/push_audience", alertID)
+// audiencePath is GET /regions/{regionId}/alerts/{id}/push_audience.
+func audiencePath(regionID, alertID int64) string {
+	return fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d/push_audience", regionID, alertID)
 }
 
-// cancelPath is DELETE /alerts/{id}/pushes/{pushId}.
-func cancelPath(alertID, pushID int64) string {
-	return fmt.Sprintf("/api/admin/v1/alerts/%d/pushes/%d", alertID, pushID)
+// cancelPath is DELETE /regions/{regionId}/alerts/{id}/pushes/{pushId}.
+func cancelPath(regionID, alertID, pushID int64) string {
+	return fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d/pushes/%d", regionID, alertID, pushID)
 }
 
 // assertPushAudienceReport pins the reach preview: both audience sizes split
@@ -276,9 +277,9 @@ func cancelPath(alertID, pushID int64) string {
 // that does not exist.
 func assertPushAudienceReport(t *testing.T, f *adminFixture, id int64) {
 	t.Helper()
-	aud := object(t, f.do(http.MethodGet, audiencePath(id), ""), http.StatusOK)
+	aud := object(t, f.do(http.MethodGet, audiencePath(regionPuget, id), ""), http.StatusOK)
 	assertKeys(t, "audienceJSON", aud, []string{"all", "test", "forced_test"})
-	body := f.do(http.MethodGet, audiencePath(id), "").Body.String()
+	body := f.do(http.MethodGet, audiencePath(regionPuget, id), "").Body.String()
 	if !strings.Contains(body, `"all":{"total":2,"ios":2,"android":0}`) {
 		t.Errorf("audience all = %s, want total 2 / ios 2 / android 0", body)
 	}
@@ -288,7 +289,7 @@ func assertPushAudienceReport(t *testing.T, f *adminFixture, id int64) {
 	if boolean(t, aud, "forced_test") {
 		t.Errorf("forced_test = true for a non-test alert")
 	}
-	f.assertStatus(t, http.MethodGet, audiencePath(9999), "", http.StatusNotFound,
+	f.assertStatus(t, http.MethodGet, audiencePath(regionPuget, 9999), "", http.StatusNotFound,
 		"audience of an unknown alert")
 }
 
@@ -297,10 +298,10 @@ func assertPushAudienceReport(t *testing.T, f *adminFixture, id int64) {
 // and a 404 for an alert that does not exist. It returns the queued push id.
 func assertPushListIsPerAlert(t *testing.T, f *adminFixture, id, other int64) int64 {
 	t.Helper()
-	created := object(t, f.do(http.MethodPost, pushesPath(id), `{}`), http.StatusAccepted)
+	created := object(t, f.do(http.MethodPost, pushesPath(regionPuget, id), `{}`), http.StatusAccepted)
 	pushID := jsonID(t, created)
 
-	list := array(t, f.do(http.MethodGet, pushesPath(id), ""), http.StatusOK)
+	list := array(t, f.do(http.MethodGet, pushesPath(regionPuget, id), ""), http.StatusOK)
 	if len(list) != 1 {
 		t.Fatalf("list = %v, want exactly the one push", list)
 	}
@@ -309,12 +310,12 @@ func assertPushListIsPerAlert(t *testing.T, f *adminFixture, id, other int64) in
 		t.Errorf("listed push id = %d, want %d", got, pushID)
 	}
 	// An alert with no pushes is an empty array, never null.
-	if got := array(t, f.do(http.MethodGet, pushesPath(other), ""), http.StatusOK); len(got) != 0 {
+	if got := array(t, f.do(http.MethodGet, pushesPath(regionPuget, other), ""), http.StatusOK); len(got) != 0 {
 		t.Errorf("other alert's list = %v, want []", got)
 	}
 	// An unknown alert is a 404, not an empty list: "no pushes" and "no such
 	// alert" are different answers and the SPA renders them differently.
-	f.assertStatus(t, http.MethodGet, pushesPath(9999), "", http.StatusNotFound,
+	f.assertStatus(t, http.MethodGet, pushesPath(regionPuget, 9999), "", http.StatusNotFound,
 		"list for an unknown alert")
 	return pushID
 }
@@ -325,23 +326,23 @@ func assertPushListIsPerAlert(t *testing.T, f *adminFixture, id, other int64) in
 // sentinel's own text.
 func assertPushCancelScoping(t *testing.T, f *adminFixture, id, other, pushID int64) {
 	t.Helper()
-	f.assertStatus(t, http.MethodDelete, cancelPath(other, pushID), "", http.StatusNotFound,
+	f.assertStatus(t, http.MethodDelete, cancelPath(regionPuget, other, pushID), "", http.StatusNotFound,
 		"cross-alert cancel")
-	f.assertStatus(t, http.MethodDelete, cancelPath(id, 9999), "", http.StatusNotFound,
+	f.assertStatus(t, http.MethodDelete, cancelPath(regionPuget, id, 9999), "", http.StatusNotFound,
 		"cancel of an unknown push")
 
 	// A non-numeric pushId is a malformed request, not a missing push: 400
 	// tells the caller their URL is wrong, where 404 would send them looking
 	// for a push that was never named.
-	bad := f.do(http.MethodDelete, fmt.Sprintf("%s/not-a-number", pushesPath(id)), "")
+	bad := f.do(http.MethodDelete, pushesPath(regionPuget, id)+"/not-a-number", "")
 	if bad.Code != http.StatusBadRequest {
 		t.Errorf("cancel with a non-numeric pushId: status = %d, want 400 (%s)", bad.Code, bad.Body)
 	}
 	assertContains(t, "non-numeric pushId error", errorText(t, bad, http.StatusBadRequest),
 		"invalid pushId", "not-a-number")
 
-	f.assertStatus(t, http.MethodDelete, cancelPath(id, pushID), "", http.StatusNoContent, "cancel")
-	twice := f.do(http.MethodDelete, cancelPath(id, pushID), "")
+	f.assertStatus(t, http.MethodDelete, cancelPath(regionPuget, id, pushID), "", http.StatusNoContent, "cancel")
+	twice := f.do(http.MethodDelete, cancelPath(regionPuget, id, pushID), "")
 	if twice.Code != http.StatusConflict {
 		t.Errorf("cancel twice: status = %d, want 409", twice.Code)
 	}
@@ -366,7 +367,7 @@ func TestAdminPushAudienceForcedTest(t *testing.T) {
 
 	f := newAdminFixture(t)
 	id := f.seedPublishedAlert(t, regionPuget, true)
-	aud := object(t, f.do(http.MethodGet, audiencePath(id), ""), http.StatusOK)
+	aud := object(t, f.do(http.MethodGet, audiencePath(regionPuget, id), ""), http.StatusOK)
 	if !boolean(t, aud, "forced_test") {
 		t.Errorf("forced_test = false for a test alert")
 	}
@@ -375,10 +376,10 @@ func TestAdminPushAudienceForcedTest(t *testing.T) {
 // pushRoutePatterns is the §2.9 route set, spelled here rather than derived
 // from adminRoutes so the table cannot silently lose one and still pass.
 var pushRoutePatterns = []string{
-	"POST /api/admin/v1/alerts/{id}/pushes",
-	"GET /api/admin/v1/alerts/{id}/pushes",
-	"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}",
-	"GET /api/admin/v1/alerts/{id}/push_audience",
+	"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes",
+	"GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes",
+	"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}",
+	"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience",
 }
 
 // TestAdminPushRoutesRequireAPrincipalAndAreAbsentWithoutWaker is the wiring
@@ -577,9 +578,9 @@ func TestAdminPushes_AlertPushStoreFailuresAre500(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, target, body string
 	}{
-		{"create", http.MethodPost, pushesPath(id), `{}`},
-		{"list", http.MethodGet, pushesPath(id), ""},
-		{"cancel", http.MethodDelete, fmt.Sprintf("%s/1", pushesPath(id)), ""},
+		{"create", http.MethodPost, pushesPath(regionPuget, id), `{}`},
+		{"list", http.MethodGet, pushesPath(regionPuget, id), ""},
+		{"cancel", http.MethodDelete, pushesPath(regionPuget, id) + "/1", ""},
 	} {
 		rec := f.do(tc.method, tc.target, tc.body)
 		if rec.Code != http.StatusInternalServerError {
