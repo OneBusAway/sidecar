@@ -166,6 +166,29 @@ type Region struct {
 	ObaApiKey       string
 }
 
+type RegionApiKey struct {
+	ID            int64
+	RegionID      int64
+	Name          string
+	KeyHash       string
+	CreatedByKind string
+	CreatedByID   sql.NullInt64
+	CreatedAt     int64
+	LastUsedAt    sql.NullInt64
+	RevokedAt     sql.NullInt64
+	RevokedByKind sql.NullString
+	RevokedByID   sql.NullInt64
+}
+
+type ServicePrincipal struct {
+	ID         int64
+	Name       string
+	KeyHash    string
+	CreatedAt  int64
+	LastUsedAt sql.NullInt64
+	RevokedAt  sql.NullInt64
+}
+
 type Session struct {
 	TokenHash string
 	UserID    int64
