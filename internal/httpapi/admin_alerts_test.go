@@ -17,6 +17,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // The three seeded regions. Region 0 is deliberately one of them: it is a real
@@ -49,7 +50,7 @@ type adminFixture struct {
 
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
-	return newAdminFixtureWithDeps(t, nil)
+	return newAdminFixtureWith(t, false, nil)
 }
 
 // newAdminFixtureWithDeps is newAdminFixture with a hook that adjusts Deps
@@ -57,6 +58,26 @@ func newAdminFixture(t *testing.T) *adminFixture {
 // deliberately partial wiring -- an alert push repository with no transport,
 // say -- and still want a real store and a real logged-in session.
 func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWith(t, false, mutate)
+}
+
+// newFullAdminFixture additionally wires the repositories the surveys, ghost
+// bus, and alarm route families are gated on (design spec section 5.7), so
+// those routes are actually registered. It is separate from newAdminFixture
+// so the default fixture keeps proving that an unwired family registers NO
+// routes at all.
+func newFullAdminFixture(t *testing.T) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWith(t, true, nil)
+}
+
+// newAdminFixtureWith is the shared body of the three constructors above.
+// full and mutate are separate parameters, not one folded into the other,
+// because mutate runs on the already-built Deps literal and has no handle on
+// the store: it can flip a field to nil but it cannot wire a real
+// repository, which is exactly what "full" needs to do.
+func newAdminFixtureWith(t *testing.T, full bool, mutate func(*Deps)) *adminFixture {
 	t.Helper()
 
 	store := sqlitetest.Open(t)
@@ -96,6 +117,15 @@ func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
 		PushRegs:       store.PushRegs(),
 		AlertPushes:    store.AlertPushes(),
 		AlertPushWaker: f.waker,
+	}
+	if full {
+		deps.Surveys = store.Surveys()
+		deps.GhostBus = store.GhostBus()
+		deps.Alarms = store.Alarms()
+		// Alarm creation resolves a departure through OBA; a stub that
+		// always fails degrades every alarm to the generic message, which is
+		// the documented fallback and keeps these tests off the network.
+		deps.OBA = &fakeOBA{}
 	}
 	if mutate != nil {
 		mutate(&deps)
@@ -358,7 +388,7 @@ func alertPath(regionID, id int64, suffix string) string {
 func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 
 	// The only two routes allowed to skip requirePrincipal, and why: login
 	// has no session yet, and logout must stay idempotent for a SPA tidying
@@ -375,8 +405,8 @@ func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	// route registered without requirePrincipal would ship open with every
 	// test in this file still green.
 	routes := adminRoutes(f.deps)
-	if want := 22; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys)",
+	if want := 31; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys + 9 surveys)",
 			len(routes), want)
 	}
 
@@ -422,7 +452,7 @@ func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 	regionKey := f.mintRegionKey(t, regionPuget)
 	servicePrincipal := f.mintPrincipal(t)
 
@@ -456,7 +486,7 @@ func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
 func TestAdminRoutes_EveryWriteIsCrossSiteGuarded(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 
 	// f.deps for the same reason as the sweep above: the conditional routes
 	// have to be in the table being walked or the guard is never checked on
@@ -1462,6 +1492,61 @@ func (scopedRegions) Get(_ context.Context, id int64) (regions.Region, error) {
 	}, nil
 }
 
+// failingSurveys fails every call, for the same reason failingAlerts does:
+// every method fails, so the sweep below cannot pass on a route by accident
+// because the one method it happened to reach still worked.
+type failingSurveys struct{}
+
+func (failingSurveys) CreateStudy(context.Context, int64, string, string, time.Time) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) GetStudy(context.Context, int64) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) ListStudies(context.Context, int64) ([]surveys.Study, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) UpdateStudy(context.Context, int64, int64, string, string, time.Time) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) CreateSurvey(context.Context, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) CreateSurveyInRegion(context.Context, int64, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) GetSurvey(context.Context, int64) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) ListSurveys(context.Context, int64) ([]surveys.Survey, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) ListActiveSurveys(context.Context, int64, time.Time) ([]surveys.Survey, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) UpdateSurvey(context.Context, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) DeleteSurvey(context.Context, int64) error { return errStoreBroken }
+func (failingSurveys) CountResponses(context.Context, int64) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingSurveys) CreateResponse(context.Context, surveys.NewResponse, time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) GetResponse(context.Context, string) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) AmendResponse(context.Context, string, []surveys.Answer, time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) ListResponses(context.Context, int64) ([]surveys.Response, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) GetResponseInRegion(context.Context, int64, string) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+
 // TestAdminAPI_StoreFailuresAre500 pins the last rule of the API contract: a
 // broken store is a logged 500 with one fixed body on every route, never a 4xx
 // that would send an operator hunting for a client mistake, and never the
@@ -1490,6 +1575,7 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		PushRegs:       failingPushRegs{},
 		AlertPushes:    failingAlertPushes{},
 		AlertPushWaker: &recordingWaker{},
+		Surveys:        failingSurveys{},
 	}
 	h := NewRouter(deps)
 	cookie := adminLogin(t, h)
@@ -1511,6 +1597,14 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 			body = minimalAlertBody("x")
 		case method == http.MethodPatch && strings.Contains(target, "/alerts/"):
 			body = `{"header":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/studies"):
+			body = `{"name":"x"}`
+		case method == http.MethodPatch && strings.Contains(target, "/studies/"):
+			body = `{"name":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/surveys"):
+			body = `{"study_id":1,"name":"x"}`
+		case method == http.MethodPut && strings.Contains(target, "/surveys/"):
+			body = `{"name":"x"}`
 		case method == http.MethodPatch:
 			body = `{"default_agency_id":"x"}`
 		case method == http.MethodPut:

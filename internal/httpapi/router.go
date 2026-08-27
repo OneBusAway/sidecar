@@ -460,6 +460,25 @@ func adminRoutes(deps Deps) []adminRoute {
 		)
 	}
 
+	// The study and survey authoring family (design spec section 2.13,
+	// section 5.7). Gated on deps.Surveys, the same field that gates the
+	// rider-facing survey feed above, whose block already guarantees
+	// Deps.Now and Deps.Regions.
+	if deps.Surveys != nil {
+		surveysAdmin := &adminSurveysHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/studies", surveysAdmin.listStudies, operatorOrKey, scopeRegion},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/studies", surveysAdmin.createStudy, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/studies/{id}", surveysAdmin.getStudy, operatorOrKey, scopeRegion},
+			adminRoute{"PATCH /api/admin/v1/regions/{regionId}/studies/{id}", surveysAdmin.patchStudy, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys", surveysAdmin.listSurveys, operatorOrKey, scopeRegion},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/surveys", surveysAdmin.createSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.getSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"PUT /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.putSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.deleteSurvey, operatorOrKey, scopeRegion},
+		)
+	}
+
 	// The key-management family is the one place a service principal is
 	// granted anything, and the one family a region key must never reach --
 	// hence scopeKeyAdmin rather than scopeRegion (design spec §5.6).

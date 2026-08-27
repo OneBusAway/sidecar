@@ -133,40 +133,15 @@ func readDocument(stdin io.Reader, path string) (surveys.Document, error) {
 	return doc, nil
 }
 
-// definitionFromDocument converts a document to a validated Definition.
-// Dates go through parseInstant with the region, so the explicit-offset
-// rule and its timezone hint carry over from alert create.
+// definitionFromDocument converts a document to a validated Definition via
+// the shared codec (internal/surveys/codec.go), so the CLI and POST/PUT
+// /surveys cannot drift on defaults. Dates go through parseInstant with the
+// region, so the explicit-offset rule and its timezone hint carry over from
+// alert create.
 func definitionFromDocument(doc surveys.Document, region regions.Region) (surveys.Definition, error) {
-	def := surveys.Definition{
-		Name: doc.Name, Available: true,
-		ShowOnMap: doc.ShowOnMap, ShowOnStops: doc.ShowOnStops, AlwaysVisible: doc.AlwaysVisible,
-		AllowsMultipleResponses: doc.AllowsMultipleResponses,
-		VisibleStopList:         doc.VisibleStopList, VisibleRouteList: doc.VisibleRouteList,
-	}
-	if doc.Available != nil {
-		def.Available = *doc.Available
-	}
-	if doc.StartDate != nil {
-		t, err := parseInstant(*doc.StartDate, region)
-		if err != nil {
-			return surveys.Definition{}, fmt.Errorf("start_date: %w", err)
-		}
-		def.StartTime = &t
-	}
-	if doc.EndDate != nil {
-		t, err := parseInstant(*doc.EndDate, region)
-		if err != nil {
-			return surveys.Definition{}, fmt.Errorf("end_date: %w", err)
-		}
-		def.EndTime = &t
-	}
-	for _, q := range doc.Questions {
-		def.Questions = append(def.Questions, surveys.QuestionDefinition{Required: q.Required, Content: q.Content})
-	}
-	if err := def.Validate(); err != nil {
-		return surveys.Definition{}, err
-	}
-	return def, nil
+	return surveys.DefinitionFromDocument(doc, func(s string) (time.Time, error) {
+		return parseInstant(s, region)
+	})
 }
 
 func parseSurveyIDArg(op string, args []string) (int64, error) { return parseIDArg(op, "survey", args) }

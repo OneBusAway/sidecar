@@ -10,6 +10,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // routeScope is which region middleware an admin route carries.
@@ -176,4 +177,65 @@ func loadAlert(w http.ResponseWriter, r *http.Request, deps Deps) (alerts.Alert,
 		return alerts.Alert{}, false
 	}
 	return a, true
+}
+
+// loadStudy resolves {id} within the request's region. A study id that
+// exists but belongs to another region gets exactly the same "study not
+// found" body as one that does not exist at all, matching loadAlert's
+// reasoning: the {regionId} segment is a fence, not a filter, and the two
+// cases must be indistinguishable to a caller.
+func loadStudy(w http.ResponseWriter, r *http.Request, deps Deps) (surveys.Study, bool) {
+	region, ok := mustRegion(w, r, deps)
+	if !ok {
+		return surveys.Study{}, false
+	}
+	id, err := pathInt64(r, "id")
+	if err != nil {
+		writeJSONError(w, deps.Logger, http.StatusBadRequest, err.Error())
+		return surveys.Study{}, false
+	}
+	st, err := deps.Surveys.GetStudy(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, surveys.ErrNotFound) {
+			writeJSONError(w, deps.Logger, http.StatusNotFound, "study not found")
+			return surveys.Study{}, false
+		}
+		serverErrorJSON(w, deps.Logger, "get study", err)
+		return surveys.Study{}, false
+	}
+	if st.RegionID != region.ID {
+		writeJSONError(w, deps.Logger, http.StatusNotFound, "study not found")
+		return surveys.Study{}, false
+	}
+	return st, true
+}
+
+// loadSurvey resolves {id} within the request's region THROUGH ITS STUDY:
+// surveys carry no region of their own, so the study is the only place the
+// tenancy answer lives. GetSurvey populates Study on every read, so this
+// needs no second query.
+func loadSurvey(w http.ResponseWriter, r *http.Request, deps Deps) (surveys.Survey, bool) {
+	region, ok := mustRegion(w, r, deps)
+	if !ok {
+		return surveys.Survey{}, false
+	}
+	id, err := pathInt64(r, "id")
+	if err != nil {
+		writeJSONError(w, deps.Logger, http.StatusBadRequest, err.Error())
+		return surveys.Survey{}, false
+	}
+	s, err := deps.Surveys.GetSurvey(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, surveys.ErrNotFound) {
+			writeJSONError(w, deps.Logger, http.StatusNotFound, "survey not found")
+			return surveys.Survey{}, false
+		}
+		serverErrorJSON(w, deps.Logger, "get survey", err)
+		return surveys.Survey{}, false
+	}
+	if s.Study.RegionID != region.ID {
+		writeJSONError(w, deps.Logger, http.StatusNotFound, "survey not found")
+		return surveys.Survey{}, false
+	}
+	return s, true
 }

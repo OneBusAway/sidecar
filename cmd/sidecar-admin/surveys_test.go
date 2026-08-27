@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
@@ -116,16 +117,16 @@ func TestSurveyCreateAppearsInRiderList(t *testing.T) {
 	}
 }
 
+// TestSurveyCreateRejectsBadDocuments covers the two rejections that are the
+// CLI's own -- readDocument's strict JSON decode -- rather than
+// surveys.DefinitionFromDocument's validation, which moved to
+// internal/surveys/codec_test.go now that POST/PUT /surveys shares it.
 func TestSurveyCreateRejectsBadDocuments(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 	st := createStudy(t, dbPath)
 	tests := []struct{ name, doc, wantErr string }{
-		{"half window", `{"name":"x","start_date":"2026-09-01T00:00:00-07:00"}`, "both start_date and end_date"},
-		{"naive date", `{"name":"x","start_date":"2026-09-01T00:00:00","end_date":"2026-09-02T00:00:00"}`, "explicit offset"},
-		{"blank option", `{"name":"x","questions":[{"content":{"type":"radio","label_text":"q","options":["a",""]}}]}`, "blank option"},
-		{"schemeless url", `{"name":"x","questions":[{"content":{"type":"external_survey","label_text":"q","url":"example.org"}}]}`, "absolute http(s)"},
 		{"unknown key", `{"name":"x","require_stop_id":true}`, "unknown field"},
 		{"not json", `{`, "parse"},
 	}
@@ -144,6 +145,42 @@ func TestSurveyCreateRejectsBadDocuments(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("rejected documents persisted %d surveys", len(list))
+	}
+}
+
+// TestSurveyCreateNaiveDateNamesRegionTimezone pins the one thing
+// definitionFromDocument still does that the shared codec cannot:
+// wire the CLI's own parseInstant(s, region) into DefinitionFromDocument, so
+// a naive datetime's rejection names the study's region and its configured
+// zone -- the hint an author needs to fix the value. Region 1 is set to
+// America/Los_Angeles below (seedRegion alone leaves the schema default,
+// UTC, which the assertion below could not distinguish from a bug that
+// dropped the region entirely).
+func TestSurveyCreateNaiveDateNamesRegionTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	if err := store.Regions().SetLocalFields(context.Background(), 1,
+		regions.LocalFields{Timezone: "America/Los_Angeles"}, time.Now()); err != nil {
+		t.Fatalf("SetLocalFields: %v", err)
+	}
+	st := createStudy(t, dbPath)
+	naiveDoc := `{"name":"x","start_date":"2026-09-01T00:00:00","end_date":"2026-09-02T00:00:00"}`
+	_, _, err := cli(t, dbPath, "survey", "create", "--study", itoa(st), "--file", writeDoc(t, naiveDoc))
+	if err == nil {
+		t.Fatal("naive start_date accepted")
+	}
+	for _, want := range []string{"explicit offset", "region 1", "America/Los_Angeles"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	list, err := store.Surveys().ListSurveys(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("rejected document persisted %d surveys", len(list))
 	}
 }
 

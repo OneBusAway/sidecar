@@ -71,6 +71,26 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 	return nil
 }
 
+// decodeJSONStrict is decodeJSON with DisallowUnknownFields. It exists for
+// the survey authoring document, where the CLI has always been strict for a
+// concrete reason: a misspelled "show_on_maps" would decode as absent and
+// silently ship a hidden survey. Everywhere else this API is deliberately
+// lenient, so a newer SPA sending a field this server has not learned about
+// yet is not rejected outright -- do not "unify" the two.
+func decodeJSONStrict(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return errBodyTooLarge
+		}
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
 // writeServerError logs op against the region id and writes a bare, empty
 // 500. Every {regionId} feed handler shares this one function for the same
 // reason they share writeRegionNotFound: three independent copies is how one

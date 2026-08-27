@@ -12,6 +12,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // ---------------------------------------------------------------------------
@@ -411,7 +412,7 @@ func TestGetRegion_FeaturesFollowTheWiring(t *testing.T) {
 func TestRouteTable_ScopeAgreesWithPattern(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 	for _, rt := range adminRoutes(f.deps) {
 		hasSegment := strings.Contains(rt.pattern, "{regionId}")
 		if hasSegment != (rt.scope != scopeNone) {
@@ -466,8 +467,10 @@ func (s tenancySpec) body(fx tenancyFixtureIDs) string {
 // tenancyFixtureIDs are the resources seeded in region B that the walk tries
 // to reach through region A. Later route families add their own ids here.
 type tenancyFixtureIDs struct {
-	alertID int64
-	pushID  int64
+	alertID  int64
+	pushID   int64
+	studyID  int64
+	surveyID int64
 }
 
 // tenancyFixtures is keyed by route pattern. Every scoped route needs an
@@ -498,6 +501,27 @@ var tenancyFixtures = map[string]tenancySpec{
 	"POST /api/admin/v1/regions/{regionId}/api_keys":           {skipTenancyWalk: true},
 	"GET /api/admin/v1/regions/{regionId}/api_keys":            {skipTenancyWalk: true},
 	"DELETE /api/admin/v1/regions/{regionId}/api_keys/{keyId}": {skipTenancyWalk: true},
+
+	"GET /api/admin/v1/regions/{regionId}/studies":  {wantEmptyList: true},
+	"POST /api/admin/v1/regions/{regionId}/studies": {ownRegion: true, bodyFor: func(tenancyFixtureIDs) string { return `{"name":"x"}` }},
+
+	"GET /api/admin/v1/regions/{regionId}/studies/{id}":   {},
+	"PATCH /api/admin/v1/regions/{regionId}/studies/{id}": {bodyFor: func(tenancyFixtureIDs) string { return `{"name":"hijacked"}` }},
+
+	"GET /api/admin/v1/regions/{regionId}/surveys": {wantEmptyList: true},
+	// The interesting one: study_id arrives in the BODY, not the path, so the
+	// walk leaves {regionId} as region A (the caller's own -- it passes the
+	// scope) and puts region B's study id in the body. The 404 this must
+	// produce comes from CreateSurveyInRegion's own JOIN against the region,
+	// not from a loader, which is exactly the thing a refactor could drop
+	// without any of the *other* entries in this table noticing.
+	"POST /api/admin/v1/regions/{regionId}/surveys": {bodyFor: func(fx tenancyFixtureIDs) string {
+		return fmt.Sprintf(`{"study_id":%d,"name":"x"}`, fx.studyID)
+	}},
+
+	"GET /api/admin/v1/regions/{regionId}/surveys/{id}":    {},
+	"PUT /api/admin/v1/regions/{regionId}/surveys/{id}":    {bodyFor: func(tenancyFixtureIDs) string { return `{"name":"hijacked"}` }},
+	"DELETE /api/admin/v1/regions/{regionId}/surveys/{id}": {},
 }
 
 // seedTenancyFixtures creates, in region B, one of every resource the walk
@@ -521,7 +545,16 @@ func (f *adminFixture) seedTenancyFixtures(t *testing.T) tenancyFixtureIDs {
 		fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d/pushes", regionB, alertID), `{}`),
 		http.StatusAccepted)
 
-	return tenancyFixtureIDs{alertID: alertID, pushID: jsonID(t, created)}
+	study := object(t, f.do(http.MethodPost, fmt.Sprintf("/api/admin/v1/regions/%d/studies", regionB),
+		`{"name":"tenancy study"}`), http.StatusCreated)
+	studyID := jsonID(t, study)
+	survey := object(t, f.do(http.MethodPost, fmt.Sprintf("/api/admin/v1/regions/%d/surveys", regionB),
+		fmt.Sprintf(`{"study_id":%d,"name":"tenancy survey"}`, studyID)), http.StatusCreated)
+
+	return tenancyFixtureIDs{
+		alertID: alertID, pushID: jsonID(t, created),
+		studyID: studyID, surveyID: jsonID(t, survey),
+	}
 }
 
 // tenancyTarget turns a scoped route pattern into the one request that must be
@@ -539,7 +572,17 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 		regionID = regionTampa // region B: somebody else's
 	}
 	path = strings.ReplaceAll(path, "{regionId}", strconv.FormatInt(regionID, 10))
-	path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(fx.alertID, 10))
+	// {id} names a different resource depending on the family: an alert's id
+	// everywhere else in this table, but a study's or a survey's own id on
+	// the routes under those prefixes.
+	id := fx.alertID
+	switch {
+	case strings.Contains(path, "/studies"):
+		id = fx.studyID
+	case strings.Contains(path, "/surveys"):
+		id = fx.surveyID
+	}
+	path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(id, 10))
 	path = strings.ReplaceAll(path, "{pushId}", strconv.FormatInt(fx.pushID, 10))
 	path = strings.ReplaceAll(path, "{lang}", "es")
 	if strings.ContainsAny(path, "{}") {
@@ -548,32 +591,61 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 	return method, path
 }
 
+// regionBSnapshot is what assertRegionBIntact compares against: the state of
+// every region-B fixture immediately after seedTenancyFixtures created it,
+// before the walk's own request runs.
+type regionBSnapshot struct {
+	alert  alerts.Alert
+	study  surveys.Study
+	survey surveys.Survey
+	count  int
+}
+
+// snapshotRegionB reads back everything seedTenancyFixtures just created, for
+// assertRegionBIntact to diff against after the walk's request runs.
+func (f *adminFixture) snapshotRegionB(t *testing.T, fx tenancyFixtureIDs) regionBSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	study, err := f.store.Surveys().GetStudy(ctx, fx.studyID)
+	if err != nil {
+		t.Fatalf("snapshot region B study: %v", err)
+	}
+	survey, err := f.store.Surveys().GetSurvey(ctx, fx.surveyID)
+	if err != nil {
+		t.Fatalf("snapshot region B survey: %v", err)
+	}
+	return regionBSnapshot{
+		alert: f.storedAlert(t, fx.alertID), study: study, survey: survey,
+		count: f.countAlerts(t),
+	}
+}
+
 // assertRegionBIntact fails if the request the walk just made changed anything
 // in region B. It is checked per route rather than once at the end for two
 // reasons: a route that answers 404 *after* performing its side effect is
 // attributed to itself, and a route that destroys the fixture cannot make the
 // routes after it pass for the wrong reason ("no such alert").
-func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, before alerts.Alert, alertsBefore int, what string) {
+func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, before regionBSnapshot, what string) {
 	t.Helper()
 	ctx := context.Background()
 
-	if after := f.countAlerts(t); after != alertsBefore {
-		t.Errorf("%s: wrote %d alert row(s)", what, after-alertsBefore)
+	if after := f.countAlerts(t); after != before.count {
+		t.Errorf("%s: wrote %d alert row(s)", what, after-before.count)
 	}
 	stored, err := f.store.Alerts().Get(ctx, fx.alertID)
 	if err != nil {
 		t.Errorf("%s: region B's alert is gone: %v", what, err)
 		return
 	}
-	if stored.HeaderText != before.HeaderText {
-		t.Errorf("%s: region B's alert header = %q, want %q", what, stored.HeaderText, before.HeaderText)
+	if stored.HeaderText != before.alert.HeaderText {
+		t.Errorf("%s: region B's alert header = %q, want %q", what, stored.HeaderText, before.alert.HeaderText)
 	}
-	if stored.Published != before.Published {
-		t.Errorf("%s: region B's alert published = %v, want %v", what, stored.Published, before.Published)
+	if stored.Published != before.alert.Published {
+		t.Errorf("%s: region B's alert published = %v, want %v", what, stored.Published, before.alert.Published)
 	}
-	if len(stored.Translations) != len(before.Translations) {
+	if len(stored.Translations) != len(before.alert.Translations) {
 		t.Errorf("%s: region B's alert has %d translation rows, want %d",
-			what, len(stored.Translations), len(before.Translations))
+			what, len(stored.Translations), len(before.alert.Translations))
 	}
 
 	p, err := f.store.AlertPushes().Get(ctx, fx.pushID)
@@ -585,6 +657,22 @@ func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, b
 	// that cancelled and then answered 404 would pass an existence check.
 	if p.Status == alertpush.StatusCanceled {
 		t.Errorf("%s: region B's push was canceled through region A", what)
+	}
+
+	study, err := f.store.Surveys().GetStudy(ctx, fx.studyID)
+	if err != nil {
+		t.Errorf("%s: region B's study is gone: %v", what, err)
+	} else if study.Name != before.study.Name || study.Description != before.study.Description {
+		t.Errorf("%s: region B's study = %+v, want unchanged %+v", what, study, before.study)
+	}
+
+	// Existence, not just name: DELETE /surveys/{id} walked with region B's
+	// own survey id is exactly the request this must refuse.
+	survey, err := f.store.Surveys().GetSurvey(ctx, fx.surveyID)
+	if err != nil {
+		t.Errorf("%s: region B's survey is gone: %v", what, err)
+	} else if survey.Name != before.survey.Name || survey.Available != before.survey.Available {
+		t.Errorf("%s: region B's survey = %+v, want unchanged %+v", what, survey, before.survey)
 	}
 }
 
@@ -608,7 +696,7 @@ func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, b
 func TestRouteTable_TenancyWalk(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 	keyForA := f.mintRegionKey(t, regionPuget) // region A = 1
 
 	walked := map[string]bool{}
@@ -627,8 +715,7 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 		}
 
 		fx := f.seedTenancyFixtures(t) // a fresh region B = 0 for this route alone
-		before := f.storedAlert(t, fx.alertID)
-		alertsBefore := f.countAlerts(t)
+		before := f.snapshotRegionB(t, fx)
 		method, target := f.tenancyTarget(t, rt.pattern, spec, fx)
 
 		var rec *httptest.ResponseRecorder
@@ -648,7 +735,7 @@ func TestRouteTable_TenancyWalk(t *testing.T) {
 			t.Errorf("%s %s with a region-A caller against region-B data: status = %d, want 404; body = %s",
 				method, target, rec.Code, rec.Body.String())
 		}
-		f.assertRegionBIntact(t, fx, before, alertsBefore, method+" "+target)
+		f.assertRegionBIntact(t, fx, before, method+" "+target)
 	}
 
 	// A fixture entry for a route that no longer exists is a rule nobody is
