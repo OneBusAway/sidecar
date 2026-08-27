@@ -15,6 +15,38 @@ import (
 
 func gbInt64Ptr(v int64) *int64 { return &v }
 
+// ghostBusListJSONFields and ghostBusDetailJSONFields are the exact field
+// sets TestAdminGhostBus_JSONShape pins. They are separate slices, not one
+// shared list, even though the list and detail routes happen to render the
+// same shape today: asserting each independently means a future divergence
+// between the two views is caught on whichever side actually changed,
+// rather than by editing one list and having it silently cover both.
+//
+// public_identifier and the four epoch-millisecond fields (service_date,
+// scheduled_arrival_at, predicted_arrival_at, prediction_last_updated_at)
+// matter most here: this endpoint is unreleased and OBACloud (design spec
+// section 7) will bind to these names, so a typo'd or reverted JSON tag on
+// any of them has to fail a test, not just compile clean.
+var ghostBusListJSONFields = []string{
+	"id", "region_id", "public_identifier", "user_identifier", "trip_identifier",
+	"service_date", "route_identifier", "stop_identifier", "vehicle_identifier",
+	"stop_sequence", "predicted", "schedule_deviation_minutes", "wait_duration_minutes",
+	"comment", "user_latitude", "user_longitude",
+	"scheduled_arrival_at", "predicted_arrival_at", "prediction_last_updated_at",
+	"snapshot_status", "snapshot_json", "snapshot_captured_at", "snapshot_attempts",
+	"created_at",
+}
+
+var ghostBusDetailJSONFields = []string{
+	"id", "region_id", "public_identifier", "user_identifier", "trip_identifier",
+	"service_date", "route_identifier", "stop_identifier", "vehicle_identifier",
+	"stop_sequence", "predicted", "schedule_deviation_minutes", "wait_duration_minutes",
+	"comment", "user_latitude", "user_longitude",
+	"scheduled_arrival_at", "predicted_arrival_at", "prediction_last_updated_at",
+	"snapshot_status", "snapshot_json", "snapshot_captured_at", "snapshot_attempts",
+	"created_at",
+}
+
 // seedReport creates a ghost bus report directly through the repository,
 // not the rider POST route: that route's CreatedAt is always h.deps.Now(),
 // and these tests need reports at controlled instants (for ?since) and with
@@ -73,6 +105,33 @@ func TestAdminGhostBus_ListAndSince(t *testing.T) {
 		if rec := f.do(http.MethodGet, "/api/admin/v1/regions/1/ghost_bus_reports?since="+url.QueryEscape(bad), ""); rec.Code != http.StatusBadRequest {
 			t.Errorf("since=%q: status = %d, want 400", bad, rec.Code)
 		}
+	}
+}
+
+// TestAdminGhostBus_JSONShape pins the exact field set of both the list
+// item and the detail response (see the field-list vars above for why they
+// are asserted separately). It also pins that public_identifier round-trips
+// as the report's actual public id, catching a tag that compiles but names
+// the wrong field.
+func TestAdminGhostBus_JSONShape(t *testing.T) {
+	t.Parallel()
+
+	f := newFullAdminFixture(t)
+	rep := f.seedReport(t, regionPuget, "shape", testNow)
+
+	list := array(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/ghost_bus_reports", ""), http.StatusOK)
+	if len(list) != 1 {
+		t.Fatalf("got %d reports, want 1", len(list))
+	}
+	assertKeys(t, "listed ghost bus report", list[0], ghostBusListJSONFields)
+	if v := str(t, list[0], "public_identifier"); v != rep.PublicID {
+		t.Errorf("public_identifier = %q, want %q", v, rep.PublicID)
+	}
+
+	got := object(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/ghost_bus_reports/"+rep.PublicID, ""), http.StatusOK)
+	assertKeys(t, "ghost bus report detail", got, ghostBusDetailJSONFields)
+	if v := str(t, got, "public_identifier"); v != rep.PublicID {
+		t.Errorf("public_identifier = %q, want %q", v, rep.PublicID)
 	}
 }
 
