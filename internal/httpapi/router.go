@@ -466,6 +466,7 @@ func adminRoutes(deps Deps) []adminRoute {
 	// Deps.Now and Deps.Regions.
 	if deps.Surveys != nil {
 		surveysAdmin := &adminSurveysHandler{deps: deps}
+		responsesAdmin := &adminResponsesHandler{deps: deps}
 		routes = append(routes,
 			adminRoute{"GET /api/admin/v1/regions/{regionId}/studies", surveysAdmin.listStudies, operatorOrKey, scopeRegion},
 			adminRoute{"POST /api/admin/v1/regions/{regionId}/studies", surveysAdmin.createStudy, operatorOrKey, scopeRegion},
@@ -476,6 +477,11 @@ func adminRoutes(deps Deps) []adminRoute {
 			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.getSurvey, operatorOrKey, scopeRegion},
 			adminRoute{"PUT /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.putSurvey, operatorOrKey, scopeRegion},
 			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.deleteSurvey, operatorOrKey, scopeRegion},
+			// Responses (design spec section 2.14): read-only, so a region
+			// key reads them exactly like it reads the survey itself.
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses", responsesAdmin.listResponses, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses.csv", responsesAdmin.responsesCSV, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/survey_responses/{publicId}", responsesAdmin.getResponse, operatorOrKey, scopeRegion},
 		)
 	}
 

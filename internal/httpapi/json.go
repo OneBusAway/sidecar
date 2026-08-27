@@ -27,6 +27,18 @@ func writeJSONError(w http.ResponseWriter, logger *slog.Logger, status int, msg 
 	writeJSON(w, logger, status, map[string]string{"error": msg})
 }
 
+// writeCSVHeaders sets the response headers every CSV export shares.
+// nosniff stops a browser from re-interpreting the body as HTML; no-store
+// keeps rider data out of intermediary caches; the filename is fixed and
+// server-generated, never derived from a name, so nothing rider- or
+// author-supplied reaches a Content-Disposition header.
+func writeCSVHeaders(w http.ResponseWriter, filename string) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+}
+
 // writeRegionNotFound writes the exact 404 contract for an unrecognised
 // region (design spec §1.2, §2.5). Every feed handler that takes a
 // {regionId} path segment shares this one function rather than each

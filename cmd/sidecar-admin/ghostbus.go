@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/csvsafe"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
@@ -148,36 +149,36 @@ func ghostBusRow(r ghostbus.Report, loc *time.Location, tripCounts map[[2]any]in
 	}
 
 	return []string{
-		csvCell(r.PublicID),
+		csvsafe.Cell(r.PublicID),
 		r.CreatedAt.UTC().Format(time.RFC3339),
 		r.CreatedAt.In(loc).Format(time.RFC3339),
 		time.UnixMilli(r.ServiceDate).In(loc).Format("2006-01-02"),
-		csvCell(r.RouteIdentifier),
-		csvCell(snap.Display.RouteShortName),
-		csvCell(snap.Display.Headsign),
-		csvCell(r.TripIdentifier),
+		csvsafe.Cell(r.RouteIdentifier),
+		csvsafe.Cell(snap.Display.RouteShortName),
+		csvsafe.Cell(snap.Display.Headsign),
+		csvsafe.Cell(r.TripIdentifier),
 		strconv.Itoa(tripCounts[[2]any{r.TripIdentifier, r.ServiceDate}]),
-		csvCell(r.StopIdentifier),
-		csvCell(snap.Display.StopName),
+		csvsafe.Cell(r.StopIdentifier),
+		csvsafe.Cell(snap.Display.StopName),
 		ghostBusInt64Cell(r.StopSequence),
-		csvCell(r.VehicleIdentifier),
+		csvsafe.Cell(r.VehicleIdentifier),
 		ghostBusBoolCell(r.Predicted),
 		strconv.FormatInt(r.WaitDurationMinutes, 10),
-		csvCell(r.Comment),
+		csvsafe.Cell(r.Comment),
 		ghostBusMsToUTC(r.ScheduledArrivalAt),
 		ghostBusMsToUTC(r.PredictedArrivalAt),
 		ghostBusInt64Cell(r.ScheduleDeviationMinutes),
 		ghostBusMsToUTC(r.PredictionLastUpdatedAt),
 		ghostBusStalenessCell(r.ScheduledArrivalAt, r.PredictionLastUpdatedAt),
-		floatCell(r.UserLatitude),
-		floatCell(r.UserLongitude),
-		csvCell(r.SnapshotStatus),
+		csvsafe.Float(r.UserLatitude),
+		csvsafe.Float(r.UserLongitude),
+		csvsafe.Cell(r.SnapshotStatus),
 		ghostBusTimeCell(r.SnapshotCapturedAt),
-		floatCell(vehLat),
-		floatCell(vehLon),
+		csvsafe.Float(vehLat),
+		csvsafe.Float(vehLon),
 		distance,
-		csvCell(snap.Status.Phase),
-		csvCell(r.SnapshotJSON),
+		csvsafe.Cell(snap.Status.Phase),
+		csvsafe.Cell(r.SnapshotJSON),
 	}
 }
 

@@ -239,3 +239,27 @@ func loadSurvey(w http.ResponseWriter, r *http.Request, deps Deps) (surveys.Surv
 	}
 	return s, true
 }
+
+// loadResponse resolves {publicId} within the request's region THROUGH ITS
+// SURVEY'S STUDY, in the single query GetResponseInRegion joins
+// (survey_responses -> surveys -> studies). Unlike loadAlert, loadStudy and
+// loadSurvey, this is not a load-then-compare: the region condition lives in
+// the SQL itself, so there is no Go-level "does this row belong to me" check
+// a later refactor could accidentally drop.
+func loadResponse(w http.ResponseWriter, r *http.Request, deps Deps) (surveys.Response, bool) {
+	region, ok := mustRegion(w, r, deps)
+	if !ok {
+		return surveys.Response{}, false
+	}
+	publicID := r.PathValue("publicId")
+	resp, err := deps.Surveys.GetResponseInRegion(r.Context(), region.ID, publicID)
+	if err != nil {
+		if errors.Is(err, surveys.ErrNotFound) {
+			writeJSONError(w, deps.Logger, http.StatusNotFound, "response not found")
+			return surveys.Response{}, false
+		}
+		serverErrorJSON(w, deps.Logger, "get survey response", err)
+		return surveys.Response{}, false
+	}
+	return resp, true
+}

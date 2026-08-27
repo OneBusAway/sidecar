@@ -471,6 +471,10 @@ type tenancyFixtureIDs struct {
 	pushID   int64
 	studyID  int64
 	surveyID int64
+	// responsePublicID is a response's public id, not its numeric id: the
+	// /survey_responses/{publicId} route addresses responses by that string,
+	// never by the row id.
+	responsePublicID string
 }
 
 // tenancyFixtures is keyed by route pattern. Every scoped route needs an
@@ -522,6 +526,14 @@ var tenancyFixtures = map[string]tenancySpec{
 	"GET /api/admin/v1/regions/{regionId}/surveys/{id}":    {},
 	"PUT /api/admin/v1/regions/{regionId}/surveys/{id}":    {bodyFor: func(tenancyFixtureIDs) string { return `{"name":"hijacked"}` }},
 	"DELETE /api/admin/v1/regions/{regionId}/surveys/{id}": {},
+
+	// Responses are read-only, so every entry below is the default zero
+	// value: a foreign survey (or a foreign response's public id) must 404,
+	// never fall back to an empty list -- listResponses loads and checks the
+	// survey before it ever calls ListResponses.
+	"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses":      {},
+	"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses.csv":  {},
+	"GET /api/admin/v1/regions/{regionId}/survey_responses/{publicId}": {},
 }
 
 // seedTenancyFixtures creates, in region B, one of every resource the walk
@@ -550,10 +562,24 @@ func (f *adminFixture) seedTenancyFixtures(t *testing.T) tenancyFixtureIDs {
 	studyID := jsonID(t, study)
 	survey := object(t, f.do(http.MethodPost, fmt.Sprintf("/api/admin/v1/regions/%d/surveys", regionB),
 		fmt.Sprintf(`{"study_id":%d,"name":"tenancy survey"}`, studyID)), http.StatusCreated)
+	surveyID := jsonID(t, survey)
+
+	// Responses have no admin create route -- they are rider-submitted --
+	// so this is the one fixture in the walk seeded through the repository
+	// directly rather than the API, matching every other survey response
+	// test in this package. The public id is keyed off surveyID, which is
+	// unique per call, since this function reseeds a fresh region B for
+	// every route the walk exercises.
+	resp, err := f.store.Surveys().CreateResponse(context.Background(), surveys.NewResponse{
+		SurveyID: surveyID, PublicID: fmt.Sprintf("tenancy-response-%d", surveyID), UserIdentifier: "tenancy-dev",
+	}, testNow)
+	if err != nil {
+		t.Fatalf("seed tenancy response: %v", err)
+	}
 
 	return tenancyFixtureIDs{
 		alertID: alertID, pushID: jsonID(t, created),
-		studyID: studyID, surveyID: jsonID(t, survey),
+		studyID: studyID, surveyID: surveyID, responsePublicID: resp.PublicID,
 	}
 }
 
@@ -585,6 +611,7 @@ func (f *adminFixture) tenancyTarget(t *testing.T, pattern string, spec tenancyS
 	path = strings.ReplaceAll(path, "{id}", strconv.FormatInt(id, 10))
 	path = strings.ReplaceAll(path, "{pushId}", strconv.FormatInt(fx.pushID, 10))
 	path = strings.ReplaceAll(path, "{lang}", "es")
+	path = strings.ReplaceAll(path, "{publicId}", fx.responsePublicID)
 	if strings.ContainsAny(path, "{}") {
 		t.Fatalf("route pattern %q has a wildcard the tenancy walk cannot fill", pattern)
 	}
