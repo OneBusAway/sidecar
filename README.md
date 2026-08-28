@@ -101,6 +101,12 @@ sidecar-admin survey  create --study N --file <path|->
                        delete ID
                        responses ID        # long-format CSV, one row per answer
 sidecar-admin ghostbus export --region N [--since RFC3339]   # CSV, one row per report
+sidecar-admin key     create --region N --name S              # prints the raw key once
+                       list   --region N | --minted-by-principal N
+                       revoke --region N --id N
+sidecar-admin principal create --name S                        # prints the raw key once
+                       list
+                       revoke --id N [--keep-keys]
 sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
@@ -142,22 +148,27 @@ against the languages in the snapshot; anything that does not match gets English
 #### Admin API
 
 ```text
-POST   /api/admin/v1/alerts/{id}/pushes            {"audience":"all"|"test"}
-GET    /api/admin/v1/alerts/{id}/pushes
-DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}
-GET    /api/admin/v1/alerts/{id}/push_audience
+POST   /api/admin/v1/regions/{regionId}/alerts/{id}/pushes            {"audience":"all"|"test"}
+GET    /api/admin/v1/regions/{regionId}/alerts/{id}/pushes
+DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}
+GET    /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience
 ```
 
-Session-authenticated admin routes like the rest of `/api/admin/v1`. `POST`
-answers `202` with the queued push and wakes the dispatcher immediately; `GET
-…/pushes` answers `200` with that alert's pushes, newest first; `DELETE` cancels
-one and answers `204`; `GET …/push_audience` answers `200` with the `all` and
-`test` device counts (split by platform) and a `forced_test` flag for a test
-alert. Errors are `{"error": "..."}`: `400` for a malformed body or an audience
-that is neither `all` nor `test`, `404` for an unknown alert, an unknown push, or
-a `pushId` belonging to a different alert, and `409` for each precondition
-(unpublished alert, a push already in flight, empty audience) and for canceling a
-push that has already finished.
+Authenticated like the rest of `/api/admin/v1` -- a session cookie or a bearer
+credential (see *Region API keys and service principals* below) -- except that
+`POST` and `DELETE` are **operator-only**: a leaked region key must not be able
+to deliver attacker-controlled text as a push to every device in the region, so
+sending and canceling stay off limits to it even though it can read everything
+else about the region's alerts. `POST` answers `202` with the queued push and
+wakes the dispatcher immediately; `GET …/pushes` answers `200` with that
+alert's pushes, newest first; `DELETE` cancels one and answers `204`; `GET
+…/push_audience` answers `200` with the `all` and `test` device counts (split
+by platform) and a `forced_test` flag for a test alert. Errors are
+`{"error": "..."}`: `400` for a malformed body or an audience that is neither
+`all` nor `test`, `404` for an unknown alert, an unknown push, or a `pushId`
+belonging to a different alert, and `409` for each precondition (unpublished
+alert, a push already in flight, empty audience) and for canceling a push that
+has already finished.
 
 **These four routes are registered only when `SIDECAR_GORUSH_URL` is set.**
 Without a transport the admin UI reports that push notifications are not
@@ -530,6 +541,148 @@ UI not built; run make web" response at `/admin` instead of a login page.
 That is expected, not a bug -- run `make web` (or `make build`, which
 includes it) once first.
 
+`/admin` itself is now a region picker rather than the alerts list: it
+auto-forwards when the database has exactly one region and otherwise
+remembers the last region chosen (in `localStorage`). Every other page is
+region-scoped in its own URL, e.g. `/admin/regions/1/alerts/42`, so a reload
+or a deep link always has a region to put in the API path. There is no
+compatibility shim for the old shape -- a bookmark to `/admin/alerts/42`
+from before this change shows the SPA's ordinary not-found page rather than
+redirecting.
+
+### Region API keys and service principals
+
+The admin API above is session-authenticated when a browser is driving it,
+but a server-to-server integration -- OBACloud's Rails app, most concretely
+-- has no browser and no operator to log in as. `/api/admin/v1` also accepts
+`Authorization: Bearer <key>` carrying one of two credentials, checked in
+place of the session cookie (a request carrying both is a bearer request;
+cookies are ignored entirely once an `Authorization` header is present):
+
+- **A region API key** (`obask_<regionID>_<43 base64url chars>`, e.g.
+  `obask_1_Qm9…`) is scoped to exactly one region. Almost everything an
+  operator can do to that region's own resources, it can also do -- alerts,
+  studies, surveys and their responses, ghost bus reports, alarms, push
+  registration counts, and reading or setting that region's
+  `PATCH /regions/{id}` fields, **including its OBA API key**, which
+  redirects that region's sidecar-side OBA calls (ghost bus snapshots,
+  vehicle search, alarms) to a key the holder controls. Two things stay off
+  limits regardless of region: another region 404s, and the `…/api_keys`
+  family is refused (`403`), since a region key is not one of the principal
+  kinds it accepts. And one thing stays off limits even *inside* its own
+  region: sending or canceling a push notification is operator-only and
+  answers a region key with `403` too -- a leaked key must not be able to
+  page every device in the region. A leaked region key therefore reaches
+  one region's tenant data and, through its OBA key, that region's own OBA
+  traffic -- but it cannot reach another tenant, send a push, or mint or
+  revoke anything. **The remedy for a leaked region key is to revoke it**
+  (below) and mint a replacement.
+- **A service principal** (`obasp_<43 base64url chars>`) is deployment-wide
+  but single-purpose: it can only mint, list, and revoke region API keys,
+  through the `…/api_keys` family, and nothing else -- every other admin
+  route answers it with `403`. That is a deliberate trade. A leaked service
+  principal can mint itself a live key for any published region (and then
+  use it, with the region-key exposure above), revoke every region key in
+  the deployment (a deployment-wide denial of service for whatever
+  integration depends on them), and enumerate which region ids exist along
+  with every key's metadata (names, creator ids, timestamps). It **cannot
+  read a single alert, survey response, or ghost bus report** -- no tenant
+  data is reachable through a service principal at all. Recovery does not
+  require hunting for which keys are legitimate: `principal revoke` (below)
+  takes every key the principal minted with it in one transaction, so the
+  fix is revoke the principal, mint a new one, and re-provision every region
+  from scratch.
+
+Only a hex SHA-256 hash of each key is stored, the same posture as browser
+sessions; the raw value is shown exactly once, at mint time, and never
+appears in a list, a log line, or an error message afterward.
+
+`sidecar-admin` mints and revokes both kinds directly against the database
+(`created_by`/`revoked_by` records `cli` for these). A service principal
+mints region keys the same way OBACloud will, over HTTP:
+
+```sh
+# An operator mints the deployment-wide principal once, up front.
+./bin/sidecar-admin --db ./sidecar.db principal create --name "obacloud"
+# obasp_972so11ncVZAgGSHJAActb4Qo6CiZCNggdjCNl-t6uQ
+# id: 1  name: obacloud
+
+# The consumer holding that principal mints a key scoped to one region by
+# calling the sidecar itself -- this is the provisioning flow OBACloud's
+# integration automates (see below):
+curl -s -X POST https://sidecar.example.org/api/admin/v1/regions/1/api_keys \
+  -H "Authorization: Bearer obasp_972so11ncVZAgGSHJAActb4Qo6CiZCNggdjCNl-t6uQ" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"obacloud rails1"}'
+# {"id":1,"name":"obacloud rails1","key":"obask_1_L_RvltB_P6G8UwZ9_QljL8RlQvfd-l2Ir2tl4m-7wtU", …}
+```
+
+An operator can also mint a region key directly, without a principal, for
+manual testing or a deployment with no external consumer yet:
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name "manual test key"
+# obask_1_WlDL9LeQxtC1KYwwnuy7ry8zqA4MVFHy8ahZOlPq3XM
+# id: 2  name: manual test key
+
+./bin/sidecar-admin --db ./sidecar.db key list --region 1
+# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —  —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —
+```
+
+A key is never scoped to more than one region, and nothing limits a region
+to one live key, so **rotation is mint, swap, revoke**: mint a new key,
+update whatever holds the old one, then revoke the old one once the new one
+is confirmed working. `key list`'s `last_used_at` column is what tells an
+operator whether the old key is still in use before revoking it -- but it is
+touched **at most once an hour** (a deliberate write-avoidance trade, not a
+bug), so a value can be up to an hour stale; a key that looks idle for the
+last twenty minutes may simply not have been used *and* touched yet.
+
+Every key and principal records **who created it and who revoked it**
+(`created_by_kind`/`created_by_id`, `revoked_by_kind`/`revoked_by_id` --
+`operator`, `principal`, or `cli`, with the CLI's own actor carrying no id).
+After a suspected principal compromise, `key list --minted-by-principal N`
+is the triage query: it lists every key that principal minted, across every
+region -- distinguishing them from keys an operator minted directly, which
+carry `cli` and are never touched by a principal revoke -- so an operator
+can see at a glance what a leaked principal could have touched, which is
+also exactly the set `principal revoke` clears out by default:
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db key list --minted-by-principal 1
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —
+
+./bin/sidecar-admin --db ./sidecar.db principal revoke --id 1
+# revoked keys: 1
+# revoked principal 1
+
+./bin/sidecar-admin --db ./sidecar.db key list --region 1
+# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —              —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  2026-08-28T00:39:21Z  cli
+```
+
+The manually-minted key (`2`) is untouched -- only the key the principal
+itself minted (`1`) went away. `principal revoke` takes every live key the
+principal minted with it in one transaction and prints their ids, so the
+operator on the other end knows exactly which credentials just went dead;
+pass `--keep-keys` for a planned rotation of a principal whose existing keys
+are known to be fine.
+
+### OBACloud integration
+
+OBACloud (the Rails app behind onebusawaycloud.com) is the intended consumer
+of the bearer credentials above: it re-plumbs its own server-rendered admin
+pages to read and write the sidecar instead of its own Postgres tables,
+region by region. The Rails side holds **one service principal per sidecar
+deployment it talks to** and mints **one region API key per region** on
+demand the first time that region needs one, storing the key alongside the
+region row. That client, its provisioning triggers, its rotation and
+bulk-reprovisioning rake tasks, and its error mapping from sidecar status
+codes to Rails-side behavior are a contract this repository documents but
+does not implement -- see [the design spec, §7](docs/superpowers/specs/2026-08-26-region-api-keys-and-admin-api-design.md#7-obacloud-contract-documented-built-later)
+for the full contract the Rails integration is expected to satisfy.
+
 ### Deployment
 
 Sessions rely on the request's `Host` header and TLS status to reject
@@ -543,6 +696,12 @@ in front of sidecar must:
   cookie is issued without `Secure`, so it will also be sent over any
   plain-HTTP connection to the same host instead of being restricted to
   HTTPS.
+- **Must not log the `Authorization` header.** Region API keys and service
+  principals (see *Region API keys and service principals* above) are
+  bearer credentials sent on every request a server-to-server consumer
+  makes, not a one-time login. An access log that captures request headers
+  turns ordinary log retention into credential retention -- anyone who can
+  read the logs can read every live key that ever made a request.
 
 The push registration throttle (spec §2.6, 30/minute) keys on the TCP peer
 address of the request -- it does not read `X-Forwarded-For` or similar
