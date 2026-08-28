@@ -2,16 +2,15 @@
 	import { goto, invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import AlertForm from '$lib/AlertForm.svelte';
-	import { api, ApiError } from '$lib/api';
+	import { api, ApiError, regionPath } from '$lib/api';
 	import {
 		alertBadges,
 		buildPatchPayload,
 		buildTranslationPayload,
 		formatInstantForRegion,
-		regionById,
-		regionName,
 		type AlertFormValues,
 	} from '$lib/alerts';
+	import { hasFeature } from '$lib/regions';
 	import {
 		audienceOptions,
 		isInFlight,
@@ -26,8 +25,10 @@
 	let { data }: PageProps = $props();
 
 	const alert = $derived(data.alert);
-	const region = $derived(regionById(data.regions, data.alert.region_id));
-	const zone = $derived(region?.timezone ?? '');
+	const zone = $derived(data.region.timezone);
+
+	/** The path to this alert, region-scoped. Every mutation below goes here. */
+	const alertPath = $derived(regionPath(data.region.id, `/alerts/${alert.id}`));
 
 	let actionError = $state('');
 	let busy = $state(false);
@@ -67,9 +68,7 @@
 		busy = true;
 		actionError = '';
 		try {
-			await api.post(
-				`/alerts/${alert.id}/${published ? 'publish' : 'unpublish'}`,
-			);
+			await api.post(`${alertPath}/${published ? 'publish' : 'unpublish'}`);
 			await reload();
 		} catch (err) {
 			actionError = message(err, 'could not change published state');
@@ -89,7 +88,7 @@
 		busy = true;
 		actionError = '';
 		try {
-			await api.del(`/alerts/${alert.id}`);
+			await api.del(alertPath);
 		} catch (err) {
 			actionError = message(err, 'could not delete this alert');
 			busy = false;
@@ -97,16 +96,15 @@
 		}
 		// No reload here: the alert is gone, so re-reading it would 404 and
 		// replace a successful delete with an error page.
-		await goto(resolve('/'));
+		await goto(
+			resolve('/regions/[region]/alerts', { region: String(data.region.id) }),
+		);
 	}
 
 	// Thrown errors reach the form's own banner, which is where the server's
 	// wording belongs.
 	async function save(values: AlertFormValues, timezone: string) {
-		await api.patch<Alert>(
-			`/alerts/${alert.id}`,
-			buildPatchPayload(values, timezone),
-		);
+		await api.patch<Alert>(alertPath, buildPatchPayload(values, timezone));
 		await reload();
 		savedRevision += 1;
 	}
@@ -133,7 +131,7 @@
 		tError = '';
 		try {
 			await api.put(
-				`/alerts/${alert.id}/translations/${encodeURIComponent(tLanguage.trim())}`,
+				`${alertPath}/translations/${encodeURIComponent(tLanguage.trim())}`,
 				buildTranslationPayload(tHeader, tDescription),
 			);
 			await reload();
@@ -155,7 +153,7 @@
 		tError = '';
 		try {
 			await api.del(
-				`/alerts/${alert.id}/translations/${encodeURIComponent(language)}`,
+				`${alertPath}/translations/${encodeURIComponent(language)}`,
 			);
 			// DELETE answers 204, so the alert has to be re-read to find out
 			// what is left.
@@ -168,6 +166,15 @@
 	}
 
 	// --- Push notification (design spec §2.10) -------------------------------
+
+	/**
+	 * Whether this deployment registered the push family for this region. The
+	 * "not configured" card state renders from this, not from a swallowed 404:
+	 * a genuinely missing alert is already fatal to the page (it 404s the
+	 * alert fetch itself, above), so a 404 reaching the push routes can only
+	 * mean the routes are not there.
+	 */
+	const pushesConfigured = $derived(hasFeature(data.region, 'pushes'));
 
 	let pushError = $state('');
 	let pushBusy = $state(false);
@@ -221,9 +228,7 @@
 		pushBusy = true;
 		pushError = '';
 		try {
-			await api.post(`/alerts/${alert.id}/pushes`, {
-				audience: chosenAudience,
-			});
+			await api.post(`${alertPath}/pushes`, { audience: chosenAudience });
 			// 202 carries the new push, but the history is re-read anyway: the
 			// dispatcher may already have moved it on, and the response is a
 			// snapshot of the instant it was inserted.
@@ -242,7 +247,7 @@
 		pushBusy = true;
 		pushError = '';
 		try {
-			await api.del(`/alerts/${alert.id}/pushes/${id}`);
+			await api.del(`${alertPath}/pushes/${id}`);
 			// 204, and a cancel races the dispatcher (409 once the push has
 			// finished), so the real status only comes from re-reading.
 			await reload();
@@ -265,7 +270,7 @@
 
 <dl class="meta">
 	<dt>Region</dt>
-	<dd>{regionName(data.regions, alert.region_id)} (#{alert.region_id})</dd>
+	<dd>{data.region.name} (#{data.region.id})</dd>
 	<dt>Starts</dt>
 	<dd>
 		{formatInstantForRegion(alert.start_time, zone)}
@@ -297,13 +302,19 @@
 	<button type="button" class="danger" disabled={busy} onclick={remove}>
 		Delete
 	</button>
-	<a href={resolve('/')}>Back to alerts</a>
+	<a
+		href={resolve('/regions/[region]/alerts', {
+			region: String(data.region.id),
+		})}
+	>
+		Back to alerts
+	</a>
 </div>
 
 <section class="card">
 	<h2>Push notification</h2>
 
-	{#if data.audience === null}
+	{#if !pushesConfigured}
 		<p class="note">
 			Push notifications are not configured on this server (no gorush URL).
 		</p>
@@ -312,7 +323,7 @@
 
 		{#if !alert.published}
 			<p class="note">Publish the alert to send it as a push notification.</p>
-		{:else if data.audience.forced_test}
+		{:else if data.audience?.forced_test}
 			<p class="note">
 				This is a test alert, so the only audience on offer is {pushOptions[0]
 					.label}. The API refuses any other audience for it.
@@ -419,7 +430,7 @@
 -->
 {#key `${alert.id}:${savedRevision}`}
 	<AlertForm
-		regions={data.regions}
+		region={data.region}
 		initial={alert}
 		submitLabel="Save changes"
 		onsubmit={save}

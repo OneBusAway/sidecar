@@ -1,8 +1,9 @@
 // Package sqlite is the SQLite adapter for the alerts, regions, auth,
-// alarms, push registration, surveys, and ghost bus report repositories. It
-// maps generated sqlc rows to the domain types defined in internal/alerts,
-// internal/regions, internal/auth, internal/alarms, internal/pushreg,
-// internal/surveys, and internal/ghostbus — nothing outside
+// alarms, push registration, surveys, ghost bus report, and region API
+// key/service principal repositories. It maps generated sqlc rows to the
+// domain types defined in internal/alerts, internal/regions, internal/auth,
+// internal/alarms, internal/pushreg, internal/surveys, internal/ghostbus,
+// and internal/apikey — nothing outside
 // this package ever sees a gen.* struct, which is what lets a Postgres
 // adapter satisfy the same interfaces later without touching any other
 // package.
@@ -24,6 +25,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
@@ -196,6 +198,11 @@ func (s *Store) GhostBus() ghostbus.Repository {
 	return &ghostBusRepo{q: s.q}
 }
 
+// APIKeys returns the region API key and service principal repository.
+func (s *Store) APIKeys() apikey.Repository {
+	return &apiKeyRepo{db: s.db, q: s.q, logger: s.logger}
+}
+
 // isUniqueViolation reports whether err is modernc sqlite's UNIQUE
 // constraint failure on the named "<table>.<column>" (the first column of
 // the index for a composite one). Every adapter that maps a race-lost
@@ -364,6 +371,15 @@ func (r *regionRepo) InsertHalfSetCentroidForTest(ctx context.Context, id int64)
 		INSERT INTO regions (id, region_name, oba_base_url, latitude, longitude, synced_at, created_at, updated_at)
 		VALUES (?, 'Half-set insert', 'https://half-set.example/', ?, NULL, 0, 0, 0)`,
 		id, 47.5)
+	return err
+}
+
+// DeleteRegionForTest deletes a region row outright. regions.Repository has
+// no Delete -- a directory sync only upserts, and production never removes a
+// region -- so this exists solely to let the storetest suite prove
+// region_api_keys' ON DELETE CASCADE is enforced.
+func (r *regionRepo) DeleteRegionForTest(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM regions WHERE id = ?`, id)
 	return err
 }
 

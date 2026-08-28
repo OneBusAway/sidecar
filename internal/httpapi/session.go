@@ -121,16 +121,25 @@ func (h *sessionHandler) logout(w http.ResponseWriter, r *http.Request) {
 // whoami handles GET /api/admin/v1/session, so the SPA can answer "am I
 // logged in?" on boot without a sacrificial data request (design spec §4.5).
 func (h *sessionHandler) whoami(w http.ResponseWriter, r *http.Request) {
-	user, ok := userFrom(r.Context())
+	p, ok := principalFrom(r.Context())
 	if !ok {
 		// Unreachable through the router: this route is registered behind
-		// requireSession. Reaching it means a route lost its middleware, and
-		// answering 200 with an empty username would hide that.
-		serverErrorJSON(w, h.deps.Logger, "whoami reached without an authenticated user",
-			errors.New("no user on request context"))
+		// requirePrincipal. Reaching it means a route lost its middleware,
+		// and answering 200 with an empty username would hide that.
+		serverErrorJSON(w, h.deps.Logger, "whoami reached without an authenticated principal",
+			errors.New("no principal on request context"))
 		return
 	}
-	writeJSON(w, h.deps.Logger, http.StatusOK, map[string]string{"username": user.Username})
+	if p.kind != principalOperator {
+		// Equally unreachable: this route's allow-list is operatorOnly, and
+		// only an operator has a username to report. A non-operator here
+		// means the route lost its allow-list, which a 200 carrying an empty
+		// username would hide just as effectively.
+		serverErrorJSON(w, h.deps.Logger, "whoami reached by a non-operator principal",
+			errors.New("principal kind "+p.kind.String()))
+		return
+	}
+	writeJSON(w, h.deps.Logger, http.StatusOK, map[string]string{"username": p.user.Username})
 }
 
 // sessionCookie builds the session cookie per design spec §4.2. A negative

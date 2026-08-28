@@ -72,6 +72,10 @@ func (r *fakeSnapRepo) ListForExport(context.Context, int64, int64) ([]Report, e
 	panic("not used by the scheduler")
 }
 
+func (r *fakeSnapRepo) GetByPublicID(context.Context, int64, string) (Report, error) {
+	panic("not used by the scheduler")
+}
+
 func (r *fakeSnapRepo) callsOf(method string) []snapCall {
 	var out []snapCall
 	for _, c := range r.calls {

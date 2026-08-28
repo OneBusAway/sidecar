@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -30,6 +31,21 @@ func RunAlarmRepository(t *testing.T, newStore newAlarmStoreFunc) {
 	t.Run("ServiceDateBeyond32Bit", func(t *testing.T) { testServiceDateBeyond32Bit(t, newStore) })
 	t.Run("RegionCascade", func(t *testing.T) { testAlarmRegionCascade(t, newStore) })
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testDeleteByIDTreatsMissingAsSuccess(t, newStore) })
+	t.Run("RegionScopedReads", func(t *testing.T) { testAlarmRegionScopedReads(t, newStore) })
+}
+
+// seedAlarmRegions upserts the two regions testAlarmRegionScopedReads uses.
+// Region 0 is deliberately one of them: it is a real region (Tampa Bay), so
+// a repository that treats 0 as "no region" fails here.
+func seedAlarmRegions(t *testing.T, repo regions.Repository) {
+	t.Helper()
+	err := repo.UpsertFromDirectory(context.Background(), []regions.Region{
+		{ID: 0, Name: "Tampa Bay", OBABaseURL: "https://tampa.example/", Language: "en", Active: true},
+		{ID: 1, Name: "Puget Sound", OBABaseURL: "https://puget.example/", Language: "en", Active: true},
+	}, base)
+	if err != nil {
+		t.Fatalf("seed regions: %v", err)
+	}
 }
 
 // fullAlarmIn builds a NewAlarm with every field set, for the subtests that
@@ -441,5 +457,53 @@ func testDeleteByIDTreatsMissingAsSuccess(t *testing.T, newStore newAlarmStoreFu
 	// Deleting the same id again must still report no error.
 	if err := repo.DeleteByID(ctx, created.ID); err != nil {
 		t.Errorf("DeleteByID(already gone) = %v, want nil", err)
+	}
+}
+
+// testAlarmRegionScopedReads pins the tenancy fence the admin API leans on:
+// the region is a query condition, not something a handler compares after
+// the fact (design spec section 3.2).
+func testAlarmRegionScopedReads(t *testing.T, newStore newAlarmStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	seedAlarmRegions(t, regionRepo) // reuse this file's existing region seeder
+
+	inA, err := repo.Create(ctx, alarms.NewAlarm{
+		RegionID: 0, Token: "tok-a", APIVersion: 2, UserPushID: "u1",
+		OperatingSystem: "ios", StopID: "s1", SecondsBefore: 600, Message: "a",
+	}, base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	inB, err := repo.Create(ctx, alarms.NewAlarm{
+		RegionID: 1, Token: "tok-b", APIVersion: 2, UserPushID: "u2",
+		OperatingSystem: "android", StopID: "s2", SecondsBefore: 600, Message: "b",
+	}, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	listed, err := repo.ListByRegion(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListByRegion: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != inA.ID {
+		t.Fatalf("ListByRegion(0) = %+v, want only alarm %d", listed, inA.ID)
+	}
+
+	got, err := repo.GetInRegion(ctx, 0, inA.ID)
+	if err != nil {
+		t.Fatalf("GetInRegion: %v", err)
+	}
+	if got.Token != "tok-a" {
+		t.Errorf("GetInRegion token = %q, want tok-a", got.Token)
+	}
+	// The whole point: an alarm that exists, addressed through the wrong
+	// region, is indistinguishable from one that does not exist.
+	if _, err := repo.GetInRegion(ctx, 0, inB.ID); !errors.Is(err, alarms.ErrNotFound) {
+		t.Errorf("GetInRegion across regions: err = %v, want ErrNotFound", err)
+	}
+	if _, err := repo.GetInRegion(ctx, 0, 99999); !errors.Is(err, alarms.ErrNotFound) {
+		t.Errorf("GetInRegion unknown id: err = %v, want ErrNotFound", err)
 	}
 }

@@ -12,8 +12,8 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
-// regionJSONFields are the field names the SPA's region screen (task 11) is
-// written against.
+// regionJSONFields are the field names the SPA's region screen is written
+// against.
 var regionJSONFields = []string{
 	"id", "name", "oba_base_url", "sidecar_base_url", "language", "active",
 	"default_agency_id", "timezone", "latitude", "longitude", "oba_api_key",
@@ -206,8 +206,12 @@ func TestAdminRegions_PatchRejections(t *testing.T) {
 	}{
 		{"no fields", "/api/admin/v1/regions/1", `{}`, http.StatusBadRequest, []string{"default_agency_id", "timezone"}},
 		{"null fields", "/api/admin/v1/regions/1", `{"default_agency_id":null,"timezone":null,"oba_api_key":null}`, http.StatusBadRequest, []string{"timezone"}},
-		{"unknown region", "/api/admin/v1/regions/999", `{"timezone":"UTC"}`, http.StatusNotFound, []string{"region", "999"}},
-		{"non-integer id", "/api/admin/v1/regions/abc", `{"timezone":"UTC"}`, http.StatusBadRequest, []string{"id"}},
+		// Both of these are the region scope's single 404, not the handler's
+		// own error: an unknown region and an unparseable segment must be
+		// indistinguishable, or the status code alone tells a region key
+		// which region ids exist (design spec section 2.5).
+		{"unknown region", "/api/admin/v1/regions/999", `{"timezone":"UTC"}`, http.StatusNotFound, []string{"region not found"}},
+		{"non-integer id", "/api/admin/v1/regions/abc", `{"timezone":"UTC"}`, http.StatusNotFound, []string{"region not found"}},
 		{"invalid timezone", "/api/admin/v1/regions/1", `{"timezone":"Mars/Olympus_Mons"}`, http.StatusBadRequest, []string{"timezone", "Mars/Olympus_Mons"}},
 		{"empty timezone", "/api/admin/v1/regions/1", `{"timezone":""}`, http.StatusBadRequest, []string{"timezone"}},
 		{
@@ -244,12 +248,12 @@ func TestAdminRegions_PatchThenCreateAlert(t *testing.T) {
 
 	f := newAdminFixture(t)
 
-	rec := f.do(http.MethodPost, "/api/admin/v1/alerts", minimalAlert(regionBare, "blocked"))
+	rec := f.do(http.MethodPost, "/api/admin/v1/regions/2/alerts", minimalAlertBody("blocked"))
 	assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "PATCH /api/admin/v1/regions/2")
 
 	object(t, f.do(http.MethodPatch, "/api/admin/v1/regions/2", `{"default_agency_id":"bare-agency"}`), http.StatusOK)
 
-	got := f.createAlert(t, minimalAlert(regionBare, "unblocked"))
+	got := f.createAlert(t, regionBare, minimalAlertBody("unblocked"))
 	if v := str(t, got, "agency_id"); v != "bare-agency" {
 		t.Errorf("agency_id = %q, want bare-agency", v)
 	}
@@ -264,7 +268,7 @@ func TestAdminRegions_TimezoneNamedInTimestampErrors(t *testing.T) {
 	f := newAdminFixture(t)
 	object(t, f.do(http.MethodPatch, "/api/admin/v1/regions/1", `{"timezone":"Asia/Kathmandu"}`), http.StatusOK)
 
-	rec := f.do(http.MethodPost, "/api/admin/v1/alerts", `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00"}`)
+	rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/alerts", `{"header":"x","start_time":"2026-08-15T14:00:00"}`)
 	assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "Asia/Kathmandu")
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
@@ -412,6 +413,18 @@ func TestSurveyConformance(t *testing.T) {
 	storetest.RunSurveyRepository(t, func(t *testing.T) (surveys.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.Surveys(), s.Regions()
+	})
+}
+
+// TestAPIKeyRepositoryConformance runs the shared API key conformance suite
+// against the SQLite adapter (design spec section 8).
+func TestAPIKeyRepositoryConformance(t *testing.T) {
+	t.Parallel()
+
+	storetest.RunAPIKeyRepository(t, func(t *testing.T) (apikey.Repository, regions.Repository) {
+		t.Helper()
+		store := sqlitetest.Open(t)
+		return store.APIKeys(), store.Regions()
 	})
 }
 

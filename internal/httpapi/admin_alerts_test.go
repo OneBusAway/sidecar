@@ -13,10 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
+	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
+	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
 // The three seeded regions. Region 0 is deliberately one of them: it is a real
@@ -49,7 +53,7 @@ type adminFixture struct {
 
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
-	return newAdminFixtureWithDeps(t, nil)
+	return newAdminFixtureWith(t, false, nil)
 }
 
 // newAdminFixtureWithDeps is newAdminFixture with a hook that adjusts Deps
@@ -57,6 +61,26 @@ func newAdminFixture(t *testing.T) *adminFixture {
 // deliberately partial wiring -- an alert push repository with no transport,
 // say -- and still want a real store and a real logged-in session.
 func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWith(t, false, mutate)
+}
+
+// newFullAdminFixture additionally wires the repositories the surveys, ghost
+// bus, and alarm route families are gated on (design spec section 5.7), so
+// those routes are actually registered. It is separate from newAdminFixture
+// so the default fixture keeps proving that an unwired family registers NO
+// routes at all.
+func newFullAdminFixture(t *testing.T) *adminFixture {
+	t.Helper()
+	return newAdminFixtureWith(t, true, nil)
+}
+
+// newAdminFixtureWith is the shared body of the three constructors above.
+// full and mutate are separate parameters, not one folded into the other,
+// because mutate runs on the already-built Deps literal and has no handle on
+// the store: it can flip a field to nil but it cannot wire a real
+// repository, which is exactly what "full" needs to do.
+func newAdminFixtureWith(t *testing.T, full bool, mutate func(*Deps)) *adminFixture {
 	t.Helper()
 
 	store := sqlitetest.Open(t)
@@ -89,12 +113,22 @@ func newAdminFixtureWithDeps(t *testing.T, mutate func(*Deps)) *adminFixture {
 		Alerts:         store.Alerts(),
 		Regions:        store.Regions(),
 		Auth:           store.Auth(),
+		APIKeys:        store.APIKeys(),
 		Now:            func() time.Time { return testNow },
 		Logger:         discardLogger(),
 		Sleep:          func(time.Duration) {},
 		PushRegs:       store.PushRegs(),
 		AlertPushes:    store.AlertPushes(),
 		AlertPushWaker: f.waker,
+	}
+	if full {
+		deps.Surveys = store.Surveys()
+		deps.GhostBus = store.GhostBus()
+		deps.Alarms = store.Alarms()
+		// Alarm creation resolves a departure through OBA; a stub that
+		// always fails degrades every alarm to the generic message, which is
+		// the documented fallback and keeps these tests off the network.
+		deps.OBA = &fakeOBA{}
 	}
 	if mutate != nil {
 		mutate(&deps)
@@ -185,16 +219,39 @@ func assertContains(t *testing.T, what, got string, wants ...string) {
 	}
 }
 
-// createAlert posts an alert and returns its decoded body, failing on non-201.
-func (f *adminFixture) createAlert(t *testing.T, body string) map[string]any {
+// createAlert posts an alert to one region and returns its decoded body,
+// failing on non-201. The region is a path segment now, so it is an argument
+// rather than a field in the body.
+func (f *adminFixture) createAlert(t *testing.T, regionID int64, body string) map[string]any {
 	t.Helper()
-	return object(t, f.do(http.MethodPost, "/api/admin/v1/alerts", body), http.StatusCreated)
+	target := fmt.Sprintf("/api/admin/v1/regions/%d/alerts", regionID)
+	return object(t, f.do(http.MethodPost, target, body), http.StatusCreated)
 }
 
-// createAlertID posts an alert and returns its id.
-func (f *adminFixture) createAlertID(t *testing.T, body string) int64 {
+// createAlertIn posts an alert to one region and returns its id. It replaces
+// createAlertID, whose target path had no region in it.
+func (f *adminFixture) createAlertIn(t *testing.T, regionID int64, body string) int64 {
 	t.Helper()
-	return jsonID(t, f.createAlert(t, body))
+	return jsonID(t, f.createAlert(t, regionID, body))
+}
+
+// stringSet turns a JSON array of strings into a set, so a features
+// assertion does not depend on the order the server happened to build it in.
+func stringSet(t *testing.T, v any) map[string]bool {
+	t.Helper()
+	raw, ok := v.([]any)
+	if !ok {
+		t.Fatalf("expected a JSON array, got %#v", v)
+	}
+	out := make(map[string]bool, len(raw))
+	for _, item := range raw {
+		str, isString := item.(string)
+		if !isString {
+			t.Fatalf("expected a string in the array, got %#v", item)
+		}
+		out[str] = true
+	}
+	return out
 }
 
 // countAlerts is the "nothing was written" check the rejection tests use.
@@ -306,38 +363,41 @@ func translationsOf(t *testing.T, m map[string]any) []map[string]any {
 	return out
 }
 
-// minimalAlert is the smallest valid create body for a region that has a
-// default agency id.
-func minimalAlert(regionID int64, header string) string {
-	return fmt.Sprintf(`{"region_id":%d,"header":%q,"start_time":"2026-08-15T14:00:00-07:00"}`, regionID, header)
+// minimalAlertBody is the smallest valid create body for a region that has a
+// default agency id. It carries no region_id: the create body no longer
+// accepts one, because the region comes from the path.
+func minimalAlertBody(header string) string {
+	return fmt.Sprintf(`{"header":%q,"start_time":"2026-08-15T14:00:00-07:00"}`, header)
 }
 
-func alertPath(id int64, suffix string) string {
-	return fmt.Sprintf("/api/admin/v1/alerts/%d%s", id, suffix)
+// alertPath builds the region-scoped path of one alert, plus an optional
+// suffix ("/publish", "/translations/es", ...).
+func alertPath(regionID, id int64, suffix string) string {
+	return fmt.Sprintf("/api/admin/v1/regions/%d/alerts/%d%s", regionID, id, suffix)
 }
 
 // ---------------------------------------------------------------------------
 // route wiring
 // ---------------------------------------------------------------------------
 
-// TestAdminRoutes_EveryRouteRequiresASession is the assurance that no admin
+// TestAdminRoutes_EveryRouteRequiresAPrincipal is the assurance that no admin
 // route can reach a handler without its middleware. http.ServeMux cannot be
 // enumerated, so registerAdminRoutes registers from a table and this test
 // walks the same table: a route added tomorrow is covered the moment it
-// exists. The table declares which routes are deliberately session-free
+// exists. The table declares which routes are deliberately principal-free
 // (login and logout, for documented reasons); every other one is proven to
 // answer 401 unauthenticated through the fully wired router, so a route
-// registered without requireSession fails here rather than shipping open.
-func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
+// registered without requirePrincipal fails here rather than shipping open.
+func TestAdminRoutes_EveryRouteRequiresAPrincipal(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 
-	// The only two routes allowed to skip requireSession, and why: login has
-	// no session yet, and logout must stay idempotent for a SPA tidying up
-	// after a 401 (design spec §4.4/§4.5). The set is pinned rather than
+	// The only two routes allowed to skip requirePrincipal, and why: login
+	// has no session yet, and logout must stay idempotent for a SPA tidying
+	// up after a 401 (design spec §4.4/§4.5). The set is pinned rather than
 	// derived so a third route cannot quietly join it.
-	sessionFree := map[string]bool{
+	principalFree := map[string]bool{
 		"POST /api/admin/v1/session":   true,
 		"DELETE /api/admin/v1/session": true,
 	}
@@ -345,11 +405,11 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 	// f.deps, not a zero Deps: some routes are conditional on a dependency
 	// being wired (the alert push routes need a repository and a transport),
 	// and enumerating a bare Deps would walk right past them -- a conditional
-	// route registered without requireSession would ship open with every test
-	// in this file still green.
+	// route registered without requirePrincipal would ship open with every
+	// test in this file still green.
 	routes := adminRoutes(f.deps)
-	if want := 18; len(routes) != want {
-		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 2 regions + 4 pushes)",
+	if want := 40; len(routes) != want {
+		t.Errorf("admin route table has %d routes, want %d (3 session + 9 alerts + 3 regions + 4 pushes + 3 api_keys + 9 surveys + 3 responses + 3 ghost bus reports + 2 alarms + 1 push registration count)",
 			len(routes), want)
 	}
 
@@ -360,11 +420,12 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		}
 		seen[rt.pattern] = true
 
-		wantSession := !sessionFree[rt.pattern]
-		if rt.requiresSession != wantSession {
-			t.Errorf("route %q: requiresSession = %v, want %v", rt.pattern, rt.requiresSession, wantSession)
+		wantPrincipal := !principalFree[rt.pattern]
+		if (rt.allowed != nil) != wantPrincipal {
+			t.Errorf("route %q: allowed = %v, want a principal requirement = %v",
+				rt.pattern, rt.allowed, wantPrincipal)
 		}
-		if !wantSession {
+		if !wantPrincipal {
 			continue
 		}
 
@@ -380,9 +441,89 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 		}
 	}
 
-	for pattern := range sessionFree {
+	for pattern := range principalFree {
 		if !seen[pattern] {
 			t.Errorf("route table lost %q", pattern)
+		}
+	}
+}
+
+// TestAdminRoutes_PrincipalAllowLists walks the table with each kind of
+// credential and asserts each route answers 403 exactly when the kind is not
+// in its allowed set. A route that quietly widened its allow-list -- letting
+// a region key send a push, say -- fails here rather than in production.
+func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
+	t.Parallel()
+
+	f := newFullAdminFixture(t)
+	regionKey := f.mintRegionKey(t, regionPuget)
+	servicePrincipal := f.mintPrincipal(t)
+
+	kinds := []struct {
+		kind   principalKind
+		header string
+	}{
+		{principalRegionKey, "Bearer " + regionKey},
+		{principalService, "Bearer " + servicePrincipal},
+	}
+
+	for _, rt := range adminRoutes(f.deps) {
+		if rt.allowed == nil {
+			continue // login and logout
+		}
+		method, target := concreteRoute(t, rt.pattern)
+		for _, k := range kinds {
+			rec := sendBearer(f.handler, method, target, "", k.header)
+			forbidden := rec.Code == http.StatusForbidden && bodyText(rec) == `{"error":"forbidden"}`
+			if allowed := rt.allowed.has(k.kind); allowed == forbidden {
+				t.Errorf("%s %s with %s: status = %d body = %s; allowed = %v",
+					method, target, k.kind, rec.Code, rec.Body.String(), allowed)
+			}
+		}
+	}
+}
+
+// TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys pins WHICH routes are
+// operator-only, derived from the URL pattern rather than from the allow-list
+// being checked.
+//
+// TestAdminRoutes_PrincipalAllowLists compares the live table against behavior
+// the same table drives, so it is self-consistent: mutating operatorOnly to
+// include principalRegionKey would change both sides and still pass. The three
+// routes below are the ones the design spec (section 4.5) says a leaked region
+// key must never reach -- sending a push (attacker text delivered to every
+// device in the region), cancelling one, and the cross-region region list --
+// so they get an assertion that does not depend on the value it is guarding.
+func TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys(t *testing.T) {
+	t.Parallel()
+
+	// Derived from the pattern, deliberately, not from principal.go.
+	operatorOnlyPatterns := map[string]bool{
+		"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes":            true,
+		"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}": true,
+		"GET /api/admin/v1/regions":                                           true,
+	}
+
+	f := newFullAdminFixture(t)
+	seen := map[string]bool{}
+	for _, rt := range adminRoutes(f.deps) {
+		if !operatorOnlyPatterns[rt.pattern] {
+			continue
+		}
+		seen[rt.pattern] = true
+		if rt.allowed.has(principalRegionKey) {
+			t.Errorf("route %q admits a region key; the spec makes it operator-only", rt.pattern)
+		}
+		if rt.allowed.has(principalService) {
+			t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
+		}
+		if !rt.allowed.has(principalOperator) {
+			t.Errorf("route %q does not admit an operator, so nobody can call it", rt.pattern)
+		}
+	}
+	for pattern := range operatorOnlyPatterns {
+		if !seen[pattern] {
+			t.Errorf("route %q is no longer in the table; this test has stopped guarding it", pattern)
 		}
 	}
 }
@@ -393,7 +534,7 @@ func TestAdminRoutes_EveryRouteRequiresASession(t *testing.T) {
 func TestAdminRoutes_EveryWriteIsCrossSiteGuarded(t *testing.T) {
 	t.Parallel()
 
-	f := newAdminFixture(t)
+	f := newFullAdminFixture(t)
 
 	// f.deps for the same reason as the sweep above: the conditional routes
 	// have to be in the table being walked or the guard is never checked on
@@ -430,9 +571,12 @@ func concreteRoute(t *testing.T, pattern string) (method, target string) {
 	if !ok {
 		t.Fatalf("route pattern %q has no method", pattern)
 	}
+	path = strings.ReplaceAll(path, "{regionId}", "1")
 	path = strings.ReplaceAll(path, "{id}", "1")
 	path = strings.ReplaceAll(path, "{lang}", "es")
 	path = strings.ReplaceAll(path, "{pushId}", "1")
+	path = strings.ReplaceAll(path, "{keyId}", "1")
+	path = strings.ReplaceAll(path, "{publicId}", "p")
 	if strings.ContainsAny(path, "{}") {
 		t.Fatalf("route pattern %q has a wildcard this test does not know how to fill", pattern)
 	}
@@ -449,8 +593,7 @@ func TestAdminAlerts_CreateSuccess(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	rec := f.do(http.MethodPost, "/api/admin/v1/alerts", `{
-		"region_id": 1,
+	rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/alerts", `{
 		"agency_id": "explicit-agency",
 		"header": "Route 44 detoured",
 		"description": "Use 11th Ave",
@@ -466,7 +609,7 @@ func TestAdminAlerts_CreateSuccess(t *testing.T) {
 	assertKeys(t, "alert", got, alertJSONFields)
 
 	id := jsonID(t, got)
-	if want := alertPath(id, ""); rec.Header().Get("Location") != want {
+	if want := alertPath(regionPuget, id, ""); rec.Header().Get("Location") != want {
 		t.Errorf("Location = %q, want %q", rec.Header().Get("Location"), want)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
@@ -539,14 +682,14 @@ func TestAdminAlerts_CreateResolvesAgency(t *testing.T) {
 	f := newAdminFixture(t)
 
 	t.Run("falls back to the region default", func(t *testing.T) {
-		got := f.createAlert(t, minimalAlert(regionPuget, "region default"))
+		got := f.createAlert(t, regionPuget, minimalAlertBody("region default"))
 		if v := str(t, got, "agency_id"); v != "1" {
 			t.Errorf("agency_id = %q, want the region default %q", v, "1")
 		}
 	})
 
 	t.Run("region 0 is a real region", func(t *testing.T) {
-		got := f.createAlert(t, minimalAlert(regionTampa, "tampa"))
+		got := f.createAlert(t, regionTampa, minimalAlertBody("tampa"))
 		if got["region_id"] != float64(0) {
 			t.Errorf("region_id = %v, want 0", got["region_id"])
 		}
@@ -556,7 +699,7 @@ func TestAdminAlerts_CreateResolvesAgency(t *testing.T) {
 	})
 
 	t.Run("no explicit value and no region default", func(t *testing.T) {
-		rec := f.do(http.MethodPost, "/api/admin/v1/alerts", minimalAlert(regionBare, "bare"))
+		rec := f.do(http.MethodPost, "/api/admin/v1/regions/2/alerts", minimalAlertBody("bare"))
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest),
 			"no agency_id given", "region 2", "PATCH /api/admin/v1/regions/2", "agency_id")
 	})
@@ -577,54 +720,53 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 		wantInError []string
 	}{
 		{
-			// The whole reason createAlertRequest.RegionID is a *int64: an
-			// absent region_id must not silently become region 0, which is a
-			// real region someone would then find surprise alerts in.
-			name: "missing region_id", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
-			wantStatus: http.StatusBadRequest, wantInError: []string{"region_id"},
+			// createAlertRequest.RegionID survives only so it can be
+			// refused: the region is the path now, and a stale client that
+			// still sends the field must not believe it targeted a region
+			// (design spec section 5.1).
+			name: "region_id in the body", body: `{"region_id":0,"header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusBadRequest, wantInError: []string{"region_id", "path"},
 		},
 		{
-			name: "null region_id", body: `{"region_id":null,"header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
-			wantStatus: http.StatusBadRequest, wantInError: []string{"region_id"},
-		},
-		{
-			name: "unknown region", body: `{"region_id":404,"header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
-			wantStatus: http.StatusNotFound, wantInError: []string{"region", "404"},
+			// Explicitly null is absent, not present: JSON cannot tell them
+			// apart on a plain field, and a *int64 can.
+			name: "null region_id is accepted", body: `{"region_id":null,"header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusCreated,
 		},
 		{
 			name:       "naive start time",
-			body:       `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00"}`,
+			body:       `{"header":"x","start_time":"2026-08-15T14:00:00"}`,
 			wantStatus: http.StatusBadRequest,
 			// A naive datetime is never guessed at: the message names the
 			// region's configured zone so the author can write the offset.
 			wantInError: []string{"RFC 3339", "explicit offset", "region 1", "America/Los_Angeles"},
 		},
 		{
-			name: "naive end time", body: `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-16T14:00:00"}`,
+			name: "naive end time", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-16T14:00:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"explicit offset"},
 		},
 		{
-			name: "end before start", body: `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-14T14:00:00-07:00"}`,
+			name: "end before start", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-14T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"must be after start"},
 		},
 		{
-			name: "start before the epoch guard", body: `{"region_id":1,"header":"x","start_time":"1999-08-15T14:00:00-07:00"}`,
+			name: "start before the epoch guard", body: `{"header":"x","start_time":"1999-08-15T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"check the year"},
 		},
 		{
-			name: "unknown cause", body: `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00-07:00","cause":"NOT_A_CAUSE"}`,
+			name: "unknown cause", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00","cause":"NOT_A_CAUSE"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"unknown cause", "CONSTRUCTION"},
 		},
 		{
-			name: "unknown effect", body: `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00-07:00","effect":"NOT_AN_EFFECT"}`,
+			name: "unknown effect", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00","effect":"NOT_AN_EFFECT"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"unknown effect", "DETOUR"},
 		},
 		{
-			name: "unknown severity", body: `{"region_id":1,"header":"x","start_time":"2026-08-15T14:00:00-07:00","severity":"CATASTROPHIC"}`,
+			name: "unknown severity", body: `{"header":"x","start_time":"2026-08-15T14:00:00-07:00","severity":"CATASTROPHIC"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"unknown severity", "WARNING"},
 		},
 		{
-			name: "empty agency id", body: `{"region_id":1,"agency_id":"","header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
+			name: "empty agency id", body: `{"agency_id":"","header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
 			// With a plain `string` field, JSON cannot distinguish an empty
 			// agency_id from an absent one, so an empty value falls back to the
 			// region default rather than erroring. The CLI *can* tell them
@@ -636,7 +778,7 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 			wantStatus: http.StatusCreated,
 		},
 		{
-			name: "malformed JSON", body: `{"region_id":1,`,
+			name: "malformed JSON", body: `{`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"invalid JSON"},
 		},
 		{
@@ -648,11 +790,11 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 			// it first: reaching the repository would surface as a bare 500,
 			// and riders would never see a header-less alert reach the feed
 			// in the first place.
-			name: "missing header", body: `{"region_id":1,"start_time":"2026-08-15T14:00:00-07:00"}`,
+			name: "missing header", body: `{"start_time":"2026-08-15T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"header"},
 		},
 		{
-			name: "empty header", body: `{"region_id":1,"header":"","start_time":"2026-08-15T14:00:00-07:00"}`,
+			name: "empty header", body: `{"header":"","start_time":"2026-08-15T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"header"},
 		},
 	}
@@ -660,7 +802,7 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			before := f.countAlerts(t)
-			rec := f.do(http.MethodPost, "/api/admin/v1/alerts", tt.body)
+			rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/alerts", tt.body)
 
 			if tt.wantStatus == http.StatusCreated {
 				got := object(t, rec, http.StatusCreated)
@@ -684,7 +826,7 @@ func TestAdminAlerts_CreateEmptyEnumsDegrade(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	got := f.createAlert(t, minimalAlert(regionPuget, "no enums"))
+	got := f.createAlert(t, regionPuget, minimalAlertBody("no enums"))
 	if v := str(t, got, "cause"); v != "UNKNOWN_CAUSE" {
 		t.Errorf("cause = %q, want UNKNOWN_CAUSE", v)
 	}
@@ -706,15 +848,16 @@ func TestAdminAlerts_CreateEmptyEnumsDegrade(t *testing.T) {
 // GET /alerts
 // ---------------------------------------------------------------------------
 
-// TestAdminAlerts_List covers the filter semantics, the easiest thing in this
-// API to get subtly wrong: `region` absent means every region, and region 0 is
-// a real value rather than "unset".
+// TestAdminAlerts_List covers the listing semantics. The region is no longer a
+// filter that can be omitted or spelled wrong -- it is the collection's own
+// scope -- so what is left to get subtly wrong is that region 0 is a real
+// region and that an empty result is an array.
 func TestAdminAlerts_List(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	tampa := f.createAlertID(t, minimalAlert(regionTampa, "tampa alert"))
-	puget := f.createAlertID(t, minimalAlert(regionPuget, "puget alert"))
+	tampa := f.createAlertIn(t, regionTampa, minimalAlertBody("tampa alert"))
+	puget := f.createAlertIn(t, regionPuget, minimalAlertBody("puget alert"))
 
 	idsOf := func(t *testing.T, rec *httptest.ResponseRecorder) []int64 {
 		t.Helper()
@@ -737,29 +880,22 @@ func TestAdminAlerts_List(t *testing.T) {
 		return true
 	}
 
-	t.Run("no region parameter lists every region", func(t *testing.T) {
-		got := idsOf(t, f.do(http.MethodGet, "/api/admin/v1/alerts", ""))
-		if want := []int64{tampa, puget}; !equal(got, want) {
-			t.Errorf("ids = %v, want %v (an absent region filter means all regions, not region 0)", got, want)
-		}
-	})
-
-	t.Run("region=0 filters to region 0", func(t *testing.T) {
-		got := idsOf(t, f.do(http.MethodGet, "/api/admin/v1/alerts?region=0", ""))
+	t.Run("region 0 is a real region, not unset", func(t *testing.T) {
+		got := idsOf(t, f.do(http.MethodGet, "/api/admin/v1/regions/0/alerts", ""))
 		if want := []int64{tampa}; !equal(got, want) {
 			t.Errorf("ids = %v, want %v", got, want)
 		}
 	})
 
-	t.Run("region=1 filters to region 1", func(t *testing.T) {
-		got := idsOf(t, f.do(http.MethodGet, "/api/admin/v1/alerts?region=1", ""))
+	t.Run("each region sees only its own", func(t *testing.T) {
+		got := idsOf(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/alerts", ""))
 		if want := []int64{puget}; !equal(got, want) {
 			t.Errorf("ids = %v, want %v", got, want)
 		}
 	})
 
-	t.Run("unknown region is an empty array, not a 404", func(t *testing.T) {
-		rec := f.do(http.MethodGet, "/api/admin/v1/alerts?region=999", "")
+	t.Run("a region with no alerts is an empty array, not null", func(t *testing.T) {
+		rec := f.do(http.MethodGet, "/api/admin/v1/regions/2/alerts", "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 		}
@@ -770,17 +906,8 @@ func TestAdminAlerts_List(t *testing.T) {
 		}
 	})
 
-	t.Run("non-integer region is a 400", func(t *testing.T) {
-		for _, q := range []string{"?region=abc", "?region=", "?region=1.5", "?region=" + strings.Repeat("9", 30)} {
-			rec := f.do(http.MethodGet, "/api/admin/v1/alerts"+q, "")
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("GET /alerts%s: status = %d, want 400; body = %s", q, rec.Code, rec.Body.String())
-			}
-		}
-	})
-
 	t.Run("list items carry the full alert shape", func(t *testing.T) {
-		items := array(t, f.do(http.MethodGet, "/api/admin/v1/alerts?region=1", ""), http.StatusOK)
+		items := array(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/alerts", ""), http.StatusOK)
 		if len(items) != 1 {
 			t.Fatalf("items = %d, want 1", len(items))
 		}
@@ -788,7 +915,7 @@ func TestAdminAlerts_List(t *testing.T) {
 	})
 
 	t.Run("drafts are included; this is the authoring view", func(t *testing.T) {
-		items := array(t, f.do(http.MethodGet, "/api/admin/v1/alerts", ""), http.StatusOK)
+		items := array(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/alerts", ""), http.StatusOK)
 		if len(items) == 0 {
 			t.Fatal("the authoring list dropped every draft")
 		}
@@ -808,10 +935,10 @@ func TestAdminAlerts_Get(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, minimalAlert(regionPuget, "fetch me"))
+	id := f.createAlertIn(t, regionPuget, minimalAlertBody("fetch me"))
 
 	t.Run("found", func(t *testing.T) {
-		got := object(t, f.do(http.MethodGet, alertPath(id, ""), ""), http.StatusOK)
+		got := object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK)
 		assertKeys(t, "alert", got, alertJSONFields)
 		if jsonID(t, got) != id {
 			t.Errorf("id = %v, want %d", got["id"], id)
@@ -822,12 +949,12 @@ func TestAdminAlerts_Get(t *testing.T) {
 	})
 
 	t.Run("unknown id is a 404", func(t *testing.T) {
-		rec := f.do(http.MethodGet, "/api/admin/v1/alerts/99999", "")
+		rec := f.do(http.MethodGet, "/api/admin/v1/regions/1/alerts/99999", "")
 		assertContains(t, "error", errorText(t, rec, http.StatusNotFound), "not found")
 	})
 
 	t.Run("non-integer id is a 400", func(t *testing.T) {
-		rec := f.do(http.MethodGet, "/api/admin/v1/alerts/abc", "")
+		rec := f.do(http.MethodGet, "/api/admin/v1/regions/1/alerts/abc", "")
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "id")
 	})
 }
@@ -842,8 +969,8 @@ func TestAdminAlerts_PatchAppliesOnlyWhatWasSent(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	created := f.createAlert(t, `{
-		"region_id": 1, "agency_id": "before", "header": "before header",
+	created := f.createAlert(t, regionPuget, `{
+		"agency_id": "before", "header": "before header",
 		"description": "before description", "url": "https://before.example",
 		"cause": "CONSTRUCTION", "effect": "DETOUR", "severity": "WARNING",
 		"start_time": "2026-08-15T14:00:00-07:00", "end_time": "2026-08-20T14:00:00-07:00",
@@ -851,7 +978,7 @@ func TestAdminAlerts_PatchAppliesOnlyWhatWasSent(t *testing.T) {
 	}`)
 	id := jsonID(t, created)
 
-	got := object(t, f.do(http.MethodPatch, alertPath(id, ""),
+	got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""),
 		`{"header":"after header","severity":"SEVERE"}`), http.StatusOK)
 	assertKeys(t, "alert", got, alertJSONFields)
 
@@ -875,11 +1002,11 @@ func TestAdminAlerts_PatchEndTime(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	windowed := `{"region_id":1,"header":"windowed","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-20T14:00:00-07:00"}`
+	windowed := `{"header":"windowed","start_time":"2026-08-15T14:00:00-07:00","end_time":"2026-08-20T14:00:00-07:00"}`
 
 	t.Run("clear_end_time reopens the alert", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		got := object(t, f.do(http.MethodPatch, alertPath(id, ""), `{"clear_end_time":true}`), http.StatusOK)
+		id := f.createAlertIn(t, regionPuget, windowed)
+		got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"clear_end_time":true}`), http.StatusOK)
 		if got["end_time"] != nil {
 			t.Errorf("end_time = %v, want null after clear_end_time", got["end_time"])
 		}
@@ -889,8 +1016,8 @@ func TestAdminAlerts_PatchEndTime(t *testing.T) {
 	})
 
 	t.Run("end_time replaces the window", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		got := object(t, f.do(http.MethodPatch, alertPath(id, ""),
+		id := f.createAlertIn(t, regionPuget, windowed)
+		got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""),
 			`{"end_time":"2026-08-25T14:00:00-07:00"}`), http.StatusOK)
 		if v := str(t, got, "end_time"); v != "2026-08-25T21:00:00Z" {
 			t.Errorf("end_time = %q, want 2026-08-25T21:00:00Z", v)
@@ -898,16 +1025,16 @@ func TestAdminAlerts_PatchEndTime(t *testing.T) {
 	})
 
 	t.Run("an absent end_time leaves the window alone", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		got := object(t, f.do(http.MethodPatch, alertPath(id, ""), `{"header":"only the header"}`), http.StatusOK)
+		id := f.createAlertIn(t, regionPuget, windowed)
+		got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"header":"only the header"}`), http.StatusOK)
 		if v := str(t, got, "end_time"); v != "2026-08-20T21:00:00Z" {
 			t.Errorf("end_time = %q, want the original 2026-08-20T21:00:00Z", v)
 		}
 	})
 
 	t.Run("end_time and clear_end_time together are a 400", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		rec := f.do(http.MethodPatch, alertPath(id, ""),
+		id := f.createAlertIn(t, regionPuget, windowed)
+		rec := f.do(http.MethodPatch, alertPath(regionPuget, id, ""),
 			`{"end_time":"2026-08-25T14:00:00-07:00","clear_end_time":true}`)
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "end_time", "clear_end_time")
 		if stored := f.storedAlert(t, id); stored.EndTime == nil {
@@ -916,14 +1043,14 @@ func TestAdminAlerts_PatchEndTime(t *testing.T) {
 	})
 
 	t.Run("a new end time is validated against the stored start", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		rec := f.do(http.MethodPatch, alertPath(id, ""), `{"end_time":"2026-08-01T14:00:00-07:00"}`)
+		id := f.createAlertIn(t, regionPuget, windowed)
+		rec := f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"end_time":"2026-08-01T14:00:00-07:00"}`)
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "must be after start")
 	})
 
 	t.Run("a new start time is validated against the stored end", func(t *testing.T) {
-		id := f.createAlertID(t, windowed)
-		rec := f.do(http.MethodPatch, alertPath(id, ""), `{"start_time":"2026-09-01T14:00:00-07:00"}`)
+		id := f.createAlertIn(t, regionPuget, windowed)
+		rec := f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"start_time":"2026-09-01T14:00:00-07:00"}`)
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest), "must be after start")
 	})
 
@@ -931,8 +1058,8 @@ func TestAdminAlerts_PatchEndTime(t *testing.T) {
 		// The merged view is what gets validated: clearing the end and moving
 		// the start past it in one request is legal, and a handler that
 		// validated the new start against the *stored* end would reject it.
-		id := f.createAlertID(t, windowed)
-		got := object(t, f.do(http.MethodPatch, alertPath(id, ""),
+		id := f.createAlertIn(t, regionPuget, windowed)
+		got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""),
 			`{"start_time":"2026-09-01T14:00:00-07:00","clear_end_time":true}`), http.StatusOK)
 		if got["end_time"] != nil {
 			t.Errorf("end_time = %v, want null", got["end_time"])
@@ -947,8 +1074,8 @@ func TestAdminAlerts_PatchRejections(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, minimalAlert(regionPuget, "patch target"))
-	target := alertPath(id, "")
+	id := f.createAlertIn(t, regionPuget, minimalAlertBody("patch target"))
+	target := alertPath(regionPuget, id, "")
 
 	tests := []struct {
 		name        string
@@ -957,8 +1084,8 @@ func TestAdminAlerts_PatchRejections(t *testing.T) {
 		wantStatus  int
 		wantInError []string
 	}{
-		{"unknown id", "/api/admin/v1/alerts/99999", `{"header":"x"}`, http.StatusNotFound, []string{"not found"}},
-		{"non-integer id", "/api/admin/v1/alerts/abc", `{"header":"x"}`, http.StatusBadRequest, []string{"id"}},
+		{"unknown id", "/api/admin/v1/regions/1/alerts/99999", `{"header":"x"}`, http.StatusNotFound, []string{"not found"}},
+		{"non-integer id", "/api/admin/v1/regions/1/alerts/abc", `{"header":"x"}`, http.StatusBadRequest, []string{"id"}},
 		{"naive start time", target, `{"start_time":"2026-08-15T14:00:00"}`, http.StatusBadRequest, []string{"explicit offset", "America/Los_Angeles"}},
 		{"naive end time", target, `{"end_time":"2026-08-15T14:00:00"}`, http.StatusBadRequest, []string{"explicit offset"}},
 		{"empty agency id", target, `{"agency_id":""}`, http.StatusBadRequest, []string{"agency_id"}},
@@ -992,9 +1119,9 @@ func TestAdminAlerts_PatchIsTestFalse(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, `{"region_id":1,"header":"promote me","start_time":"2026-08-15T14:00:00-07:00","is_test":true}`)
+	id := f.createAlertIn(t, regionPuget, `{"header":"promote me","start_time":"2026-08-15T14:00:00-07:00","is_test":true}`)
 
-	got := object(t, f.do(http.MethodPatch, alertPath(id, ""), `{"is_test":false}`), http.StatusOK)
+	got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"is_test":false}`), http.StatusOK)
 	if boolean(t, got, "is_test") {
 		t.Error("is_test = true, want false")
 	}
@@ -1011,10 +1138,10 @@ func TestAdminAlerts_PatchKeepsTranslations(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, minimalAlert(regionPuget, "translated"))
-	f.do(http.MethodPut, alertPath(id, "/translations/es"), `{"header":"Encabezado"}`)
+	id := f.createAlertIn(t, regionPuget, minimalAlertBody("translated"))
+	f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado"}`)
 
-	got := object(t, f.do(http.MethodPatch, alertPath(id, ""), `{"url":"https://example.org"}`), http.StatusOK)
+	got := object(t, f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"url":"https://example.org"}`), http.StatusOK)
 	if tr := translationsOf(t, got); len(tr) != 1 {
 		t.Errorf("translations = %v, want the one es translation", tr)
 	}
@@ -1028,9 +1155,9 @@ func TestAdminAlerts_PublishUnpublish(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, minimalAlert(regionPuget, "publish me"))
+	id := f.createAlertIn(t, regionPuget, minimalAlertBody("publish me"))
 
-	got := object(t, f.do(http.MethodPost, alertPath(id, "/publish"), ""), http.StatusOK)
+	got := object(t, f.do(http.MethodPost, alertPath(regionPuget, id, "/publish"), ""), http.StatusOK)
 	assertKeys(t, "published alert", got, alertJSONFields)
 	if !boolean(t, got, "published") {
 		t.Error("published = false after POST /publish")
@@ -1039,7 +1166,7 @@ func TestAdminAlerts_PublishUnpublish(t *testing.T) {
 		t.Error("stored published = false after POST /publish")
 	}
 
-	got = object(t, f.do(http.MethodPost, alertPath(id, "/unpublish"), ""), http.StatusOK)
+	got = object(t, f.do(http.MethodPost, alertPath(regionPuget, id, "/unpublish"), ""), http.StatusOK)
 	if boolean(t, got, "published") {
 		t.Error("published = true after POST /unpublish")
 	}
@@ -1048,9 +1175,9 @@ func TestAdminAlerts_PublishUnpublish(t *testing.T) {
 	}
 
 	for _, suffix := range []string{"/publish", "/unpublish"} {
-		rec := f.do(http.MethodPost, "/api/admin/v1/alerts/99999"+suffix, "")
+		rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/alerts/99999"+suffix, "")
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("POST /alerts/99999%s: status = %d, want 404; body = %s", suffix, rec.Code, rec.Body.String())
+			t.Errorf("POST /regions/1/alerts/99999%s: status = %d, want 404; body = %s", suffix, rec.Code, rec.Body.String())
 		}
 	}
 }
@@ -1059,8 +1186,8 @@ func TestAdminAlerts_Delete(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, minimalAlert(regionPuget, "delete me"))
-	target := alertPath(id, "")
+	id := f.createAlertIn(t, regionPuget, minimalAlertBody("delete me"))
+	target := alertPath(regionPuget, id, "")
 
 	rec := f.do(http.MethodDelete, target, "")
 	if rec.Code != http.StatusNoContent {
@@ -1089,10 +1216,10 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	t.Parallel()
 
 	f := newAdminFixture(t)
-	id := f.createAlertID(t, `{"region_id":1,"header":"English header","description":"English description","start_time":"2026-08-15T14:00:00-07:00"}`)
+	id := f.createAlertIn(t, regionPuget, `{"header":"English header","description":"English description","start_time":"2026-08-15T14:00:00-07:00"}`)
 
 	t.Run("header only leaves description null", func(t *testing.T) {
-		got := object(t, f.do(http.MethodPut, alertPath(id, "/translations/es"), `{"header":"Encabezado"}`), http.StatusOK)
+		got := object(t, f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado"}`), http.StatusOK)
 		assertKeys(t, "alert", got, alertJSONFields)
 		tr := translationsOf(t, got)
 		if len(tr) != 1 {
@@ -1111,7 +1238,7 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("source hash is the current English of that field", func(t *testing.T) {
-		f.do(http.MethodPut, alertPath(id, "/translations/fr"), `{"header":"En-tete","description":"La description"}`)
+		f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/fr"), `{"header":"En-tete","description":"La description"}`)
 		var checked int
 		for _, tr := range f.storedAlert(t, id).Translations {
 			if tr.Language != "fr" {
@@ -1140,7 +1267,7 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("re-upserting replaces the text", func(t *testing.T) {
-		got := object(t, f.do(http.MethodPut, alertPath(id, "/translations/es"), `{"header":"Encabezado nuevo"}`), http.StatusOK)
+		got := object(t, f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado nuevo"}`), http.StatusOK)
 		for _, tr := range translationsOf(t, got) {
 			if str(t, tr, "language") == "es" {
 				if v := str(t, tr, "header"); v != "Encabezado nuevo" {
@@ -1151,8 +1278,8 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("language tags are normalized", func(t *testing.T) {
-		f.do(http.MethodPut, alertPath(id, "/translations/DE"), `{"header":"Kopfzeile"}`)
-		got := object(t, f.do(http.MethodGet, alertPath(id, ""), ""), http.StatusOK)
+		f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/DE"), `{"header":"Kopfzeile"}`)
+		got := object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK)
 		var found bool
 		for _, tr := range translationsOf(t, got) {
 			switch str(t, tr, "language") {
@@ -1168,7 +1295,7 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("translations are grouped per language", func(t *testing.T) {
-		tr := translationsOf(t, object(t, f.do(http.MethodGet, alertPath(id, ""), ""), http.StatusOK))
+		tr := translationsOf(t, object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK))
 		seen := map[string]bool{}
 		for _, one := range tr {
 			lang := str(t, one, "language")
@@ -1185,21 +1312,21 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("neither field is a 400", func(t *testing.T) {
-		rec := f.do(http.MethodPut, alertPath(id, "/translations/it"), `{}`)
+		rec := f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/it"), `{}`)
 		if got, want := errorText(t, rec, http.StatusBadRequest), "provide header and/or description"; got != want {
 			t.Errorf("error = %q, want %q", got, want)
 		}
 	})
 
 	t.Run("null fields are a 400", func(t *testing.T) {
-		rec := f.do(http.MethodPut, alertPath(id, "/translations/it"), `{"header":null,"description":null}`)
+		rec := f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/it"), `{"header":null,"description":null}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("an empty string is a real translation, not an omission", func(t *testing.T) {
-		got := object(t, f.do(http.MethodPut, alertPath(id, "/translations/pt"), `{"description":""}`), http.StatusOK)
+		got := object(t, f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/pt"), `{"description":""}`), http.StatusOK)
 		var found bool
 		for _, tr := range translationsOf(t, got) {
 			if str(t, tr, "language") != "pt" {
@@ -1219,12 +1346,12 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("unknown alert is a 404", func(t *testing.T) {
-		rec := f.do(http.MethodPut, "/api/admin/v1/alerts/99999/translations/es", `{"header":"x"}`)
+		rec := f.do(http.MethodPut, "/api/admin/v1/regions/1/alerts/99999/translations/es", `{"header":"x"}`)
 		assertContains(t, "error", errorText(t, rec, http.StatusNotFound), "not found")
 	})
 
 	t.Run("delete removes every field row for the language", func(t *testing.T) {
-		rec := f.do(http.MethodDelete, alertPath(id, "/translations/fr"), "")
+		rec := f.do(http.MethodDelete, alertPath(regionPuget, id, "/translations/fr"), "")
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
 		}
@@ -1239,14 +1366,14 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 
 	t.Run("deleting an absent language is a 404", func(t *testing.T) {
-		rec := f.do(http.MethodDelete, alertPath(id, "/translations/nl"), "")
+		rec := f.do(http.MethodDelete, alertPath(regionPuget, id, "/translations/nl"), "")
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("deleting on an unknown alert is a 404", func(t *testing.T) {
-		rec := f.do(http.MethodDelete, "/api/admin/v1/alerts/99999/translations/es", "")
+		rec := f.do(http.MethodDelete, "/api/admin/v1/regions/1/alerts/99999/translations/es", "")
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 		}
@@ -1265,7 +1392,7 @@ func TestAdminAlerts_Translations(t *testing.T) {
 			{http.MethodPut, `{"header":"x"}`},
 			{http.MethodDelete, ""},
 		} {
-			rec := f.do(m.method, alertPath(id, "/translations/%20"), m.body)
+			rec := f.do(m.method, alertPath(regionPuget, id, "/translations/%20"), m.body)
 			assertContains(t, m.method+" error", errorText(t, rec, http.StatusBadRequest), "language")
 		}
 		for _, tr := range f.storedAlert(t, id).Translations {
@@ -1396,11 +1523,192 @@ func (failingRegions) SetLocalFields(context.Context, int64, regions.LocalFields
 	return errStoreBroken
 }
 
+// scopedRegions is failingRegions with a working Get, and only Get.
+//
+// It exists because the region scope calls Regions.Get before any scoped
+// handler runs: with failingRegions the middleware would answer 500 first, and
+// the sweep below would pass on sixteen of nineteen routes without ever
+// reaching the handler error path it is written to pin. Every other method
+// still fails, so the region handlers' own store errors are unaffected.
+type scopedRegions struct{ failingRegions }
+
+// Get answers for any id with the region concreteRoute addresses, so the
+// scope resolves and the request lands in the handler.
+func (scopedRegions) Get(_ context.Context, id int64) (regions.Region, error) {
+	return regions.Region{
+		ID: id, Name: "Scoped", DefaultAgencyID: "1", Timezone: "America/Los_Angeles",
+	}, nil
+}
+
+// failingSurveys fails every call, for the same reason failingAlerts does:
+// every method fails, so the sweep below cannot pass on a route by accident
+// because the one method it happened to reach still worked.
+type failingSurveys struct{}
+
+func (failingSurveys) CreateStudy(context.Context, int64, string, string, time.Time) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) GetStudy(context.Context, int64) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) ListStudies(context.Context, int64) ([]surveys.Study, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) UpdateStudy(context.Context, int64, int64, string, string, time.Time) (surveys.Study, error) {
+	return surveys.Study{}, errStoreBroken
+}
+func (failingSurveys) CreateSurvey(context.Context, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) CreateSurveyInRegion(context.Context, int64, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) GetSurvey(context.Context, int64) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) ListSurveys(context.Context, int64) ([]surveys.Survey, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) ListActiveSurveys(context.Context, int64, time.Time) ([]surveys.Survey, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) UpdateSurvey(context.Context, int64, surveys.Definition, time.Time) (surveys.Survey, error) {
+	return surveys.Survey{}, errStoreBroken
+}
+func (failingSurveys) DeleteSurvey(context.Context, int64) error { return errStoreBroken }
+func (failingSurveys) CountResponses(context.Context, int64) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingSurveys) CreateResponse(context.Context, surveys.NewResponse, time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) GetResponse(context.Context, string) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) AmendResponse(context.Context, string, []surveys.Answer, time.Time) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+func (failingSurveys) ListResponses(context.Context, int64) ([]surveys.Response, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) GetResponseInRegion(context.Context, int64, string) (surveys.Response, error) {
+	return surveys.Response{}, errStoreBroken
+}
+
+// failingGhostBus fails every call, for the same reason failingAlerts does:
+// every method fails, so the sweep below cannot pass on a route by accident
+// because the one method it happened to reach still worked.
+type failingGhostBus struct{}
+
+func (failingGhostBus) Create(context.Context, ghostbus.NewReport, time.Time) (ghostbus.Report, error) {
+	return ghostbus.Report{}, errStoreBroken
+}
+func (failingGhostBus) ListPendingSnapshots(context.Context, int64) ([]ghostbus.Report, error) {
+	return nil, errStoreBroken
+}
+func (failingGhostBus) MarkSnapshotCaptured(context.Context, int64, string, time.Time) error {
+	return errStoreBroken
+}
+func (failingGhostBus) MarkSnapshotUnavailable(context.Context, int64, time.Time) error {
+	return errStoreBroken
+}
+func (failingGhostBus) RecordSnapshotFailure(context.Context, int64, time.Time) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingGhostBus) ListForExport(context.Context, int64, int64) ([]ghostbus.Report, error) {
+	return nil, errStoreBroken
+}
+func (failingGhostBus) GetByPublicID(context.Context, int64, string) (ghostbus.Report, error) {
+	return ghostbus.Report{}, errStoreBroken
+}
+
+// failingAlarms fails every call, for the same reason failingAlerts does:
+// every method fails, so the sweep below cannot pass on a route by accident
+// because the one method it happened to reach still worked.
+type failingAlarms struct{}
+
+func (failingAlarms) Create(context.Context, alarms.NewAlarm, time.Time) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+func (failingAlarms) FindV1(context.Context, alarms.V1Key) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+func (failingAlarms) Delete(context.Context, int64, string) error { return errStoreBroken }
+func (failingAlarms) DeleteByID(context.Context, int64) error     { return errStoreBroken }
+func (failingAlarms) List(context.Context) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) RecordFailure(context.Context, int64) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingAlarms) ResetFailures(context.Context, int64) error { return errStoreBroken }
+func (failingAlarms) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
+	return alarms.Alarm{}, errStoreBroken
+}
+
+// failingAPIKeys fails every call, so the key-management handlers' own
+// store-error paths are swept alongside the other six repositories. Without
+// it those three routes are not merely untested here -- they are absent from
+// adminRoutes entirely, since the family registers only when Deps.APIKeys is
+// set, so the sweep would walk past the one family that mints live
+// credentials.
+type failingAPIKeys struct{}
+
+func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Actor, time.Time) (apikey.RegionKey, error) {
+	return apikey.RegionKey{}, errStoreBroken
+}
+
+func (failingAPIKeys) GetRegionKeyByHash(context.Context, string) (apikey.RegionKey, error) {
+	return apikey.RegionKey{}, errStoreBroken
+}
+
+func (failingAPIKeys) ListRegionKeys(context.Context, int64) ([]apikey.RegionKey, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) ListRegionKeysByCreator(context.Context, apikey.Actor) ([]apikey.RegionKey, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) RevokeRegionKey(context.Context, int64, int64, apikey.Actor, time.Time) error {
+	return errStoreBroken
+}
+
+func (failingAPIKeys) RevokeRegionKeysByCreator(context.Context, apikey.Actor, apikey.Actor, time.Time) ([]int64, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) TouchRegionKey(context.Context, int64, time.Time) error { return errStoreBroken }
+
+func (failingAPIKeys) CreatePrincipal(context.Context, string, string, time.Time) (apikey.ServicePrincipal, error) {
+	return apikey.ServicePrincipal{}, errStoreBroken
+}
+
+func (failingAPIKeys) GetPrincipalByHash(context.Context, string) (apikey.ServicePrincipal, error) {
+	return apikey.ServicePrincipal{}, errStoreBroken
+}
+
+func (failingAPIKeys) ListPrincipals(context.Context) ([]apikey.ServicePrincipal, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) RevokePrincipal(context.Context, int64, time.Time) error { return errStoreBroken }
+
+func (failingAPIKeys) TouchPrincipal(context.Context, int64, time.Time) error { return errStoreBroken }
+
 // TestAdminAPI_StoreFailuresAre500 pins the last rule of the API contract: a
 // broken store is a logged 500 with one fixed body on every route, never a 4xx
 // that would send an operator hunting for a client mistake, and never the
-// driver's own message on the client's screen. The auth store still works, so
-// these are the handlers' own error paths rather than the middleware's.
+// driver's own message on the client's screen.
+//
+// Regions.Get deliberately SUCCEEDS here (scopedRegions): the region scope
+// runs before every scoped handler, so a failing Get would answer 500 from the
+// middleware and this sweep would never reach the handler error paths it
+// exists to pin. The scope's own 500 is covered separately by
+// TestRequireRegion_StoreFailureIs500.
 func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 	t.Parallel()
 
@@ -1411,7 +1719,7 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 	// whose repositories fail here like every other.
 	deps := Deps{
 		Alerts:         failingAlerts{},
-		Regions:        failingRegions{},
+		Regions:        scopedRegions{},
 		Auth:           repo,
 		Now:            func() time.Time { return testNow },
 		Logger:         discardLogger(),
@@ -1419,6 +1727,10 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		PushRegs:       failingPushRegs{},
 		AlertPushes:    failingAlertPushes{},
 		AlertPushWaker: &recordingWaker{},
+		Surveys:        failingSurveys{},
+		GhostBus:       failingGhostBus{},
+		Alarms:         failingAlarms{},
+		APIKeys:        failingAPIKeys{},
 	}
 	h := NewRouter(deps)
 	cookie := adminLogin(t, h)
@@ -1427,15 +1739,31 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		if strings.HasSuffix(rt.pattern, "/session") {
 			continue // the session routes do not touch these two stores
 		}
+		if rt.pattern == "GET /api/admin/v1/regions/{regionId}" {
+			// The one scoped route with no store call of its own: it renders
+			// the region the middleware already loaded, so there is no
+			// handler error path here to break.
+			continue
+		}
 		method, target := concreteRoute(t, rt.pattern)
 		body := ""
 		switch {
 		case method == http.MethodPost && strings.HasSuffix(target, "/alerts"):
-			body = minimalAlert(regionPuget, "x")
-		case method == http.MethodPatch && strings.Contains(target, "/regions/"):
-			body = `{"default_agency_id":"x"}`
-		case method == http.MethodPatch:
+			body = minimalAlertBody("x")
+		case method == http.MethodPatch && strings.Contains(target, "/alerts/"):
 			body = `{"header":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/studies"):
+			body = `{"name":"x"}`
+		case method == http.MethodPatch && strings.Contains(target, "/studies/"):
+			body = `{"name":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/api_keys"):
+			body = `{"name":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/surveys"):
+			body = `{"study_id":1,"name":"x"}`
+		case method == http.MethodPut && strings.Contains(target, "/surveys/"):
+			body = `{"name":"x"}`
+		case method == http.MethodPatch:
+			body = `{"default_agency_id":"x"}`
 		case method == http.MethodPut:
 			body = `{"header":"x"}`
 		}

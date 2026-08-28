@@ -34,6 +34,11 @@ vi.mock('$lib/api', async () => {
 import EditPage from './+page.svelte';
 import type { Alert, Region } from '$lib/types';
 
+// No 'pushes' in features: this region does not have the family enabled,
+// which keeps the push card out of these tests without stubbing another
+// endpoint. (features is also legitimately absent on a list response, but
+// this fixture states it explicitly since these tests exercise `GET
+// /regions/{id}`'s shape.)
 const REGION: Region = {
 	id: 1,
 	name: 'Puget Sound',
@@ -46,6 +51,7 @@ const REGION: Region = {
 	latitude: null,
 	longitude: null,
 	oba_api_key: 'none',
+	features: ['alerts'],
 };
 
 function alert(over: Partial<Alert> = {}): Alert {
@@ -96,17 +102,17 @@ function mount(initial: Alert) {
 	// so the fixture supplies them rather than casting the shape away.
 	const shell = { user: { username: 'admin' }, sessionError: '' };
 	const props = (a: Alert) => ({
-		// `pushes`/`audience` come from the same load; null audience is the
-		// "no push transport configured" case, which keeps the push card out
-		// of these tests without stubbing another endpoint.
+		// `pushes`/`audience` come from the same load; a region without the
+		// 'pushes' feature keeps the push card out of these tests without
+		// stubbing another endpoint.
 		data: {
 			...shell,
 			alert: a,
-			regions: [REGION],
+			region: REGION,
 			pushes: [],
 			audience: null,
 		},
-		params: { id: String(a.id) },
+		params: { region: '1', id: String(a.id) },
 	});
 	let next = initial;
 	invalidateAllMock.mockImplementation(async () => {
@@ -145,7 +151,8 @@ describe('edit page: the form resynchronises with the server after a save', () =
 
 		expect(patchMock).toHaveBeenCalledTimes(1);
 		const [path, body] = patchMock.mock.calls[0];
-		expect(path).toBe('/alerts/7');
+		// Region-scoped: the region comes from the route, not a form field.
+		expect(path).toBe('/regions/1/alerts/7');
 		expect(body.clear_end_time).toBe(true);
 		// The API rejects end_time and clear_end_time together.
 		expect('end_time' in body).toBe(false);
@@ -170,7 +177,7 @@ describe('edit page: the form resynchronises with the server after a save', () =
 		await user.type(headerField(), 'Bridge out, both directions');
 
 		await user.click(screen.getByRole('button', { name: 'Publish' }));
-		expect(postMock).toHaveBeenCalledWith('/alerts/7/publish');
+		expect(postMock).toHaveBeenCalledWith('/regions/1/alerts/7/publish');
 		// The page itself reflects the server: the button has flipped.
 		expect(
 			screen.getByRole('button', { name: 'Unpublish' }),

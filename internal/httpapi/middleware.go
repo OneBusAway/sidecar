@@ -11,18 +11,23 @@ import (
 )
 
 // contextKey is this package's private context key type, so no other package
-// can collide with (or read) the values requireSession stores.
+// can collide with (or read) the values requirePrincipal stores.
 type contextKey int
 
-// userContextKey holds the authenticated auth.User requireSession attaches to
-// the request context.
-const userContextKey contextKey = iota
+const (
+	// principalContextKey holds the principal requirePrincipal attached.
+	principalContextKey contextKey = iota + 1
+	// regionContextKey holds the regions.Region a region scope loaded. It is
+	// the only region a scoped handler may act on: fetching one by hand is
+	// how tenancy becomes a check per handler instead of a check per route.
+	regionContextKey
+)
 
 // crossSiteGuard rejects state-changing requests that the browser itself
 // marked as cross-site. It applies to ALL admin routes including POST
 // /session: login CSRF (logging a victim into the attacker's account) is
 // cheap to close, and the login handler deliberately sits outside
-// requireSession, so this check must not be coupled to that middleware
+// requirePrincipal, so this check must not be coupled to that middleware
 // (design spec §4.4).
 //
 // The rule: if Sec-Fetch-Site is present it must be same-origin or none;
@@ -70,48 +75,79 @@ type authMiddleware struct {
 	deps Deps
 }
 
-// requireSession admits only requests carrying a live session cookie and
-// attaches the authenticated user to the request context, where userFrom
-// reads it. Missing, unknown, and expired sessions are one 401 with one
-// message: GetSession's contract folds expiry into ErrNotFound (and deletes
-// the row on the way), so there is nothing here to distinguish.
-func (h *authMiddleware) requireSession(next http.Handler) http.Handler {
+// requirePrincipal authenticates a request and enforces the route's
+// allow-list. It replaces requireSession: the admin API now has three kinds
+// of caller, and a route says which it accepts rather than every handler
+// re-deriving it.
+func (h *authMiddleware) requirePrincipal(allowed principalSet, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(auth.CookieName)
-		if err != nil {
-			h.unauthorized(w, "no session cookie")
+		var (
+			p  principal
+			ok bool
+		)
+		// A present Authorization header means cookies are ignored entirely
+		// (design spec §4.2). r.Header.Values, not Get: a present-but-empty
+		// value is a failed bearer attempt, not "absent".
+		if values, present := r.Header["Authorization"]; present {
+			p, ok = h.authenticateBearer(w, r, values)
+		} else {
+			p, ok = h.authenticateSession(w, r)
+		}
+		if !ok {
 			return
 		}
-
-		ctx := r.Context()
-		session, err := h.deps.Auth.GetSession(ctx, auth.HashToken(cookie.Value), h.deps.Now())
-		if err != nil {
-			if !errors.Is(err, auth.ErrNotFound) {
-				// A broken store is not a logged-out user. Saying 401 here
-				// would send an operator hunting for an expired session that
-				// never expired.
-				serverErrorJSON(w, h.deps.Logger, "get session", err)
-				return
-			}
-			h.unauthorized(w, "no live session for cookie")
+		if !allowed.has(p.kind) {
+			h.deps.Logger.Warn("httpapi: principal not allowed on route",
+				"principal", p, "path", r.URL.Path, "method", r.Method)
+			writeJSONError(w, h.deps.Logger, http.StatusForbidden, forbiddenBody)
 			return
 		}
-
-		user, err := h.deps.Auth.GetUserByID(ctx, session.UserID)
-		if err != nil {
-			if !errors.Is(err, auth.ErrNotFound) {
-				serverErrorJSON(w, h.deps.Logger, "get session user", err)
-				return
-			}
-			// The user row is gone but its session outlived it. Treat it as
-			// logged out, and say so: it means a delete failed to cascade.
-			h.deps.Logger.Warn("httpapi: session references a missing user", "user_id", session.UserID)
-			h.unauthorized(w, "session user no longer exists")
-			return
-		}
-
-		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, userContextKey, user)))
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey, p)))
 	})
+}
+
+// authenticateSession resolves the session cookie into an operator
+// principal. It writes the response itself on every failure and reports
+// ok=false, so requirePrincipal only has to decide whether to continue.
+//
+// Missing, unknown, and expired sessions are one 401 with one message:
+// GetSession's contract folds expiry into ErrNotFound (and deletes the row on
+// the way), so there is nothing here to distinguish.
+func (h *authMiddleware) authenticateSession(w http.ResponseWriter, r *http.Request) (principal, bool) {
+	cookie, err := r.Cookie(auth.CookieName)
+	if err != nil {
+		h.unauthorized(w, "no session cookie")
+		return principal{}, false
+	}
+
+	ctx := r.Context()
+	session, err := h.deps.Auth.GetSession(ctx, auth.HashToken(cookie.Value), h.deps.Now())
+	if err != nil {
+		if !errors.Is(err, auth.ErrNotFound) {
+			// A broken store is not a logged-out user. Saying 401 here
+			// would send an operator hunting for an expired session that
+			// never expired.
+			serverErrorJSON(w, h.deps.Logger, "get session", err)
+			return principal{}, false
+		}
+		h.unauthorized(w, "no live session for cookie")
+		return principal{}, false
+	}
+
+	user, err := h.deps.Auth.GetUserByID(ctx, session.UserID)
+	if err != nil {
+		if !errors.Is(err, auth.ErrNotFound) {
+			serverErrorJSON(w, h.deps.Logger, "get session user", err)
+			return principal{}, false
+		}
+		// The user row is gone but its session outlived it. Treat it as
+		// logged out, and say so: it means a delete failed to cascade.
+		h.deps.Logger.Warn("httpapi: session references a missing user", "user_id", session.UserID)
+		h.unauthorized(w, "session user no longer exists")
+		return principal{}, false
+	}
+
+	return principal{kind: principalOperator, user: user}, true
 }
 
 // unauthorized writes the single 401 body the SPA keys off (design spec §4.5)
@@ -119,13 +155,4 @@ func (h *authMiddleware) requireSession(next http.Handler) http.Handler {
 func (h *authMiddleware) unauthorized(w http.ResponseWriter, reason string) {
 	h.deps.Logger.Debug("httpapi: authentication required", "reason", reason)
 	writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, "authentication required")
-}
-
-// userFrom returns the user requireSession authenticated for this request.
-// The boolean is false for any context that did not pass through
-// requireSession, so a caller can never mistake a zero-value User for a real
-// admin.
-func userFrom(ctx context.Context) (auth.User, bool) {
-	user, ok := ctx.Value(userContextKey).(auth.User)
-	return user, ok
 }

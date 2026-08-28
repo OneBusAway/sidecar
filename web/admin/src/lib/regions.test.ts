@@ -1,6 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { buildRegionPatch, describeKeyStatus, formatCentroid } from './regions';
-import type { KeyStatus } from './types';
+import {
+	buildRegionPatch,
+	describeKeyStatus,
+	formatCentroid,
+	hasFeature,
+	pickRegion,
+} from './regions';
+import type { KeyStatus, Region } from './types';
+
+function region(over: Partial<Region> = {}): Region {
+	return {
+		id: 0,
+		name: 'Tampa Bay',
+		oba_base_url: 'https://api.tampa.example',
+		sidecar_base_url: 'https://sidecar.tampa.example',
+		language: 'en',
+		active: true,
+		default_agency_id: 'HART',
+		timezone: '',
+		latitude: null,
+		longitude: null,
+		oba_api_key: 'none',
+		...over,
+	};
+}
+
+// Region 0 is Tampa Bay -- a real region, never "unset" -- which is exactly
+// why it is the fixture used throughout this file rather than a round-number
+// id that would hide a truthiness bug.
+const tampa = region({ id: 0, name: 'Tampa Bay' });
+const puget = region({ id: 5, name: 'Puget Sound' });
 
 describe('buildRegionPatch', () => {
 	it('sends both fields when both are filled in', () => {
@@ -100,5 +129,57 @@ describe('describeKeyStatus', () => {
 
 	it('falls back rather than rendering undefined for an unknown value', () => {
 		expect(describeKeyStatus('something-new' as KeyStatus)).toBe('Unknown');
+	});
+});
+
+describe('pickRegion', () => {
+	// One region auto-forwards: making an operator choose from a list of one
+	// is a click that can only have one outcome.
+	it('returns the only region when there is exactly one', () => {
+		expect(pickRegion([tampa], null)?.id).toBe(0);
+	});
+
+	// Region 0 is Tampa Bay. A remembered '0' must resolve to Tampa, and any
+	// truthiness test on the id is a bug that would send the operator to the
+	// picker instead.
+	it('honours a remembered region 0', () => {
+		expect(pickRegion([tampa, puget], '0')?.id).toBe(0);
+	});
+
+	it('ignores a remembered region that is no longer listed', () => {
+		expect(pickRegion([tampa, puget], '99')).toBeNull();
+	});
+
+	it('ignores a non-numeric remembered value', () => {
+		expect(pickRegion([tampa, puget], 'tampa')).toBeNull();
+	});
+
+	it('returns null with several regions and nothing remembered', () => {
+		expect(pickRegion([tampa, puget], null)).toBeNull();
+	});
+
+	it('returns null with no regions at all', () => {
+		expect(pickRegion([], '0')).toBeNull();
+	});
+});
+
+describe('hasFeature', () => {
+	// features is absent on the LIST endpoint's regions and present only on
+	// GET /regions/{id}. Absent must not read as "everything is enabled":
+	// that would render a Send button against routes that do not exist.
+	it('is false when features is absent', () => {
+		expect(hasFeature({ ...puget, features: undefined }, 'pushes')).toBe(false);
+	});
+
+	it('is true when the family is listed', () => {
+		expect(
+			hasFeature({ ...puget, features: ['alerts', 'pushes'] }, 'pushes'),
+		).toBe(true);
+	});
+
+	it('is false when the family is not listed', () => {
+		expect(hasFeature({ ...puget, features: ['alerts'] }, 'pushes')).toBe(
+			false,
+		);
 	});
 });

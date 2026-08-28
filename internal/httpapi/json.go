@@ -27,6 +27,18 @@ func writeJSONError(w http.ResponseWriter, logger *slog.Logger, status int, msg 
 	writeJSON(w, logger, status, map[string]string{"error": msg})
 }
 
+// writeCSVHeaders sets the response headers every CSV export shares.
+// nosniff stops a browser from re-interpreting the body as HTML; no-store
+// keeps rider data out of intermediary caches; the filename is fixed and
+// server-generated, never derived from a name, so nothing rider- or
+// author-supplied reaches a Content-Disposition header.
+func writeCSVHeaders(w http.ResponseWriter, filename string) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+}
+
 // writeRegionNotFound writes the exact 404 contract for an unrecognised
 // region (design spec §1.2, §2.5). Every feed handler that takes a
 // {regionId} path segment shares this one function rather than each
@@ -55,8 +67,32 @@ func serverErrorJSON(w http.ResponseWriter, logger *slog.Logger, op string, err 
 // a newer SPA sending a field this server has not learned about yet should not
 // have its request rejected outright.
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	return decodeJSONBody(w, r, maxBytes, dst, false)
+}
+
+// decodeJSONStrict is decodeJSON with DisallowUnknownFields. It exists for
+// the survey authoring document, where the CLI has always been strict for a
+// concrete reason: a misspelled "show_on_maps" would decode as absent and
+// silently ship a hidden survey. Everywhere else this API is deliberately
+// lenient, so a newer SPA sending a field this server has not learned about
+// yet is not rejected outright -- do not "unify" the two.
+func decodeJSONStrict(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	return decodeJSONBody(w, r, maxBytes, dst, true)
+}
+
+// decodeJSONBody is the shared body of decodeJSON and decodeJSONStrict. The
+// two differ by exactly one decoder setting, and that difference is a
+// deliberate API-level distinction (see both doc comments) -- but the size
+// cap and the error mapping are not, and keeping two copies of those is how
+// one of them quietly stops returning errBodyTooLarge and starts leaking
+// encoding/json's wording to an operator.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any, strict bool) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if strict {
+		dec.DisallowUnknownFields()
+	}
+	if err := dec.Decode(dst); err != nil {
 		// http.MaxBytesReader's error wraps a message written for a Go
 		// developer ("http: request body too large"), not for whoever hit
 		// this endpoint -- every other 4xx on this API is copy written for an

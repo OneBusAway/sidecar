@@ -105,6 +105,22 @@ func (r *surveyRepo) GetStudy(ctx context.Context, id int64) (surveys.Study, err
 	return studyFromRow(row), nil
 }
 
+// UpdateStudy renames a study with the region as a query condition on the
+// UPDATE itself: a study addressed through the wrong region matches zero
+// rows, so RETURNING yields sql.ErrNoRows and nothing is written -- the
+// region-scoping guarantee is the query, not a Go-side comparison after a
+// bare-id load (design spec section 3.2).
+func (r *surveyRepo) UpdateStudy(ctx context.Context, regionID, id int64, name, description string, now time.Time) (surveys.Study, error) {
+	row, err := r.q.UpdateStudy(ctx, gen.UpdateStudyParams{ID: id, RegionID: regionID, Name: name, Description: description, Now: now.Unix()})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Study{}, fmt.Errorf("sqlite: update study %d (region %d): %w", id, regionID, surveys.ErrNotFound)
+		}
+		return surveys.Study{}, fmt.Errorf("sqlite: update study %d (region %d): %w", id, regionID, err)
+	}
+	return studyFromRow(row), nil
+}
+
 func (r *surveyRepo) ListStudies(ctx context.Context, regionID int64) ([]surveys.Study, error) {
 	rows, err := r.q.ListStudiesByRegion(ctx, regionID)
 	if err != nil {
@@ -215,24 +231,17 @@ func loadSurvey(ctx context.Context, q *gen.Queries, row gen.Survey, studies *st
 	return s, nil
 }
 
-func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
+// createSurveyTx inserts a survey plus its questions under studyID and
+// loads it back with Questions and Study populated. It assumes the caller
+// has already established that studyID exists (and, for a region-scoped
+// caller, that it is in the right region) -- CreateSurvey and
+// CreateSurveyInRegion each do that check their own way before calling
+// this, so the two entry points cannot drift on question insertion or on
+// populating the returned Survey.Study.
+func createSurveyTx(ctx context.Context, q *gen.Queries, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
 	p, err := paramsFromDefinition(def)
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: %w", err)
-	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: begin tx: %w", err)
-	}
-	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
-	defer func() { _ = tx.Rollback() }()
-	q := r.q.WithTx(tx)
-
-	if _, err = q.GetStudy(ctx, studyID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d: %w", studyID, surveys.ErrNotFound)
-		}
-		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d: %w", studyID, err)
 	}
 	row, err := q.CreateSurvey(ctx, gen.CreateSurveyParams{
 		StudyID: studyID, Name: def.Name, Available: def.Available,
@@ -251,8 +260,61 @@ func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def survey
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: %w", err)
 	}
+	return s, nil
+}
+
+func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: begin tx: %w", err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	if _, err = q.GetStudy(ctx, studyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d: %w", studyID, surveys.ErrNotFound)
+		}
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d: %w", studyID, err)
+	}
+	s, err := createSurveyTx(ctx, q, studyID, def, now)
+	if err != nil {
+		return surveys.Survey{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: commit: %w", err)
+	}
+	return s, nil
+}
+
+// CreateSurveyInRegion is CreateSurvey with the study's region as a JOIN
+// condition on the very first statement in the transaction: a study_id
+// that arrived in a request body but belongs to another region -- or does
+// not exist at all -- is ErrNotFound before anything is written (design
+// spec section 3.2). It shares createSurveyTx with CreateSurvey so the two
+// entry points cannot drift on question insertion or Study population.
+func (r *surveyRepo) CreateSurveyInRegion(ctx context.Context, regionID, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in region %d: begin tx: %w", regionID, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	if _, err = q.GetStudyInRegion(ctx, gen.GetStudyInRegionParams{ID: studyID, RegionID: regionID}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d (region %d): %w", studyID, regionID, surveys.ErrNotFound)
+		}
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in study %d (region %d): %w", studyID, regionID, err)
+	}
+	s, err := createSurveyTx(ctx, q, studyID, def, now)
+	if err != nil {
+		return surveys.Survey{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in region %d: commit: %w", regionID, err)
 	}
 	return s, nil
 }
@@ -550,6 +612,25 @@ func (r *surveyRepo) GetResponse(ctx context.Context, publicID string) (surveys.
 	out, err := responseFromRow(row)
 	if err != nil {
 		return surveys.Response{}, fmt.Errorf("sqlite: get response: %w", err)
+	}
+	return out, nil
+}
+
+// GetResponseInRegion resolves a response through its survey's study's
+// region in a single query (survey_responses -> surveys -> studies), so a
+// response reached through another region's survey is ErrNotFound just
+// like an unknown public id (design spec section 3.2).
+func (r *surveyRepo) GetResponseInRegion(ctx context.Context, regionID int64, publicID string) (surveys.Response, error) {
+	row, err := r.q.GetResponseByPublicIDInRegion(ctx, gen.GetResponseByPublicIDInRegionParams{PublicID: publicID, RegionID: regionID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return surveys.Response{}, fmt.Errorf("sqlite: get response (region %d): %w", regionID, surveys.ErrNotFound)
+		}
+		return surveys.Response{}, fmt.Errorf("sqlite: get response (region %d): %w", regionID, err)
+	}
+	out, err := responseFromRow(row)
+	if err != nil {
+		return surveys.Response{}, fmt.Errorf("sqlite: get response (region %d): %w", regionID, err)
 	}
 	return out, nil
 }

@@ -104,6 +104,49 @@ func (q *Queries) CreateGhostBusReport(ctx context.Context, arg CreateGhostBusRe
 	return i, err
 }
 
+const getGhostBusReportByPublicID = `-- name: GetGhostBusReportByPublicID :one
+SELECT id, region_id, public_identifier, user_identifier, trip_identifier, service_date, route_identifier, stop_identifier, vehicle_identifier, stop_sequence, predicted, schedule_deviation_minutes, wait_duration_minutes, comment, user_latitude, user_longitude, scheduled_arrival_at, predicted_arrival_at, prediction_last_updated_at, snapshot_status, snapshot_json, snapshot_captured_at, snapshot_attempts, created_at, updated_at FROM ghost_bus_reports
+WHERE region_id = ?1 AND public_identifier = ?2
+`
+
+type GetGhostBusReportByPublicIDParams struct {
+	RegionID         int64
+	PublicIdentifier string
+}
+
+func (q *Queries) GetGhostBusReportByPublicID(ctx context.Context, arg GetGhostBusReportByPublicIDParams) (GhostBusReport, error) {
+	row := q.db.QueryRowContext(ctx, getGhostBusReportByPublicID, arg.RegionID, arg.PublicIdentifier)
+	var i GhostBusReport
+	err := row.Scan(
+		&i.ID,
+		&i.RegionID,
+		&i.PublicIdentifier,
+		&i.UserIdentifier,
+		&i.TripIdentifier,
+		&i.ServiceDate,
+		&i.RouteIdentifier,
+		&i.StopIdentifier,
+		&i.VehicleIdentifier,
+		&i.StopSequence,
+		&i.Predicted,
+		&i.ScheduleDeviationMinutes,
+		&i.WaitDurationMinutes,
+		&i.Comment,
+		&i.UserLatitude,
+		&i.UserLongitude,
+		&i.ScheduledArrivalAt,
+		&i.PredictedArrivalAt,
+		&i.PredictionLastUpdatedAt,
+		&i.SnapshotStatus,
+		&i.SnapshotJson,
+		&i.SnapshotCapturedAt,
+		&i.SnapshotAttempts,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listGhostBusReportsForExport = `-- name: ListGhostBusReportsForExport :many
 SELECT id, region_id, public_identifier, user_identifier, trip_identifier, service_date, route_identifier, stop_identifier, vehicle_identifier, stop_sequence, predicted, schedule_deviation_minutes, wait_duration_minutes, comment, user_latitude, user_longitude, scheduled_arrival_at, predicted_arrival_at, prediction_last_updated_at, snapshot_status, snapshot_json, snapshot_captured_at, snapshot_attempts, created_at, updated_at FROM ghost_bus_reports
 WHERE region_id = ?1 AND created_at >= ?2

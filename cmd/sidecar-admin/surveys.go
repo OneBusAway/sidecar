@@ -3,14 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -133,40 +131,15 @@ func readDocument(stdin io.Reader, path string) (surveys.Document, error) {
 	return doc, nil
 }
 
-// definitionFromDocument converts a document to a validated Definition.
-// Dates go through parseInstant with the region, so the explicit-offset
-// rule and its timezone hint carry over from alert create.
+// definitionFromDocument converts a document to a validated Definition via
+// the shared codec (internal/surveys/codec.go), so the CLI and POST/PUT
+// /surveys cannot drift on defaults. Dates go through parseInstant with the
+// region, so the explicit-offset rule and its timezone hint carry over from
+// alert create.
 func definitionFromDocument(doc surveys.Document, region regions.Region) (surveys.Definition, error) {
-	def := surveys.Definition{
-		Name: doc.Name, Available: true,
-		ShowOnMap: doc.ShowOnMap, ShowOnStops: doc.ShowOnStops, AlwaysVisible: doc.AlwaysVisible,
-		AllowsMultipleResponses: doc.AllowsMultipleResponses,
-		VisibleStopList:         doc.VisibleStopList, VisibleRouteList: doc.VisibleRouteList,
-	}
-	if doc.Available != nil {
-		def.Available = *doc.Available
-	}
-	if doc.StartDate != nil {
-		t, err := parseInstant(*doc.StartDate, region)
-		if err != nil {
-			return surveys.Definition{}, fmt.Errorf("start_date: %w", err)
-		}
-		def.StartTime = &t
-	}
-	if doc.EndDate != nil {
-		t, err := parseInstant(*doc.EndDate, region)
-		if err != nil {
-			return surveys.Definition{}, fmt.Errorf("end_date: %w", err)
-		}
-		def.EndTime = &t
-	}
-	for _, q := range doc.Questions {
-		def.Questions = append(def.Questions, surveys.QuestionDefinition{Required: q.Required, Content: q.Content})
-	}
-	if err := def.Validate(); err != nil {
-		return surveys.Definition{}, err
-	}
-	return def, nil
+	return surveys.DefinitionFromDocument(doc, func(s string) (time.Time, error) {
+		return parseInstant(s, region)
+	})
 }
 
 func parseSurveyIDArg(op string, args []string) (int64, error) { return parseIDArg(op, "survey", args) }
@@ -343,76 +316,21 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 	return nil
 }
 
-// csvCell guards a rider-sourced cell against spreadsheet formula injection:
-// Excel, Numbers, and Sheets all evaluate a cell that opens with =, +, -, @,
-// a tab, or a carriage return as a formula on open, which turns an agency's
-// export of untrusted rider text into arbitrary-formula execution in their
-// spreadsheet tool. Prefixing a single apostrophe forces the cell to be
-// read as literal text in every one of those tools while leaving the
-// visible value (and a re-import through this same reader) unchanged for
-// every other cell.
-func csvCell(s string) string {
-	if s == "" {
-		return s
-	}
-	switch s[0] {
-	case '=', '+', '-', '@', '\t', '\r':
-		return "'" + s
-	default:
-		return s
-	}
-}
-
-// floatCell renders an optional float64 CSV cell: blank when absent, else
-// the shortest decimal that round-trips exactly. Shared by every CSV export
-// with a nullable coordinate or measurement column (survey responses, ghost
-// bus reports).
-func floatCell(v *float64) string {
-	if v == nil {
-		return ""
-	}
-	return strconv.FormatFloat(*v, 'f', -1, 64)
-}
-
-// surveyResponses writes long-format CSV: one row per answer, so no answer
-// to a since-deleted question is lost and the sheet pivots cleanly; a
-// response with no answers still gets a row so abandoned submissions are
-// visible (design spec 2.14).
+// surveyResponses writes the survey's responses as long-format CSV (one row
+// per answer; see surveys.WriteResponsesCSV for the format itself, so the
+// admin CSV route can share it).
 func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
 	id, err := parseSurveyIDArg("survey responses", args)
 	if err != nil {
 		return err
 	}
-	if _, err = store.Surveys().GetSurvey(ctx, id); err != nil {
+	s, err := store.Surveys().GetSurvey(ctx, id)
+	if err != nil {
 		return wrapSurveyErr("survey responses", id, err)
 	}
 	list, err := store.Surveys().ListResponses(ctx, id)
 	if err != nil {
 		return fmt.Errorf("survey responses %d: %w", id, err)
 	}
-	w := csv.NewWriter(stdout)
-	if err := w.Write([]string{"response_id", "user_identifier", "stop_identifier", "stop_latitude", "stop_longitude",
-		"created_at", "updated_at", "question_id", "question_type", "question_label", "answer"}); err != nil {
-		return err
-	}
-	for _, r := range list {
-		// The public id is server-minted, but its URL-safe base64 alphabet
-		// includes '-', so about one id in 64 opens with a formula trigger.
-		prefix := []string{csvCell(r.PublicID), csvCell(r.UserIdentifier), csvCell(r.StopIdentifier), floatCell(r.StopLatitude), floatCell(r.StopLongitude),
-			surveys.FormatTime(r.CreatedAt), surveys.FormatTime(r.UpdatedAt)}
-		if len(r.Answers) == 0 {
-			if err := w.Write(append(prefix, "", "", "", "")); err != nil {
-				return err
-			}
-			continue
-		}
-		for _, a := range r.Answers {
-			row := append(append([]string{}, prefix...), strconv.FormatInt(a.QuestionID, 10), csvCell(a.QuestionType), csvCell(a.QuestionLabel), csvCell(a.Answer))
-			if err := w.Write(row); err != nil {
-				return err
-			}
-		}
-	}
-	w.Flush()
-	return w.Error()
+	return surveys.WriteResponsesCSV(stdout, s, list)
 }

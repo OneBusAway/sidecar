@@ -39,3 +39,9 @@ RETURNING failure_count;
 -- name: ResetAlarmFailures :exec
 UPDATE alarms SET failure_count = 0, updated_at = unixepoch()
 WHERE id = @id AND failure_count <> 0;
+
+-- name: ListAlarmsByRegion :many
+SELECT * FROM alarms WHERE region_id = @region_id ORDER BY id;
+
+-- name: GetAlarmInRegion :one
+SELECT * FROM alarms WHERE id = @id AND region_id = @region_id;

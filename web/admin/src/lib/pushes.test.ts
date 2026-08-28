@@ -149,34 +149,50 @@ afterEach(() => {
 });
 
 describe('loadPushes / loadAudience', () => {
-	it('request the alert-scoped paths', async () => {
+	it('loadPushes builds a region-scoped path', async () => {
 		const push = { id: 4 } as AlertPush;
-		const get = vi.spyOn(api, 'get').mockImplementation(async (path) => {
-			if (path === '/alerts/7/pushes') return [push] as never;
-			return audience as never;
-		});
+		const get = vi.spyOn(api, 'get').mockResolvedValue([push] as never);
 
-		expect(await loadPushes('7')).toEqual([push]);
-		expect(await loadAudience('7')).toEqual(audience);
-		expect(get.mock.calls.map((c) => c[0])).toEqual([
-			'/alerts/7/pushes',
-			'/alerts/7/push_audience',
-		]);
+		expect(await loadPushes(1, '7')).toEqual([push]);
+		expect(get).toHaveBeenCalledWith('/regions/1/alerts/7/pushes');
 	});
 
-	// The four push routes are not registered at all when the server has no
-	// push transport, so the 404 is the "not configured" signal, not a fault.
-	it('treat a 404 as "push is not configured"', async () => {
+	// Region 0 is Tampa Bay: a template that tests the id for truthiness
+	// would emit '/regions/alerts/7/push_audience' -- no region segment at
+	// all -- and this would still resolve to the wrong route without
+	// asserting the exact destination.
+	it('loadAudience builds a region-scoped path, including region 0', async () => {
+		const get = vi.spyOn(api, 'get').mockResolvedValue(audience as never);
+
+		expect(await loadAudience(0, '7')).toEqual(audience);
+		expect(get).toHaveBeenCalledWith('/regions/0/alerts/7/push_audience');
+	});
+
+	// The "no transport configured" signal now comes from the region's
+	// `features`, read once, instead of being inferred from a per-alert 404.
+	// Inferring it meant a genuinely missing alert and a missing route looked
+	// identical, and the card silently rendered "not configured" for a
+	// deleted alert. loadPushes/loadAudience no longer guess at the reason
+	// for a 404 -- they just propagate it, like any other failure.
+	it('loadPushes propagates a 404 instead of swallowing it', async () => {
 		vi.spyOn(api, 'get').mockRejectedValue(new ApiError(404, '404 Not Found'));
-		expect(await loadPushes('7')).toEqual([]);
-		expect(await loadAudience('7')).toBeNull();
+
+		await expect(loadPushes(1, '7')).rejects.toBeInstanceOf(ApiError);
+		await expect(loadPushes(1, '7')).rejects.toMatchObject({ status: 404 });
 	});
 
-	// Anything else is a real failure: swallowing it would render an empty
-	// history over a server that is actually broken.
+	it('loadAudience propagates a 404 instead of swallowing it', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new ApiError(404, '404 Not Found'));
+
+		await expect(loadAudience(1, '7')).rejects.toBeInstanceOf(ApiError);
+		await expect(loadAudience(1, '7')).rejects.toMatchObject({ status: 404 });
+	});
+
+	// Not new behaviour, but worth pinning now that both functions are bare
+	// pass-throughs: any failure at all reaches the caller unchanged.
 	it('rethrow any other error', async () => {
 		vi.spyOn(api, 'get').mockRejectedValue(new ApiError(500, 'boom'));
-		await expect(loadPushes('7')).rejects.toThrow('boom');
-		await expect(loadAudience('7')).rejects.toThrow('boom');
+		await expect(loadPushes(1, '7')).rejects.toThrow('boom');
+		await expect(loadAudience(1, '7')).rejects.toThrow('boom');
 	});
 });

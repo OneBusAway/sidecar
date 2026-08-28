@@ -2,10 +2,8 @@ package httpapi
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -88,11 +86,10 @@ func (h *adminPushesHandler) enqueuer() *alertpush.Enqueuer {
 	}
 }
 
-// create handles POST /api/admin/v1/alerts/{id}/pushes.
+// create handles POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes.
 func (h *adminPushesHandler) create(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	alert, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 
@@ -113,7 +110,7 @@ func (h *adminPushesHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := h.enqueuer().Enqueue(r.Context(), id, audience, h.deps.Now())
+	p, err := h.enqueuer().Enqueue(r.Context(), alert.ID, audience, h.deps.Now())
 	if err != nil {
 		h.enqueueError(w, err)
 		return
@@ -125,22 +122,19 @@ func (h *adminPushesHandler) create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, h.deps.Logger, http.StatusAccepted, toPushJSON(p))
 }
 
-// list handles GET /api/admin/v1/alerts/{id}/pushes, newest first.
+// list handles GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes,
+// newest first.
 func (h *adminPushesHandler) list(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
-		return
-	}
-	// The alert is looked up first so an unknown id is a 404 rather than an
-	// empty array: "this alert has never been pushed" and "there is no such
-	// alert" are different answers, and the SPA renders them differently.
-	if _, getErr := h.deps.Alerts.Get(r.Context(), id); getErr != nil {
-		h.storeError(w, "get alert", getErr)
+	// The alert is loaded first so an unknown (or another region's) id is a
+	// 404 rather than an empty array: "this alert has never been pushed" and
+	// "there is no such alert" are different answers, and the SPA renders
+	// them differently.
+	alert, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
 
-	pushes, err := h.deps.AlertPushes.ListByAlert(r.Context(), id)
+	pushes, err := h.deps.AlertPushes.ListByAlert(r.Context(), alert.ID)
 	if err != nil {
 		h.storeError(w, "list alert pushes", err)
 		return
@@ -153,27 +147,31 @@ func (h *adminPushesHandler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, h.deps.Logger, http.StatusOK, out)
 }
 
-// cancel handles DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}.
+// cancel handles
+// DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}.
 func (h *adminPushesHandler) cancel(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
+	region, ok := mustRegion(w, r, h.deps)
+	if !ok {
+		return
+	}
+	alert, ok := loadAlert(w, r, h.deps)
+	if !ok {
+		return
+	}
+	pushID, err := pathInt64(r, "pushId")
 	if err != nil {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	raw := r.PathValue("pushId")
-	pushID, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
-			fmt.Sprintf("invalid pushId %q: must be an integer", raw))
-		return
-	}
 
 	// The push is read before it is canceled so a push belonging to another
-	// alert is a 404 rather than a successful cancel of somebody else's
-	// send: {pushId} is globally unique, so without this check the {id}
-	// segment would be decoration.
+	// alert -- or another region -- is a 404 rather than a successful cancel
+	// of somebody else's send: {pushId} is globally unique, so without these
+	// checks the {id} and {regionId} segments would be decoration. The row
+	// carries its own region id, so it is asserted directly rather than
+	// inferred from the alert.
 	p, err := h.deps.AlertPushes.Get(r.Context(), pushID)
-	if err != nil || p.AlertID != id {
+	if err != nil || p.AlertID != alert.ID || p.RegionID != region.ID {
 		if err != nil && !errors.Is(err, alertpush.ErrNotFound) {
 			serverErrorJSON(w, h.deps.Logger, "get alert push", err)
 			return
@@ -197,14 +195,14 @@ func (h *adminPushesHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// audience handles GET /api/admin/v1/alerts/{id}/push_audience.
+// audience handles
+// GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience.
 func (h *adminPushesHandler) audience(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+	alert, ok := loadAlert(w, r, h.deps)
+	if !ok {
 		return
 	}
-	report, err := h.enqueuer().AudienceFor(r.Context(), id)
+	report, err := h.enqueuer().AudienceFor(r.Context(), alert.ID)
 	if err != nil {
 		h.storeError(w, "count push audience", err)
 		return

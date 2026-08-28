@@ -91,6 +91,14 @@ func (r *fakeAlarmRepo) ResetFailures(_ context.Context, id int64) error {
 	return nil
 }
 
+func (r *fakeAlarmRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	panic("not used by the scheduler")
+}
+
+func (r *fakeAlarmRepo) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
+	panic("not used by the scheduler")
+}
+
 func (r *fakeAlarmRepo) get(id int64) (alarms.Alarm, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

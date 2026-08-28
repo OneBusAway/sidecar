@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -199,4 +200,23 @@ func (r *ghostBusRepo) ListForExport(ctx context.Context, regionID int64, sinceU
 		out[i] = ghostBusFromRow(row)
 	}
 	return out, nil
+}
+
+// GetByPublicID reports ghostbus.ErrNotFound for an unknown public id --
+// including one that exists but in a different region, which is the
+// region-scoping guarantee: the query, not a Go comparison, is what makes a
+// report addressed through the wrong region indistinguishable from one that
+// does not exist.
+func (r *ghostBusRepo) GetByPublicID(ctx context.Context, regionID int64, publicID string) (ghostbus.Report, error) {
+	row, err := r.q.GetGhostBusReportByPublicID(ctx, gen.GetGhostBusReportByPublicIDParams{
+		RegionID:         regionID,
+		PublicIdentifier: publicID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ghostbus.Report{}, fmt.Errorf("sqlite: get ghost bus report (region %d): %w", regionID, ghostbus.ErrNotFound)
+		}
+		return ghostbus.Report{}, fmt.Errorf("sqlite: get ghost bus report (region %d): %w", regionID, err)
+	}
+	return ghostBusFromRow(row), nil
 }

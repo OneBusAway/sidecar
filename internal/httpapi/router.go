@@ -19,6 +19,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
@@ -41,9 +42,18 @@ type Deps struct {
 	// Auth backs the admin session endpoints. When it is nil the admin routes
 	// are not registered at all, so a feed-only deployment (or a feed-only
 	// test) never has to supply one.
-	Auth   auth.Repository
-	Now    func() time.Time
-	Logger *slog.Logger
+	Auth auth.Repository
+	// APIKeys backs bearer authentication and the region API key routes
+	// (design spec §4.2, §5.6). Nil means bearer auth is not configured: any
+	// Authorization header is a 401 -- never a fall-through to the session
+	// cookie -- and the key routes are not registered. main always sets it.
+	APIKeys apikey.Repository
+	// BearerFailLimiter bounds FAILED bearer attempts per peer address.
+	// NewRouter defaults it (60/minute); successful calls are never charged,
+	// so a busy consumer is unmetered.
+	BearerFailLimiter *ratelimit.Limiter
+	Now               func() time.Time
+	Logger            *slog.Logger
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -325,7 +335,7 @@ func NewRouter(deps Deps) http.Handler {
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served
 	// unauthenticated (the login page is part of it) and must never pass
-	// through crossSiteGuard or requireSession, both of which assume a JSON
+	// through crossSiteGuard or requirePrincipal, both of which assume a JSON
 	// API. Nil AdminUI means the binary was built without it, so the routes
 	// are simply not registered.
 	if deps.AdminUI != nil {
@@ -349,6 +359,11 @@ func NewRouter(deps Deps) http.Handler {
 		if len(missing) > 0 {
 			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
 		}
+		// Charged only on a failed bearer attempt (see rejectBearer), so this
+		// bucket never meters a working consumer.
+		if deps.BearerFailLimiter == nil {
+			deps.BearerFailLimiter = ratelimit.New(bearerFailuresPerMinute, time.Minute)
+		}
 		// The alert push routes count the audience before they enqueue
 		// (design spec §2.9); Alerts, Regions and Now are already guaranteed
 		// above, so the registry is the one thing left that would nil-deref
@@ -368,15 +383,22 @@ func NewRouter(deps Deps) http.Handler {
 //
 // The routes are a table rather than a run of mux.Handle calls for one
 // reason: http.ServeMux cannot be enumerated, so a route registered without
-// requireSession would be invisible to every test in this package. The table
-// is the thing a test can walk, which is what makes "every admin route needs a
-// session" checkable rather than merely intended.
+// requirePrincipal would be invisible to every test in this package. The
+// table is the thing a test can walk, which is what makes "every admin route
+// names the credentials it accepts" checkable rather than merely intended.
 type adminRoute struct {
 	pattern string
 	handler http.HandlerFunc
-	// requiresSession is false for exactly two routes, both deliberate and
-	// both documented at their entry in adminRoutes.
-	requiresSession bool
+	// allowed is the set of principal kinds this route accepts. A nil set
+	// means no principal is required at all, which is true of exactly two
+	// routes, both deliberate and both documented at their entry in
+	// adminRoutes.
+	allowed principalSet
+	// scope is which region middleware wraps the handler. It is a column of
+	// the table rather than a wrapper spelled at each entry so a test can
+	// assert it agrees with the pattern: a route carrying {regionId} without
+	// a scope would parse a region id nobody had checked the caller against.
+	scope routeScope
 }
 
 // adminRoutes is the admin API route table (design spec §5). It takes Deps so
@@ -390,27 +412,34 @@ func adminRoutes(deps Deps) []adminRoute {
 	routes := []adminRoute{
 		// Login has no session to require yet; the cross-site guard is what
 		// protects it (design spec §4.4).
-		{"POST /api/admin/v1/session", session.login, false},
-		// Logout sits outside requireSession so it stays idempotent: the SPA
-		// calls it to tidy up after a 401, and answering that with another
-		// 401 gives the client nothing it can act on. It is not a hole -- the
-		// handler only ever deletes the session named by the token the caller
-		// presented, and the cross-site guard still covers it.
-		{"DELETE /api/admin/v1/session", session.logout, false},
-		{"GET /api/admin/v1/session", session.whoami, true},
+		{"POST /api/admin/v1/session", session.login, nil, scopeNone},
+		// Logout sits outside requirePrincipal so it stays idempotent: the
+		// SPA calls it to tidy up after a 401, and answering that with
+		// another 401 gives the client nothing it can act on. It is not a
+		// hole -- the handler only ever deletes the session named by the
+		// token the caller presented, and the cross-site guard still covers
+		// it.
+		{"DELETE /api/admin/v1/session", session.logout, nil, scopeNone},
+		// whoami answers "which operator am I", which only an operator has.
+		{"GET /api/admin/v1/session", session.whoami, operatorOnly, scopeNone},
 
-		{"GET /api/admin/v1/alerts", alertsAdmin.list, true},
-		{"POST /api/admin/v1/alerts", alertsAdmin.create, true},
-		{"GET /api/admin/v1/alerts/{id}", alertsAdmin.get, true},
-		{"PATCH /api/admin/v1/alerts/{id}", alertsAdmin.patch, true},
-		{"DELETE /api/admin/v1/alerts/{id}", alertsAdmin.delete, true},
-		{"POST /api/admin/v1/alerts/{id}/publish", alertsAdmin.setPublished(true), true},
-		{"POST /api/admin/v1/alerts/{id}/unpublish", alertsAdmin.setPublished(false), true},
-		{"PUT /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, true},
-		{"DELETE /api/admin/v1/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, true},
+		// The region list is cross-region by construction: it is the one
+		// admin route that hands back every region at once, so a key scoped
+		// to a single region has no business reading it -- and it is the one
+		// region route that therefore cannot be region-scoped.
+		{"GET /api/admin/v1/regions", regionsAdmin.list, operatorOnly, scopeNone},
+		{"GET /api/admin/v1/regions/{regionId}", regionsAdmin.get, operatorOrKey, scopeRegion},
+		{"PATCH /api/admin/v1/regions/{regionId}", regionsAdmin.patch, operatorOrKey, scopeRegion},
 
-		{"GET /api/admin/v1/regions", regionsAdmin.list, true},
-		{"PATCH /api/admin/v1/regions/{id}", regionsAdmin.patch, true},
+		{"GET /api/admin/v1/regions/{regionId}/alerts", alertsAdmin.list, operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts", alertsAdmin.create, operatorOrKey, scopeRegion},
+		{"GET /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.get, operatorOrKey, scopeRegion},
+		{"PATCH /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.patch, operatorOrKey, scopeRegion},
+		{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}", alertsAdmin.delete, operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/publish", alertsAdmin.setPublished(true), operatorOrKey, scopeRegion},
+		{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/unpublish", alertsAdmin.setPublished(false), operatorOrKey, scopeRegion},
+		{"PUT /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang}", alertsAdmin.putTranslation, operatorOrKey, scopeRegion},
+		{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/translations/{lang}", alertsAdmin.deleteTranslation, operatorOrKey, scopeRegion},
 	}
 
 	// The alert push routes are conditional (design spec §2.9) but still
@@ -419,11 +448,91 @@ func adminRoutes(deps Deps) []adminRoute {
 	// middleware.
 	if alertPushRoutesEnabled(deps) {
 		pushesAdmin := &adminPushesHandler{deps: deps}
+		// Sending and cancelling a push are operator-only: they reach every
+		// rider's device, which is the one blast radius a leaked region key
+		// must not have (design spec §4.5). Reading what was sent, and
+		// counting the audience beforehand, stay open to a region key.
 		routes = append(routes,
-			adminRoute{"POST /api/admin/v1/alerts/{id}/pushes", pushesAdmin.create, true},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/pushes", pushesAdmin.list, true},
-			adminRoute{"DELETE /api/admin/v1/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, true},
-			adminRoute{"GET /api/admin/v1/alerts/{id}/push_audience", pushesAdmin.audience, true},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.create, operatorOnly, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOnly, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey, scopeRegion},
+		)
+	}
+
+	// The study and survey authoring family (design spec section 2.13,
+	// section 5.7). Gated on deps.Surveys, the same field that gates the
+	// rider-facing survey feed above, whose block already guarantees
+	// Deps.Now and Deps.Regions.
+	if deps.Surveys != nil {
+		surveysAdmin := &adminSurveysHandler{deps: deps}
+		responsesAdmin := &adminResponsesHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/studies", surveysAdmin.listStudies, operatorOrKey, scopeRegion},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/studies", surveysAdmin.createStudy, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/studies/{id}", surveysAdmin.getStudy, operatorOrKey, scopeRegion},
+			adminRoute{"PATCH /api/admin/v1/regions/{regionId}/studies/{id}", surveysAdmin.patchStudy, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys", surveysAdmin.listSurveys, operatorOrKey, scopeRegion},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/surveys", surveysAdmin.createSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.getSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"PUT /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.putSurvey, operatorOrKey, scopeRegion},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/surveys/{id}", surveysAdmin.deleteSurvey, operatorOrKey, scopeRegion},
+			// Responses (design spec section 2.14): read-only, so a region
+			// key reads them exactly like it reads the survey itself.
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses", responsesAdmin.listResponses, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/surveys/{id}/responses.csv", responsesAdmin.responsesCSV, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/survey_responses/{publicId}", responsesAdmin.getResponse, operatorOrKey, scopeRegion},
+		)
+	}
+
+	// The ghost bus report read surface (design spec section 5): the JSON
+	// list, the CSV export, and lookup by public id. Gated on deps.GhostBus,
+	// the same field that gates the rider-facing create route above, whose
+	// block already guarantees Deps.Now and Deps.Regions. Read-only: reports
+	// are rider-submitted, so there is no admin write route here and the
+	// rider-facing create route's 422 already_reported contract is
+	// untouched.
+	if deps.GhostBus != nil {
+		ghostBusAdmin := &adminGhostBusHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports", ghostBusAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports.csv", ghostBusAdmin.csv, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/ghost_bus_reports/{publicId}", ghostBusAdmin.get, operatorOrKey, scopeRegion},
+		)
+	}
+
+	// The key-management family is the one place a service principal is
+	// granted anything, and the one family a region key must never reach --
+	// hence scopeKeyAdmin rather than scopeRegion (design spec §5.6).
+	if deps.APIKeys != nil {
+		keysAdmin := &adminAPIKeysHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/api_keys", keysAdmin.create, operatorOrService, scopeKeyAdmin},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/api_keys", keysAdmin.list, operatorOrService, scopeKeyAdmin},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/api_keys/{keyId}", keysAdmin.revoke, operatorOrService, scopeKeyAdmin},
+		)
+	}
+
+	// The alarm read-only surface (design spec section 5.4), gated on the same
+	// deps.Alarms field the rider-facing v1/v2 alarm routes above are gated
+	// on. NewRouter already panics at boot when Deps.Alarms is set without
+	// PushRegs, Regions, and Now, so no additional guard belongs here.
+	if deps.Alarms != nil {
+		alarmsAdmin := &adminAlarmsHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alarms", alarmsAdmin.list, operatorOrKey, scopeRegion},
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/alarms/{id}", alarmsAdmin.get, operatorOrKey, scopeRegion},
+		)
+	}
+
+	// Push registration counts (design spec section 5.5), gated on
+	// deps.PushRegs directly rather than on deps.Alarms: a deployment can run
+	// push registrations without alarms, and this route's only dependency is
+	// the registration store.
+	if deps.PushRegs != nil {
+		pushRegsAdmin := &adminPushRegsHandler{deps: deps}
+		routes = append(routes,
+			adminRoute{"GET /api/admin/v1/regions/{regionId}/push_registrations/count", pushRegsAdmin.count, operatorOrKey, scopeRegion},
 		)
 	}
 	return routes
@@ -449,19 +558,62 @@ type routeRegistrar interface {
 
 // registerAdminRoutes mounts the admin JSON API. Every route passes through
 // crossSiteGuard -- including POST /session, which is the whole reason the
-// guard is separate from requireSession (design spec §4.4) -- and everything
-// except login and logout also requires a live session.
+// guard is separate from requirePrincipal (design spec §4.4) -- and
+// everything except login and logout also requires an authenticated
+// principal drawn from the route's own allow-list.
+//
+// The region scope is wrapped INSIDE requirePrincipal, because deciding
+// whether a caller may reach a region means first knowing who the caller is.
 //
 // Every registration must come from adminRoutes; see routeRegistrar.
 func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 	mw := &authMiddleware{deps: deps}
 	for _, route := range adminRoutes(deps) {
 		var h http.Handler = route.handler
-		if route.requiresSession {
-			h = mw.requireSession(h)
+		switch route.scope {
+		case scopeRegion:
+			h = mw.requireRegion(h)
+		case scopeKeyAdmin:
+			h = mw.requireKeyAdminRegion(h)
+		case scopeNone:
+			// No {regionId} to fence; the route-table test proves the
+			// pattern agrees.
+		}
+		if route.allowed != nil {
+			h = mw.requirePrincipal(route.allowed, h)
 		}
 		mux.Handle(route.pattern, crossSiteGuard(deps.Logger, h))
 	}
+}
+
+// adminFeatures lists the admin route families registered in this
+// deployment (design spec section 5.1), so a consumer can tell "family not
+// enabled here" from a 404. It is derived from the same Deps fields the
+// route table gates on, so the two cannot drift.
+func adminFeatures(deps Deps) []string {
+	features := []string{"alerts"}
+	if alertPushRoutesEnabled(deps) {
+		features = append(features, "pushes")
+	}
+	if deps.Surveys != nil {
+		features = append(features, "surveys")
+	}
+	if deps.GhostBus != nil {
+		features = append(features, "ghost_bus_reports")
+	}
+	if deps.Alarms != nil {
+		features = append(features, "alarms")
+	}
+	if deps.PushRegs != nil {
+		features = append(features, "push_registrations")
+	}
+	if deps.APIKeys != nil {
+		// APIKeys also backs bearer authentication, and now the
+		// key-management routes themselves; the two are wired from the same
+		// field, so this cannot drift from adminRoutes' own APIKeys gate.
+		features = append(features, "api_keys")
+	}
+	return features
 }
 
 // missingDeps returns the names of the absent dependencies, sorted so the

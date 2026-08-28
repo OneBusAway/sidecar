@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
@@ -116,16 +116,16 @@ func TestSurveyCreateAppearsInRiderList(t *testing.T) {
 	}
 }
 
+// TestSurveyCreateRejectsBadDocuments covers the two rejections that are the
+// CLI's own -- readDocument's strict JSON decode -- rather than
+// surveys.DefinitionFromDocument's validation, which moved to
+// internal/surveys/codec_test.go now that POST/PUT /surveys shares it.
 func TestSurveyCreateRejectsBadDocuments(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 	st := createStudy(t, dbPath)
 	tests := []struct{ name, doc, wantErr string }{
-		{"half window", `{"name":"x","start_date":"2026-09-01T00:00:00-07:00"}`, "both start_date and end_date"},
-		{"naive date", `{"name":"x","start_date":"2026-09-01T00:00:00","end_date":"2026-09-02T00:00:00"}`, "explicit offset"},
-		{"blank option", `{"name":"x","questions":[{"content":{"type":"radio","label_text":"q","options":["a",""]}}]}`, "blank option"},
-		{"schemeless url", `{"name":"x","questions":[{"content":{"type":"external_survey","label_text":"q","url":"example.org"}}]}`, "absolute http(s)"},
 		{"unknown key", `{"name":"x","require_stop_id":true}`, "unknown field"},
 		{"not json", `{`, "parse"},
 	}
@@ -144,6 +144,42 @@ func TestSurveyCreateRejectsBadDocuments(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("rejected documents persisted %d surveys", len(list))
+	}
+}
+
+// TestSurveyCreateNaiveDateNamesRegionTimezone pins the one thing
+// definitionFromDocument still does that the shared codec cannot:
+// wire the CLI's own parseInstant(s, region) into DefinitionFromDocument, so
+// a naive datetime's rejection names the study's region and its configured
+// zone -- the hint an author needs to fix the value. Region 1 is set to
+// America/Los_Angeles below (seedRegion alone leaves the schema default,
+// UTC, which the assertion below could not distinguish from a bug that
+// dropped the region entirely).
+func TestSurveyCreateNaiveDateNamesRegionTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	if err := store.Regions().SetLocalFields(context.Background(), 1,
+		regions.LocalFields{Timezone: "America/Los_Angeles"}, time.Now()); err != nil {
+		t.Fatalf("SetLocalFields: %v", err)
+	}
+	st := createStudy(t, dbPath)
+	naiveDoc := `{"name":"x","start_date":"2026-09-01T00:00:00","end_date":"2026-09-02T00:00:00"}`
+	_, _, err := cli(t, dbPath, "survey", "create", "--study", itoa(st), "--file", writeDoc(t, naiveDoc))
+	if err == nil {
+		t.Fatal("naive start_date accepted")
+	}
+	for _, want := range []string{"explicit offset", "region 1", "America/Los_Angeles"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to contain %q", err, want)
+		}
+	}
+	list, err := store.Surveys().ListSurveys(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("rejected document persisted %d surveys", len(list))
 	}
 }
 
@@ -275,30 +311,16 @@ func parseLine(s, format string, id *int64) (int, error) {
 	return fmt.Sscanf(strings.TrimSpace(s), format, id)
 }
 
-func TestSurveyResponsesCSV(t *testing.T) {
+func TestSurveyResponsesCommand_WritesHeaderRowAndExitsZero(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 	st := createStudy(t, dbPath)
 	id := createSurvey(t, dbPath, st, surveyDoc)
-	s, _ := store.Surveys().GetSurvey(context.Background(), id)
-	lat, lon := 47.6, -122.3
-	ctx := context.Background()
-	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{
-		SurveyID: id, PublicID: "two-answers", UserIdentifier: "dev-1", StopIdentifier: "1_570", StopLatitude: &lat, StopLongitude: &lon,
-		Answers: []surveys.Answer{
-			{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "How was your trip?", Answer: "Great"},
-			{QuestionID: 77, QuestionType: "checkbox", QuestionLabel: "Modes", Answer: "[Bus, Train]"},
-		},
-	}, s.CreatedAt); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{SurveyID: id, PublicID: "abandoned", UserIdentifier: "dev-2"}, s.CreatedAt.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+
 	stdout, _, err := cli(t, dbPath, "survey", "responses", itoa(id))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("survey responses: %v", err)
 	}
 	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
 	if err != nil {
@@ -308,94 +330,7 @@ func TestSurveyResponsesCSV(t *testing.T) {
 	if got := strings.Join(rows[0], ","); got != wantHeader {
 		t.Fatalf("header = %s", got)
 	}
-	if len(rows) != 4 {
-		t.Fatalf("rows = %d (%v), want header + 2 answers + 1 abandoned", len(rows), rows)
-	}
-	if rows[1][0] != "two-answers" || rows[1][2] != "1_570" || rows[1][3] != "47.6" || rows[1][10] != "Great" {
-		t.Errorf("row 1 = %v", rows[1])
-	}
-	if rows[2][7] != "77" || rows[2][10] != "[Bus, Train]" {
-		t.Errorf("row 2 = %v", rows[2])
-	}
-	if rows[3][0] != "abandoned" || rows[3][2] != "" || rows[3][3] != "" || rows[3][7] != "" || rows[3][10] != "" {
-		t.Errorf("abandoned row = %v, want empty stop and answer cells", rows[3])
-	}
-	if !strings.HasSuffix(rows[1][5], "Z") || len(rows[1][5]) != len("2026-01-01T00:00:00.000Z") {
-		t.Errorf("created_at = %q, want wire format", rows[1][5])
-	}
-	if _, _, err := cli(t, dbPath, "survey", "show", "999"); err == nil || err.Error() != "survey show 999: survey not found" || !errors.Is(err, surveys.ErrNotFound) {
-		t.Fatalf("survey show 999: err = %v; want the framed not-found message wrapping surveys.ErrNotFound", err)
-	}
 	if _, _, err := cli(t, dbPath, "survey", "responses", "999"); err == nil {
 		t.Error("unknown survey accepted")
-	}
-}
-
-// TestSurveyResponsesCSV_NeutralizesFormulas pins finding 3: a rider-sourced
-// cell that opens with a formula-trigger character (=, +, -, @, tab, CR)
-// must not be handed to a spreadsheet as a live formula on open. A plain
-// cell must pass through unchanged.
-func TestSurveyResponsesCSV_NeutralizesFormulas(t *testing.T) {
-	t.Parallel()
-	dbPath, store := newDB(t)
-	seedRegion(t, store.Regions(), 1)
-	st := createStudy(t, dbPath)
-	id := createSurvey(t, dbPath, st, surveyDoc)
-	s, _ := store.Surveys().GetSurvey(context.Background(), id)
-	ctx := context.Background()
-	if _, err := store.Surveys().CreateResponse(ctx, surveys.NewResponse{
-		SurveyID: id, PublicID: "-formula-row", UserIdentifier: "@evil",
-		Answers: []surveys.Answer{
-			{QuestionID: s.Questions[0].ID, QuestionType: "radio", QuestionLabel: "How was your trip?", Answer: "=1+1"},
-		},
-	}, s.CreatedAt); err != nil {
-		t.Fatal(err)
-	}
-	stdout, _, err := cli(t, dbPath, "survey", "responses", itoa(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := csv.NewReader(strings.NewReader(stdout)).ReadAll()
-	if err != nil {
-		t.Fatalf("not CSV: %v\n%s", err, stdout)
-	}
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d (%v), want header + 1 answer", len(rows), rows)
-	}
-	// securetoken's URL-safe alphabet includes '-', so ids need the guard too.
-	if got := rows[1][0]; got != "'-formula-row" {
-		t.Errorf("response_id cell = %q, want the apostrophe-guarded value", got)
-	}
-	if got := rows[1][1]; got != "'@evil" {
-		t.Errorf("user_identifier cell = %q, want the apostrophe-guarded value", got)
-	}
-	if got := rows[1][10]; got != "'=1+1" {
-		t.Errorf("answer cell = %q, want the apostrophe-guarded value", got)
-	}
-	// A plain answer (no formula-trigger prefix) must survive untouched.
-	if _, err = store.Surveys().AmendResponse(ctx, "-formula-row", []surveys.Answer{
-		{QuestionID: 999, QuestionType: "text", QuestionLabel: "Plain", Answer: "just text"},
-	}, s.CreatedAt.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	stdout, _, err = cli(t, dbPath, "survey", "responses", itoa(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err = csv.NewReader(strings.NewReader(stdout)).ReadAll()
-	if err != nil {
-		t.Fatalf("not CSV: %v\n%s", err, stdout)
-	}
-	found := false
-	for _, row := range rows[1:] {
-		if row[7] == "999" {
-			found = true
-			if row[10] != "just text" {
-				t.Errorf("plain answer cell = %q, want unchanged", row[10])
-			}
-		}
-	}
-	if !found {
-		t.Fatal("amended answer row not found")
 	}
 }

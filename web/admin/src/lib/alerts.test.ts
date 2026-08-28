@@ -1,20 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
-	ALL_REGIONS,
 	alertBadges,
 	buildCreatePayload,
 	buildPatchPayload,
 	buildTranslationPayload,
-	filterByRegion,
 	formValuesFromAlert,
 	formatInstantForRegion,
 	fromInstant,
-	regionName,
-	selectedRegion,
 	toInstant,
 	type AlertFormValues,
 } from './alerts';
-import type { Alert, Region } from './types';
+import type { Alert } from './types';
 
 // Fixture zones are chosen so no plausible development machine can make an
 // assertion pass by accident: Asia/Kathmandu is +05:45 (a 45-minute offset no
@@ -24,23 +20,6 @@ import type { Alert, Region } from './types';
 // TZ=UTC and TZ=Asia/Kathmandu for the same reason.
 const KATHMANDU = 'Asia/Kathmandu';
 const LA = 'America/Los_Angeles';
-
-function region(over: Partial<Region> = {}): Region {
-	return {
-		id: 0,
-		name: 'Tampa Bay',
-		oba_base_url: 'https://api.tampa.example',
-		sidecar_base_url: 'https://sidecar.tampa.example',
-		language: 'en',
-		active: true,
-		default_agency_id: 'HART',
-		timezone: '',
-		latitude: null,
-		longitude: null,
-		oba_api_key: 'none',
-		...over,
-	};
-}
 
 function alert(over: Partial<Alert> = {}): Alert {
 	return {
@@ -66,7 +45,6 @@ function alert(over: Partial<Alert> = {}): Alert {
 
 function values(over: Partial<AlertFormValues> = {}): AlertFormValues {
 	return {
-		regionId: '0',
 		agencyId: 'HART',
 		header: 'Bridge out',
 		description: 'Use the 12 instead.',
@@ -81,72 +59,6 @@ function values(over: Partial<AlertFormValues> = {}): AlertFormValues {
 		...over,
 	};
 }
-
-describe('filterByRegion', () => {
-	const list = [
-		alert({ id: 1, region_id: 0 }),
-		alert({ id: 2, region_id: 5 }),
-		alert({ id: 3, region_id: 0 }),
-	];
-
-	it('returns everything for the all-regions value', () => {
-		expect(filterByRegion(list, ALL_REGIONS).map((a) => a.id)).toEqual([
-			1, 2, 3,
-		]);
-	});
-
-	// Region 0 is Tampa Bay, a real region. Any truthiness check on the id --
-	// `if (!id) return list` after Number(), the obvious way to write this --
-	// turns "show me Tampa Bay" into "show me everything", which looks like a
-	// working filter until someone files a bug about Tampa.
-	it('filters to region 0 rather than treating it as unset', () => {
-		expect(filterByRegion(list, '0').map((a) => a.id)).toEqual([1, 3]);
-	});
-
-	it('filters to a non-zero region', () => {
-		expect(filterByRegion(list, '5').map((a) => a.id)).toEqual([2]);
-	});
-});
-
-describe('regionName', () => {
-	const regions = [
-		region({ id: 0, name: 'Tampa Bay' }),
-		region({ id: 5, name: 'Puget Sound' }),
-	];
-
-	it('names region 0', () => {
-		expect(regionName(regions, 0)).toBe('Tampa Bay');
-	});
-
-	it('falls back to the id when the region is unknown', () => {
-		expect(regionName(regions, 99)).toBe('region 99');
-	});
-});
-
-describe('selectedRegion', () => {
-	const regions = [
-		region({ id: 0, name: 'Tampa Bay', timezone: 'America/New_York' }),
-		region({ id: 5, name: 'Puget Sound', timezone: LA }),
-	];
-
-	// `Number('') === 0`, so a lookup that runs before the empty check resolves
-	// "nothing chosen" to Tampa Bay and quietly hands the form Tampa's timezone.
-	it('resolves the empty value to nothing, not to region 0', () => {
-		expect(selectedRegion(regions, '')).toBeUndefined();
-	});
-
-	it('resolves "0" to region 0', () => {
-		expect(selectedRegion(regions, '0')?.name).toBe('Tampa Bay');
-	});
-
-	it('resolves a non-zero id', () => {
-		expect(selectedRegion(regions, '5')?.name).toBe('Puget Sound');
-	});
-
-	it('resolves an unknown id to nothing', () => {
-		expect(selectedRegion(regions, '99')).toBeUndefined();
-	});
-});
 
 describe('formatInstantForRegion', () => {
 	// 21:00Z is the next day in Kathmandu, so this fails if the region zone is
@@ -223,15 +135,11 @@ describe('toInstant', () => {
 });
 
 describe('buildCreatePayload', () => {
-	it('sends region 0 as a real region id', () => {
-		const payload = buildCreatePayload(values({ regionId: '0' }), KATHMANDU);
-		expect(payload.region_id).toBe(0);
-	});
-
-	it('refuses to guess when no region is chosen', () => {
-		expect(() => buildCreatePayload(values({ regionId: '' }), '')).toThrow(
-			/region/,
-		);
+	it('buildCreatePayload no longer sends region_id', () => {
+		const payload = buildCreatePayload(values(), 'America/Los_Angeles');
+		// The region is in the URL. Sending it in the body is now a 400, so a
+		// stale client cannot believe it targeted a region.
+		expect(payload).not.toHaveProperty('region_id');
 	});
 
 	it('converts start through the region zone', () => {
@@ -376,10 +284,6 @@ describe('form prefill round trip', () => {
 		expect(formValuesFromAlert(alert({ end_time: null }), KATHMANDU).end).toBe(
 			'',
 		);
-	});
-
-	it('keeps region 0 addressable in the prefilled form', () => {
-		expect(formValuesFromAlert(alert({ region_id: 0 }), '').regionId).toBe('0');
 	});
 });
 

@@ -45,6 +45,9 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("ConcurrentAmendsBothLand", func(t *testing.T) { testConcurrentAmendsBothLand(t, newStore) })
 	t.Run("ListResponsesOrdered", func(t *testing.T) { testListResponsesOrdered(t, newStore) })
 	t.Run("CountResponses", func(t *testing.T) { testCountResponses(t, newStore) })
+	t.Run("UpdateStudyIsRegionScoped", func(t *testing.T) { testUpdateStudyRegionScoped(t, newStore) })
+	t.Run("CreateSurveyInRegionRejectsForeignStudy", func(t *testing.T) { testCreateSurveyInRegion(t, newStore) })
+	t.Run("GetResponseInRegionIsScoped", func(t *testing.T) { testGetResponseInRegion(t, newStore) })
 }
 
 func surveyDef(name string) surveys.Definition {
@@ -58,6 +61,24 @@ func surveyDef(name string) surveys.Definition {
 				SDKConfigurationValues: json.RawMessage(`{"a":1}`)}},
 		},
 	}
+}
+
+// seedSurveyRegions puts regions 0 and 1 in place for the region-scoping
+// subtests below. Region 0 is a real region (Tampa Bay) and deliberately
+// holds the "home" data in those tests, so an id-only lookup that forgot
+// its region condition would not be saved by a coincidentally-nonzero id.
+func seedSurveyRegions(t *testing.T, regs regions.Repository) {
+	t.Helper()
+	putStoretestRegion(t, regs, 0)
+	putStoretestRegion(t, regs, 1)
+}
+
+// minimalQuestionContent is the smallest surveys.Content that
+// Content.Validate accepts: a plain text question needs only a type and a
+// non-blank label.
+func minimalQuestionContent(t *testing.T) surveys.Content {
+	t.Helper()
+	return surveys.Content{Type: surveys.TypeText, LabelText: "Q"}
 }
 
 // seedStudy puts a region and a study in place; every survey subtest needs
@@ -650,5 +671,132 @@ func testListResponsesOrdered(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 	if len(list) != 2 || list[0].ID != earlier.ID || list[1].ID != later.ID {
 		t.Fatalf("ListResponses = %+v, want [earlier, later] by created_at", list)
+	}
+}
+
+// testUpdateStudyRegionScoped pins design spec 3.2: the region is a query
+// condition on the update itself, so a study addressed through the wrong
+// region is ErrNotFound and the row is left untouched, not merely refused
+// after a Go-side comparison.
+func testUpdateStudyRegionScoped(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	seedSurveyRegions(t, regionRepo) // reuse this file's existing seeder
+
+	inA, err := repo.CreateStudy(ctx, 0, "A", "first", base)
+	if err != nil {
+		t.Fatalf("CreateStudy: %v", err)
+	}
+	at := base.Add(time.Hour)
+	updated, err := repo.UpdateStudy(ctx, 0, inA.ID, "A2", "second", at)
+	if err != nil {
+		t.Fatalf("UpdateStudy: %v", err)
+	}
+	if updated.Name != "A2" || updated.Description != "second" {
+		t.Errorf("updated = %+v, want A2/second", updated)
+	}
+	if !updated.UpdatedAt.Equal(at) {
+		t.Errorf("UpdatedAt = %v, want %v", updated.UpdatedAt, at)
+	}
+	if !updated.CreatedAt.Equal(base) {
+		t.Errorf("CreatedAt moved: %v, want %v", updated.CreatedAt, base)
+	}
+
+	// The same study, addressed through the wrong region, must not update
+	// and must not report success.
+	if _, updateErr := repo.UpdateStudy(ctx, 1, inA.ID, "hijacked", "", at); !errors.Is(updateErr, surveys.ErrNotFound) {
+		t.Fatalf("cross-region UpdateStudy: err = %v, want ErrNotFound", updateErr)
+	}
+	after, err := repo.GetStudy(ctx, inA.ID)
+	if err != nil {
+		t.Fatalf("GetStudy: %v", err)
+	}
+	if after.Name != "A2" {
+		t.Errorf("a refused update still wrote: name = %q", after.Name)
+	}
+}
+
+// testCreateSurveyInRegion pins design spec 3.2 for a body-borne id: the
+// study's region is a JOIN condition on the create, so a study_id from
+// another region -- exactly what POST /regions/1/surveys {"study_id":
+// <region 0's>} would send -- is ErrNotFound and writes nothing.
+func testCreateSurveyInRegion(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	seedSurveyRegions(t, regionRepo)
+
+	studyA, err := repo.CreateStudy(ctx, 0, "A", "", base)
+	if err != nil {
+		t.Fatalf("CreateStudy: %v", err)
+	}
+	def := surveys.Definition{
+		Name: "Ride quality", Available: true,
+		Questions: []surveys.QuestionDefinition{{Content: minimalQuestionContent(t)}},
+	}
+
+	created, err := repo.CreateSurveyInRegion(ctx, 0, studyA.ID, def, base)
+	if err != nil {
+		t.Fatalf("CreateSurveyInRegion: %v", err)
+	}
+	if created.StudyID != studyA.ID {
+		t.Errorf("StudyID = %d, want %d", created.StudyID, studyA.ID)
+	}
+
+	// A study_id from another region is ErrNotFound, decided by the join --
+	// this is what stops POST /regions/1/surveys {"study_id": <region 0's>}.
+	if _, createErr := repo.CreateSurveyInRegion(ctx, 1, studyA.ID, def, base); !errors.Is(createErr, surveys.ErrNotFound) {
+		t.Errorf("foreign study: err = %v, want ErrNotFound", createErr)
+	}
+	if _, createErr := repo.CreateSurveyInRegion(ctx, 0, 99999, def, base); !errors.Is(createErr, surveys.ErrNotFound) {
+		t.Errorf("unknown study: err = %v, want ErrNotFound", createErr)
+	}
+	list, err := repo.ListSurveys(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListSurveys: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("region 1 gained %d surveys from a refused create", len(list))
+	}
+}
+
+// testGetResponseInRegion pins design spec 3.2 for a response reached
+// through its survey's study's region in a single query.
+func testGetResponseInRegion(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	seedSurveyRegions(t, regionRepo)
+
+	study, err := repo.CreateStudy(ctx, 0, "A", "", base)
+	if err != nil {
+		t.Fatalf("CreateStudy: %v", err)
+	}
+	survey, err := repo.CreateSurvey(ctx, study.ID, surveys.Definition{
+		Name: "s", Available: true,
+		Questions: []surveys.QuestionDefinition{{Content: minimalQuestionContent(t)}},
+	}, base)
+	if err != nil {
+		t.Fatalf("CreateSurvey: %v", err)
+	}
+	resp, err := repo.CreateResponse(ctx, surveys.NewResponse{
+		SurveyID: survey.ID, PublicID: "pub-1", UserIdentifier: "rider-1",
+	}, base)
+	if err != nil {
+		t.Fatalf("CreateResponse: %v", err)
+	}
+
+	got, err := repo.GetResponseInRegion(ctx, 0, "pub-1")
+	if err != nil {
+		t.Fatalf("GetResponseInRegion: %v", err)
+	}
+	if got.ID != resp.ID || got.UserIdentifier != "rider-1" {
+		t.Errorf("got = %+v, want response %d", got, resp.ID)
+	}
+	// Reaching a response through another region's survey is the case the
+	// handler tests mirror at the HTTP layer.
+	if _, getErr := repo.GetResponseInRegion(ctx, 1, "pub-1"); !errors.Is(getErr, surveys.ErrNotFound) {
+		t.Errorf("across regions: err = %v, want ErrNotFound", getErr)
+	}
+	if _, getErr := repo.GetResponseInRegion(ctx, 0, "nope"); !errors.Is(getErr, surveys.ErrNotFound) {
+		t.Errorf("unknown public id: err = %v, want ErrNotFound", getErr)
 	}
 }

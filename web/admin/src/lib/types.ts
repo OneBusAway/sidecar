@@ -52,6 +52,16 @@ export interface Alert {
 
 export type KeyStatus = 'region' | 'default' | 'none';
 
+/** One admin route family a deployment may or may not have registered. */
+export type AdminFeature =
+	| 'alerts'
+	| 'pushes'
+	| 'surveys'
+	| 'ghost_bus_reports'
+	| 'alarms'
+	| 'push_registrations'
+	| 'api_keys';
+
 /** A configured region. */
 export interface Region {
 	/** Region 0 is a real region (Tampa Bay), never "unset". */
@@ -75,6 +85,16 @@ export interface Region {
 	 * 'none'    nothing configured; vehicle search will fail
 	 */
 	oba_api_key: KeyStatus;
+	/**
+	 * TRAP -- like `Alert.translations`, this is only populated by one
+	 * endpoint. `GET /regions/{id}` returns the admin route families this
+	 * deployment registered for the region; `GET /regions` (the list) never
+	 * includes it on any item. An absent array must read as "nothing is
+	 * enabled", never as "everything is" -- see `hasFeature` in lib/regions,
+	 * and never render a feature-gated control (the push Send button, a
+	 * survey editor) from a list response.
+	 */
+	features?: AdminFeature[];
 }
 
 /** The body of `GET`/`POST /session`. */

@@ -17,7 +17,7 @@ import (
 // _app/immutable/ (the SvelteKit convention this repo's cache rule keys
 // off), an unhashed _app/version.json (design spec §6.5's carve-out), and a
 // top-level static asset. Injecting fstest.MapFS rather than the real
-// embedded dist directory is deliberate: the embed is empty until Task 9
+// embedded dist directory is deliberate: the embed is empty until `make web`
 // builds the SvelteKit project, so it cannot exercise any of these rules.
 func spaTestFS() fstest.MapFS {
 	return fstest.MapFS{

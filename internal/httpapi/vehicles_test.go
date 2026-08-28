@@ -69,7 +69,7 @@ func newTestRegions(t *testing.T, regs ...regions.Region) regions.Repository {
 	// UpsertFromDirectory deliberately ignores the locally-managed columns, so
 	// any region needing one of them gets it through SetLocalFields. Gated on
 	// all three fields, not just OBAAPIKey: a caller seeding only Timezone or
-	// DefaultAgencyID (Task 7's weather tests, in particular) must not have
+	// DefaultAgencyID (the weather tests, in particular) must not have
 	// it silently dropped.
 	for _, r := range regs {
 		if r.DefaultAgencyID == "" && r.Timezone == "" && r.OBAAPIKey == "" {

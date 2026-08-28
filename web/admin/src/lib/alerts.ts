@@ -2,64 +2,14 @@
 //
 // Everything here is a pure function on plain data, deliberately: the vitest
 // project runs in `environment: 'node'` with no DOM, so logic that lives in a
-// component's markup has no automated coverage at all. The region filter, the
-// timestamp mapping and the request payloads are exactly where a mistake is
-// both easy and expensive, so they live out here where a test can reach them
-// and the components stay thin.
+// component's markup has no automated coverage at all. The timestamp mapping
+// and the request payloads are exactly where a mistake is both easy and
+// expensive, so they live out here where a test can reach them and the
+// components stay thin.
 
 import { localInputToRFC3339, instantToLocalInput } from './datetime';
 import { DEFAULT_CAUSE, DEFAULT_EFFECT, DEFAULT_SEVERITY } from './enums';
-import type { Alert, Region } from './types';
-
-/**
- * ALL_REGIONS is the region filter's "no filter" value.
- *
- * It is the empty string and never 0: region 0 is Tampa Bay, a real region.
- * Anything that tests a region id for truthiness is a bug -- selecting Tampa
- * Bay would silently mean "show everything".
- */
-export const ALL_REGIONS = '';
-
-/** regionById finds a region by id, or undefined. Handles region 0. */
-export function regionById(regions: Region[], id: number): Region | undefined {
-	return regions.find((r) => r.id === id);
-}
-
-/**
- * regionName is the display name for an alert's region. An id with no
- * matching region still renders as something an operator can act on rather
- * than as a blank cell.
- */
-export function regionName(regions: Region[], id: number): string {
-	return regionById(regions, id)?.name ?? `region ${id}`;
-}
-
-/**
- * selectedRegion resolves the alert form's region <select> value.
- *
- * The empty-string check comes FIRST and is exact. `Number('')` is 0, so
- * looking the value up before testing it would resolve "nothing chosen" to
- * region 0 -- Tampa Bay -- and hand the form Tampa's timezone, agency default
- * and identity for an alert the operator has not assigned yet.
- */
-export function selectedRegion(
-	regions: Region[],
-	value: string,
-): Region | undefined {
-	if (value === '') return undefined;
-	return regionById(regions, Number(value));
-}
-
-/**
- * filterByRegion applies the list screen's region filter. `filter` is the
- * <select>'s string value: ALL_REGIONS ('') means every region, and "0" means
- * region 0 -- not "unset".
- */
-export function filterByRegion(list: Alert[], filter: string): Alert[] {
-	if (filter === ALL_REGIONS) return list;
-	const id = Number(filter);
-	return list.filter((a) => a.region_id === id);
-}
+import type { Alert } from './types';
 
 /**
  * formatInstantForRegion renders an API instant for display in a region's own
@@ -142,8 +92,6 @@ export function fromInstant(iso: string, timezone: string): string {
 
 /** The editable state of the alert form, as strings straight off the inputs. */
 export interface AlertFormValues {
-	/** The region <select>'s value. '' means nothing chosen; '0' is Tampa Bay. */
-	regionId: string;
 	agencyId: string;
 	header: string;
 	description: string;
@@ -167,7 +115,6 @@ export interface AlertFormValues {
  */
 export function blankFormValues(): AlertFormValues {
 	return {
-		regionId: '',
 		agencyId: '',
 		header: '',
 		description: '',
@@ -193,7 +140,6 @@ export function formValuesFromAlert(
 	timezone: string,
 ): AlertFormValues {
 	return {
-		regionId: String(a.region_id),
 		agencyId: a.agency_id,
 		header: a.header,
 		description: a.description,
@@ -208,9 +154,12 @@ export function formValuesFromAlert(
 	};
 }
 
-/** The POST /alerts body. */
+/**
+ * The POST /alerts body. No region_id: the region is in the URL
+ * (`POST /regions/{regionId}/alerts`), and the server rejects one in the body
+ * with a 400 -- sending it here would be a lie a stale client could believe.
+ */
 export interface CreateAlertPayload {
-	region_id: number;
 	agency_id: string;
 	header: string;
 	description: string;
@@ -225,7 +174,7 @@ export interface CreateAlertPayload {
 
 /**
  * The PATCH /alerts/{id} body. No region_id: region is immutable through the
- * API, which is why the form's region select is disabled when editing.
+ * API, which is why AlertForm never offers a region field at all.
  */
 export interface PatchAlertPayload {
 	agency_id: string;
@@ -249,17 +198,14 @@ export interface PatchAlertPayload {
  * with the message telling the operator to set one. Re-deriving that here
  * would only give the same problem a second, worse wording.
  *
- * Throws when no region is chosen. That is the one piece of client-side
- * validation, and only because there is no sensible payload to send: an absent
- * region_id cannot be spelled 0.
+ * No region validation: the region comes from the page's URL, not a form
+ * field, so there is nothing here to choose incorrectly.
  */
 export function buildCreatePayload(
 	v: AlertFormValues,
 	timezone: string,
 ): CreateAlertPayload {
-	if (v.regionId === '') throw new Error('choose a region');
 	const payload: CreateAlertPayload = {
-		region_id: Number(v.regionId),
 		agency_id: v.agencyId.trim(),
 		header: v.header,
 		description: v.description,

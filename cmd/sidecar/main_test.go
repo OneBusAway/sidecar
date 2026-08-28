@@ -200,7 +200,7 @@ func TestBuildDeps_WiresFailDelay(t *testing.T) {
 	}
 }
 
-// TestBuildDeps_WiresAdminSurface checks the fields Task 7 adds: without
+// TestBuildDeps_WiresAdminSurface checks the admin-surface fields: without
 // Auth or AdminUI, httpapi.NewRouter either panics (Auth set, admin deps
 // missing) or never registers the admin surface at all (AdminUI nil); and
 // Now must be the real wall clock -- forbidigo does not catch a wrong clock
@@ -235,7 +235,7 @@ func TestBuildDeps_WiresAdminSurface(t *testing.T) {
 	}
 }
 
-// TestBuildDeps_WiresPushAndAlarms covers the fields Task 14 adds.
+// TestBuildDeps_WiresPushAndAlarms covers the push and alarm wiring fields.
 // httpapi.NewRouter's loud-panic contract (see router.go) requires
 // Deps.Now and Deps.Regions whenever Deps.PushRegs is set, and additionally
 // Deps.PushRegs whenever Deps.Alarms is set -- so a binary that wired
@@ -295,7 +295,7 @@ func TestBuildDeps_WiresOBADefaultKeySet(t *testing.T) {
 	})
 }
 
-// TestBuildDeps_WiresVehicles covers the fields Task 5 adds. Deps.Vehicles
+// TestBuildDeps_WiresVehicles covers the vehicle-search wiring fields. Deps.Vehicles
 // must always be set, even with an empty key -- a feed-only region with its
 // own OBAAPIKey still needs to search -- and an empty key must be flagged at
 // startup, on the theory that a silently-broken vehicle search (every region
@@ -337,7 +337,7 @@ func TestBuildDeps_WiresVehicles(t *testing.T) {
 	})
 }
 
-// TestBuildDeps_WiresWeather covers the fields Task 7 adds. Deps.Weather must
+// TestBuildDeps_WiresWeather covers the weather wiring fields. Deps.Weather must
 // always be set, even with an empty Pirate Weather key -- weather.Service
 // turns a nil provider into ErrNoProvider itself, so the handler still needs
 // wiring to answer 403 rather than never being registered at all -- and an
