@@ -795,6 +795,21 @@ to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
 
+#### Staging
+
+`render.staging.yaml` is the production Blueprint with every service and
+disk renamed (`sidecar-staging`, `gorush-staging`), gorush pointed at the
+APNs sandbox, Sentry tagged `staging`, the Litestream replica under its
+own key prefix, and `SIDECAR_REGIONS_URL` left for you to set. Point it at
+a hand-maintained directory file whose regions all carry the staging host
+as `sidecarBaseUrl` -- `deploy/regions-staging.example.json` is a starting
+point (Davis plus a synthetic region) to upload to the regions bucket --
+so TestFlight and debug builds that set the app's custom regions URL land
+on staging and production devices never do. Proxy the staging custom
+domain through Cloudflare like production's so the trusted-proxy path and
+the feed cache rule are exercised there too. Rehearse the export/import
+and a Litestream restore against staging before the first region flips.
+
 #### Migrating a region from OBACloud
 
 `sidecar-admin import --file <export.json>` loads one region's content and
