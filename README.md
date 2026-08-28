@@ -776,6 +776,18 @@ to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
 
+#### Feed caching
+
+Both renderings of the alerts feed answer with
+`Cache-Control: public, max-age=60, stale-if-error=600`. A CDN in front of
+the host (Cloudflare, when the custom domain is proxied) can therefore
+serve the feed for a minute per region and keep serving the last good
+copy for ten minutes when the origin is down -- which covers the restart
+every deploy costs a single-instance service. Cloudflare honours
+`Cache-Control` for cacheable responses only when a cache rule marks the
+path eligible; add one for `/api/v1/regions/*/alerts*`. Error responses
+carry no cache directive.
+
 #### Render
 
 `render.yaml` declares the same two services as `compose.yaml`: `sidecar` as
