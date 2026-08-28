@@ -503,10 +503,10 @@ func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduc
 		Live:  donations.NewStripeGateway(liveKey, liveProduct),
 		NewID: uuid.NewString,
 	}
-	if testKey != "" {
-		svc.Test = donations.NewStripeGateway(testKey, testProduct)
-	} else {
+	if testKey == "" {
 		logger.Warn("no --stripe-test-secret-key/SIDECAR_STRIPE_TEST_SECRET_KEY set; test_mode donation requests will fail")
+		return svc
 	}
+	svc.Test = donations.NewStripeGateway(testKey, testProduct)
 	return svc
 }

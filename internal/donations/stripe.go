@@ -16,9 +16,9 @@ const ephemeralKeyStripeVersion = "2023-08-16"
 // test keys are two instances.
 type StripeGateway struct {
 	client *stripe.Client
-	// productID is the pre-existing Stripe product recurring donations
-	// attach to; a fresh monthly price is created per donation because the
-	// amount is rider-chosen.
+	// productID is the pre-existing Stripe product recurring donations bill
+	// against; the rider-chosen amount becomes an inline price on each
+	// subscription.
 	productID string
 }
 
@@ -73,23 +73,23 @@ func (g *StripeGateway) CreateEphemeralKey(ctx context.Context, customerID strin
 	return key.Secret, nil
 }
 
-// CreateSubscription implements Gateway. The subscription is created
-// incomplete so the PaymentSheet collects payment for the first invoice;
-// its client secret comes back via the invoice's confirmation secret,
-// which is where current Stripe API versions expose it.
+// CreateSubscription implements Gateway. The rider-chosen amount is an
+// inline monthly price under the configured product, so one call creates
+// the subscription and no Price object accumulates per donation. It is
+// created incomplete so the PaymentSheet collects payment for the first
+// invoice; that invoice's confirmation secret is where current Stripe API
+// versions expose the client secret.
 func (g *StripeGateway) CreateSubscription(ctx context.Context, customerID string, amountCents int64) (string, error) {
-	price, err := g.client.V1Prices.Create(ctx, &stripe.PriceCreateParams{
-		UnitAmount: stripe.Int64(amountCents),
-		Currency:   stripe.String("usd"),
-		Recurring:  &stripe.PriceCreateRecurringParams{Interval: stripe.String("month")},
-		Product:    stripe.String(g.productID),
-	})
-	if err != nil {
-		return "", err
-	}
 	sub, err := g.client.V1Subscriptions.Create(ctx, &stripe.SubscriptionCreateParams{
-		Customer:        stripe.String(customerID),
-		Items:           []*stripe.SubscriptionCreateItemParams{{Price: stripe.String(price.ID)}},
+		Customer: stripe.String(customerID),
+		Items: []*stripe.SubscriptionCreateItemParams{{
+			PriceData: &stripe.SubscriptionCreateItemPriceDataParams{
+				Currency:   stripe.String("usd"),
+				Product:    stripe.String(g.productID),
+				UnitAmount: stripe.Int64(amountCents),
+				Recurring:  &stripe.SubscriptionCreateItemPriceDataRecurringParams{Interval: stripe.String("month")},
+			},
+		}},
 		PaymentBehavior: stripe.String("default_incomplete"),
 		Expand:          []*string{stripe.String("latest_invoice.confirmation_secret")},
 	})

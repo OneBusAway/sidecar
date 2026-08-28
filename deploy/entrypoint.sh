@@ -16,7 +16,6 @@ fi
 
 : "${SIDECAR_DB:?SIDECAR_DB must be set when backups are enabled}"
 export SIDECAR_BACKUP_PATH="${SIDECAR_BACKUP_PATH:-sidecar}"
-export SIDECAR_BACKUP_ENDPOINT="${SIDECAR_BACKUP_ENDPOINT:-}"
 export SIDECAR_BACKUP_REGION="${SIDECAR_BACKUP_REGION:-auto}"
 export SIDECAR_BACKUP_RETENTION="${SIDECAR_BACKUP_RETENTION:-168h}"
 config=/etc/litestream.yml

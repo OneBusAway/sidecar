@@ -8,8 +8,7 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
-// Sentry reports records to Sentry. Build it with NewSentry; the zero value
-// reports nothing.
+// Sentry reports records to Sentry. Build it with NewSentry.
 type Sentry struct {
 	hub *sentry.Hub
 }
@@ -35,9 +34,6 @@ func NewSentry(dsn, environment, release string) (*Sentry, error) {
 // grouped by message plus error text; every attribute is attached under a
 // "log" context.
 func (s *Sentry) Report(_ context.Context, msg string, attrs map[string]any) {
-	if s == nil || s.hub == nil {
-		return
-	}
 	ev := sentry.NewEvent()
 	ev.Level = sentry.LevelError
 	ev.Message = msg
@@ -55,7 +51,5 @@ func (s *Sentry) Report(_ context.Context, msg string, attrs map[string]any) {
 // Flush blocks until queued events are sent or timeout elapses; call it on
 // shutdown so the last error before an exit is not lost.
 func (s *Sentry) Flush(timeout time.Duration) {
-	if s != nil && s.hub != nil {
-		s.hub.Flush(timeout)
-	}
+	s.hub.Flush(timeout)
 }

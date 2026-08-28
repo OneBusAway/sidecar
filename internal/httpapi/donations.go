@@ -68,20 +68,12 @@ func (h *donationsHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// rawInt reads a JSON number or a numeric string as an int64.
+// rawInt reads a JSON number or a numeric string as an int64; json.Number
+// accepts both encodings.
 func rawInt(raw json.RawMessage) (int64, bool) {
-	if len(raw) == 0 {
-		return 0, false
-	}
 	var n json.Number
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&n); err != nil {
-		var s string
-		if json.Unmarshal(raw, &s) != nil {
-			return 0, false
-		}
-		n = json.Number(strings.TrimSpace(s))
+	if len(raw) == 0 || json.Unmarshal(raw, &n) != nil {
+		return 0, false
 	}
 	v, err := n.Int64()
 	return v, err == nil

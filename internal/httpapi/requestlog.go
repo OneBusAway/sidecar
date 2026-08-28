@@ -31,55 +31,54 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Flush keeps streaming handlers working through the wrapper.
-func (s *statusRecorder) Flush() {
-	if f, ok := s.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
+// Unwrap lets http.ResponseController reach the underlying writer's
+// optional interfaces (Flush, deadlines) through the wrapper.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // requestLog writes one line per request and turns a handler panic into a
 // logged 500 instead of a dropped connection. It logs the matched route
-// pattern, never the raw path, query string, or any header: alarm and Live
-// Activity tokens travel in the path, rider identifiers in the query, and
-// long-lived keys in Authorization (README, proxy requirements). Lines are
-// Info regardless of status -- handlers already log their own failures at
-// the level they deserve, and a 5xx caused by a client hanging up is not
-// an error -- except /healthz at Debug, so a load balancer's probes do not
-// drown everything else, and panics at Error with a stack.
-func requestLog(deps Deps, mux *http.ServeMux) http.Handler {
+// pattern (r.Pattern, which ServeMux sets on the request before dispatch),
+// never the raw path, query string, or any header: alarm and Live Activity
+// tokens travel in the path, rider identifiers in the query, and long-lived
+// keys in Authorization (README, proxy requirements). Lines are Info
+// regardless of status -- handlers already log their own failures at the
+// level they deserve, and a 5xx caused by a client hanging up is not an
+// error -- except the health check at Debug, so a load balancer's probes do
+// not drown everything else, and panics at Error with a stack.
+func requestLog(deps Deps, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w}
-		var started time.Time
-		if deps.Now != nil {
-			started = deps.Now()
+		// Every production Deps sets Now (the route groups panic without
+		// it); feed-only tests may omit it and then get zero durations.
+		now := func() time.Time {
+			if deps.Now == nil {
+				return time.Time{}
+			}
+			return deps.Now()
 		}
-		_, route := mux.Handler(r)
-		if route == "" {
-			route = "(unmatched)"
-		}
+		started := now()
 		defer func() {
+			p := recover()
+			if p != nil && rec.status == 0 {
+				rec.WriteHeader(http.StatusInternalServerError)
+			}
+			route := r.Pattern
+			if route == "" {
+				route = "(unmatched)"
+			}
 			attrs := []any{
-				"method", r.Method, "route", route, "status", rec.status,
-				"bytes", rec.bytes, "ip", deps.clientIP(r),
+				"method", r.Method, "route", route, "status", rec.status, "bytes", rec.bytes,
+				"ip", deps.clientIP(r), "ms", now().Sub(started).Milliseconds(),
 			}
-			if deps.Now != nil {
-				attrs = append(attrs, "ms", deps.Now().Sub(started).Milliseconds())
-			}
-			if p := recover(); p != nil {
-				if rec.status == 0 {
-					rec.WriteHeader(http.StatusInternalServerError)
-				}
-				attrs[5] = rec.status
+			switch {
+			case p != nil:
 				deps.Logger.Error("httpapi: panic", append(attrs, "panic", p, "stack", string(debug.Stack()))...)
-				return
-			}
-			if r.URL.Path == "/healthz" {
+			case route == "GET /healthz":
 				deps.Logger.Debug("httpapi: request", attrs...)
-				return
+			default:
+				deps.Logger.Info("httpapi: request", attrs...)
 			}
-			deps.Logger.Info("httpapi: request", attrs...)
 		}()
-		mux.ServeHTTP(rec, r)
+		next.ServeHTTP(rec, r)
 	})
 }

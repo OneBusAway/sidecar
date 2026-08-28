@@ -85,7 +85,8 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := export.Summary{Alerts: 1, Studies: 1, Surveys: 1, Questions: 2, SurveyResponses: 1, PushRegistrations: 2, GhostBusReports: 1}
+	one := export.Counts{Added: 1}
+	want := export.Summary{Alerts: one, Studies: one, Surveys: one, Questions: export.Counts{Added: 2}, SurveyResponses: one, PushRegistrations: export.Counts{Added: 2}, GhostBusReports: one}
 	if sum != want {
 		t.Fatalf("summary %+v, want %+v", sum, want)
 	}
@@ -164,7 +165,8 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDelta := export.Summary{AlertsSkipped: 1, StudiesSkipped: 1, SurveysSkipped: 1, QuestionsSkipped: 2, SurveyResponsesSkipped: 1, PushRegistrations: 1, PushRegistrationsSkipped: 2, GhostBusReportsSkipped: 1}
+	skipped := export.Counts{Skipped: 1}
+	wantDelta := export.Summary{Alerts: skipped, Studies: skipped, Surveys: skipped, Questions: export.Counts{Skipped: 2}, SurveyResponses: skipped, PushRegistrations: export.Counts{Added: 1, Skipped: 2}, GhostBusReports: skipped}
 	if sum != wantDelta {
 		t.Fatalf("delta summary %+v, want %+v", sum, wantDelta)
 	}

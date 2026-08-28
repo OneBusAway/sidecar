@@ -152,17 +152,44 @@ type GhostBusReport struct {
 	CreatedAt                time.Time       `json:"created_at"`
 }
 
-// Summary counts what an import did. Skipped rows already existed (same
+// Counts is one kind's import tally. Skipped rows already existed (same
 // id, public id, or (region, token)), which is what makes re-running an
 // import on a later export a delta rather than a conflict.
+type Counts struct {
+	Added, Skipped int
+}
+
+// Tally records one insert attempt: n is the rows-affected count of an
+// INSERT OR IGNORE, so 0 means the row already existed. It reports whether
+// the row landed.
+func (c *Counts) Tally(n int64) bool {
+	if n == 0 {
+		c.Skipped++
+		return false
+	}
+	c.Added++
+	return true
+}
+
+// Summary counts what an import did, per kind.
 type Summary struct {
-	Alerts, AlertsSkipped                       int
-	Studies, StudiesSkipped                     int
-	Surveys, SurveysSkipped                     int
-	Questions, QuestionsSkipped                 int
-	SurveyResponses, SurveyResponsesSkipped     int
-	PushRegistrations, PushRegistrationsSkipped int
-	GhostBusReports, GhostBusReportsSkipped     int
+	Alerts, Studies, Surveys, Questions, SurveyResponses, PushRegistrations, GhostBusReports Counts
+}
+
+// Lines renders the summary one kind per line, for the CLI.
+func (s Summary) Lines() []string {
+	kinds := []struct {
+		label string
+		c     Counts
+	}{
+		{"alerts", s.Alerts}, {"studies", s.Studies}, {"surveys", s.Surveys}, {"questions", s.Questions},
+		{"survey responses", s.SurveyResponses}, {"push registrations", s.PushRegistrations}, {"ghost bus reports", s.GhostBusReports},
+	}
+	out := make([]string, len(kinds))
+	for i, k := range kinds {
+		out[i] = fmt.Sprintf("  %-18s %d added, %d already present", k.label, k.c.Added, k.c.Skipped)
+	}
+	return out
 }
 
 // Validate checks the document's framing and the invariants the stores

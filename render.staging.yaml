@@ -14,7 +14,7 @@ envVarGroups:
       # variable."), so this is auto-generated instead: base64, no ':' or
       # whitespace, which satisfies gorush's header split. After the first
       # deploy, copy the generated value from Dashboard -> Environment
-      # Groups -> sidecar-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
+      # Groups -> sidecar-staging-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
       # as "authorization:<value>" (see the comment block below).
       - key: SIDECAR_GORUSH_WEBHOOK_SECRET
         generateValue: true
@@ -37,7 +37,7 @@ services:
       mountPath: /data
       sizeGB: 1
     envVars:
-      - fromGroup: sidecar-shared
+      - fromGroup: sidecar-staging-shared
       - key: PORT
         value: "8080"
       - key: SIDECAR_DB
@@ -96,7 +96,7 @@ services:
     plan: starter
     region: oregon
     envVars:
-      - fromGroup: sidecar-shared
+      - fromGroup: sidecar-staging-shared
       - key: GORUSH_CORE_PORT
         value: "8088"
       # gorush ignores PORT, but setting it makes Render's port detection
@@ -130,7 +130,7 @@ services:
       #   GORUSH_CORE_FEEDBACK_HOOK_URL = http://<GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT>/webhooks/gorush
       #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<value auto-generated for
       #     SIDECAR_GORUSH_WEBHOOK_SECRET -- Dashboard -> Environment Groups ->
-      #     sidecar-shared>
+      #     sidecar-staging-shared>
       - key: GORUSH_CORE_FEEDBACK_HOOK_URL
         sync: false
       - key: GORUSH_CORE_FEEDBACK_HEADER

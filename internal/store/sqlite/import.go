@@ -63,11 +63,9 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		if err != nil {
 			return sum, fmt.Errorf("sqlite: import alert %d: %w", a.ID, err)
 		}
-		if n == 0 {
-			sum.AlertsSkipped++
+		if !sum.Alerts.Tally(n) {
 			continue
 		}
-		sum.Alerts++
 		for _, t := range a.Translations {
 			lang := alerts.NormalizeLanguage(t.Language)
 			for _, f := range []struct {
@@ -98,11 +96,7 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		if err != nil {
 			return sum, fmt.Errorf("sqlite: import study %d: %w", st.ID, err)
 		}
-		if n == 0 {
-			sum.StudiesSkipped++
-		} else {
-			sum.Studies++
-		}
+		sum.Studies.Tally(n)
 		for _, sv := range st.Surveys {
 			stops, err := listToNull(sv.VisibleStopList)
 			if err != nil {
@@ -123,26 +117,18 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 			if err != nil {
 				return sum, fmt.Errorf("sqlite: import survey %d: %w", sv.ID, err)
 			}
-			if n == 0 {
-				sum.SurveysSkipped++
-			} else {
-				sum.Surveys++
-			}
+			sum.Surveys.Tally(n)
 			for _, qd := range sv.Questions {
 				content := prepared.questions[qd.ID]
 				n, err := q.ImportSurveyQuestion(ctx, gen.ImportSurveyQuestionParams{
 					ID: qd.ID, SurveyID: sv.ID, Position: qd.Position, Required: qd.Required,
-					QuestionType: content.Type, Content: prepared.questionJSON[qd.ID],
+					QuestionType: content.typ, Content: content.json,
 					CreatedAt: nowUnix, UpdatedAt: nowUnix,
 				})
 				if err != nil {
 					return sum, fmt.Errorf("sqlite: import question %d (survey %d): %w", qd.ID, sv.ID, err)
 				}
-				if n == 0 {
-					sum.QuestionsSkipped++
-				} else {
-					sum.Questions++
-				}
+				sum.Questions.Tally(n)
 			}
 		}
 	}
@@ -151,18 +137,14 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		n, err := q.ImportSurveyResponse(ctx, gen.ImportSurveyResponseParams{
 			SurveyID: r.SurveyID, PublicID: r.PublicID, UserIdentifier: r.UserIdentifier,
 			StopIdentifier: nullString(r.StopIdentifier),
-			StopLatitude:   nullFloat(r.StopLatitude), StopLongitude: nullFloat(r.StopLongitude),
+			StopLatitude:   floatToNull(r.StopLatitude), StopLongitude: floatToNull(r.StopLongitude),
 			Answers:   prepared.answers[i],
 			CreatedAt: orNow(r.CreatedAt, nowUnix), UpdatedAt: orNow(r.UpdatedAt, nowUnix),
 		})
 		if err != nil {
 			return sum, fmt.Errorf("sqlite: import survey response %s: %w", r.PublicID, err)
 		}
-		if n == 0 {
-			sum.SurveyResponsesSkipped++
-		} else {
-			sum.SurveyResponses++
-		}
+		sum.SurveyResponses.Tally(n)
 	}
 
 	for _, p := range doc.PushRegistrations {
@@ -174,11 +156,7 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		if err != nil {
 			return sum, fmt.Errorf("sqlite: import push registration: %w", err)
 		}
-		if n == 0 {
-			sum.PushRegistrationsSkipped++
-		} else {
-			sum.PushRegistrations++
-		}
+		sum.PushRegistrations.Tally(n)
 	}
 
 	for _, g := range doc.GhostBusReports {
@@ -187,18 +165,18 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 			attempts = 3 // matches a report the enrichment loop gave up on
 		}
 		snapshot := ""
-		if g.SnapshotStatus == "captured" && len(g.Snapshot) > 0 && string(g.Snapshot) != "null" {
+		if g.SnapshotStatus == "captured" && rawPresent(g.Snapshot) {
 			snapshot = string(g.Snapshot)
 		}
 		n, err := q.ImportGhostBusReport(ctx, gen.ImportGhostBusReportParams{
 			RegionID: doc.RegionID, PublicIdentifier: g.PublicID, UserIdentifier: g.UserIdentifier,
 			TripIdentifier: g.TripIdentifier, ServiceDate: g.ServiceDateMS,
 			RouteIdentifier: g.RouteIdentifier, StopIdentifier: g.StopIdentifier, VehicleIdentifier: g.VehicleIdentifier,
-			StopSequence: nullInt(g.StopSequence), Predicted: nullBool(g.Predicted),
-			ScheduleDeviationMinutes: nullInt(g.ScheduleDeviationMinutes), WaitDurationMinutes: g.WaitDurationMinutes,
-			Comment: g.Comment, UserLatitude: nullFloat(g.UserLatitude), UserLongitude: nullFloat(g.UserLongitude),
-			ScheduledArrivalAt: nullInt(g.ScheduledArrivalMS), PredictedArrivalAt: nullInt(g.PredictedArrivalMS),
-			PredictionLastUpdatedAt: nullInt(g.PredictionLastUpdatedMS),
+			StopSequence: int64ToNullInt64(g.StopSequence), Predicted: boolToNullInt64(g.Predicted),
+			ScheduleDeviationMinutes: int64ToNullInt64(g.ScheduleDeviationMinutes), WaitDurationMinutes: g.WaitDurationMinutes,
+			Comment: g.Comment, UserLatitude: floatToNull(g.UserLatitude), UserLongitude: floatToNull(g.UserLongitude),
+			ScheduledArrivalAt: int64ToNullInt64(g.ScheduledArrivalMS), PredictedArrivalAt: int64ToNullInt64(g.PredictedArrivalMS),
+			PredictionLastUpdatedAt: int64ToNullInt64(g.PredictionLastUpdatedMS),
 			SnapshotStatus:          g.SnapshotStatus, SnapshotJson: snapshot,
 			SnapshotCapturedAt: timeToNullUnix(g.SnapshotCapturedAt), SnapshotAttempts: attempts,
 			CreatedAt: orNow(g.CreatedAt, nowUnix), UpdatedAt: nowUnix,
@@ -206,11 +184,7 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		if err != nil {
 			return sum, fmt.Errorf("sqlite: import ghost bus report %s: %w", g.PublicID, err)
 		}
-		if n == 0 {
-			sum.GhostBusReportsSkipped++
-		} else {
-			sum.GhostBusReports++
-		}
+		sum.GhostBusReports.Tally(n)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -222,20 +196,20 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 // preparedImport holds the per-row derivations that can fail, computed
 // before the transaction opens so validation never leaves a partial import.
 type preparedImport struct {
-	alerts       []preparedAlert
-	questions    map[int64]surveys.Content
-	questionJSON map[int64]string
-	answers      []string
+	alerts    []preparedAlert
+	questions map[int64]preparedQuestion
+	answers   []string
 }
+
+type preparedQuestion struct{ typ, json string }
 
 type preparedAlert struct{ cause, effect, severity string }
 
 func prepareImport(doc *export.Document) (preparedImport, error) {
 	p := preparedImport{
-		alerts:       make([]preparedAlert, len(doc.Alerts)),
-		questions:    make(map[int64]surveys.Content),
-		questionJSON: make(map[int64]string),
-		answers:      make([]string, len(doc.SurveyResponses)),
+		alerts:    make([]preparedAlert, len(doc.Alerts)),
+		questions: make(map[int64]preparedQuestion),
+		answers:   make([]string, len(doc.SurveyResponses)),
 	}
 	for i, a := range doc.Alerts {
 		var err error
@@ -263,14 +237,13 @@ func prepareImport(doc *export.Document) (preparedImport, error) {
 				if err != nil {
 					return p, fmt.Errorf("export: question %d: %w", qd.ID, err)
 				}
-				p.questions[qd.ID] = c
-				p.questionJSON[qd.ID] = string(raw)
+				p.questions[qd.ID] = preparedQuestion{typ: c.Type, json: string(raw)}
 			}
 		}
 	}
 	for i, r := range doc.SurveyResponses {
 		var answers []surveys.Answer
-		if len(r.Answers) > 0 && string(r.Answers) != "null" {
+		if rawPresent(r.Answers) {
 			if err := json.Unmarshal(r.Answers, &answers); err != nil {
 				return p, fmt.Errorf("export: survey response %s: answers: %w", r.PublicID, err)
 			}
@@ -282,6 +255,11 @@ func prepareImport(doc *export.Document) (preparedImport, error) {
 		p.answers[i] = encoded
 	}
 	return p, nil
+}
+
+// rawPresent reports whether a JSON value was supplied and is not null.
+func rawPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(raw) != "null"
 }
 
 func orNow(t time.Time, now int64) int64 {
@@ -300,29 +278,4 @@ func firstNonEmpty(a, b string) string {
 
 func nullString(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
-}
-
-func nullFloat(f *float64) sql.NullFloat64 {
-	if f == nil {
-		return sql.NullFloat64{}
-	}
-	return sql.NullFloat64{Float64: *f, Valid: true}
-}
-
-func nullInt(n *int64) sql.NullInt64 {
-	if n == nil {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: *n, Valid: true}
-}
-
-func nullBool(b *bool) sql.NullInt64 {
-	if b == nil {
-		return sql.NullInt64{}
-	}
-	var n int64
-	if *b {
-		n = 1
-	}
-	return sql.NullInt64{Int64: n, Valid: true}
 }
