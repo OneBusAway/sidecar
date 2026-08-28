@@ -190,7 +190,7 @@ GET    /api/admin/v1/regions/{regionId}/surveys/{id}/responses      survey respo
 GET    /api/admin/v1/regions/{regionId}/ghost_bus_reports           ghost bus reports, JSON (also .../ghost_bus_reports.csv, .../{publicId})
 GET    /api/admin/v1/regions/{regionId}/alarms                      alarms, read-only: also GET .../{id}
 GET    /api/admin/v1/regions/{regionId}/push_registrations/count    push registration audience counts, aggregate only
-POST   /api/admin/v1/regions/{regionId}/api_keys                    region API keys: mint, list (also DELETE .../{keyId})
+GET    /api/admin/v1/regions/{regionId}/api_keys                    region API keys: list (also POST to mint, DELETE .../{keyId} to revoke)
 ```
 
 Studies and surveys are the CRUD family behind `sidecar-admin study`/`survey`
@@ -620,7 +620,7 @@ cookies are ignored entirely once an `Authorization` header is present):
   read a single alert, survey response, or ghost bus report** -- no tenant
   data is reachable through a service principal at all. Recovery does not
   require hunting for which keys are legitimate: `principal revoke` (below)
-  takes every key the principal minted with it in one transaction, so the
+  takes every key the principal minted with it, so the
   fix is revoke the principal, mint a new one, and re-provision every region
   from scratch.
 
@@ -695,7 +695,7 @@ also exactly the set `principal revoke` clears out by default:
 
 The manually-minted key (`2`) is untouched -- only the key the principal
 itself minted (`1`) went away. `principal revoke` takes every live key the
-principal minted with it in one transaction and prints their ids, so the
+principal minted with it and prints their ids, so the
 operator on the other end knows exactly which credentials just went dead;
 pass `--keep-keys` for a planned rotation of a principal whose existing keys
 are known to be fine.

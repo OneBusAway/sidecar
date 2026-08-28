@@ -274,7 +274,8 @@ func definitionFromRequest(doc surveys.Document, region regions.Region) (surveys
 // The document is decoded strictly (decodeJSONStrict): see json.go for why
 // this is the one authoring body in the whole admin API that rejects an
 // unknown field rather than ignoring it. study_id resolves through
-// CreateSurveyInRegion's own JOIN against the region, so a study_id
+// CreateSurveyInRegion's own region-scoped guard query, run inside the same
+// transaction as the insert, so a study_id
 // belonging to another region -- or to no study at all -- is ErrNotFound
 // decided in SQL, never a loader-then-compare a later refactor could drop.
 func (h *adminSurveysHandler) createSurvey(w http.ResponseWriter, r *http.Request) {

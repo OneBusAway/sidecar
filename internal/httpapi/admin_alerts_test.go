@@ -15,6 +15,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
@@ -478,6 +479,51 @@ func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
 				t.Errorf("%s %s with %s: status = %d body = %s; allowed = %v",
 					method, target, k.kind, rec.Code, rec.Body.String(), allowed)
 			}
+		}
+	}
+}
+
+// TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys pins WHICH routes are
+// operator-only, derived from the URL pattern rather than from the allow-list
+// being checked.
+//
+// TestAdminRoutes_PrincipalAllowLists compares the live table against behavior
+// the same table drives, so it is self-consistent: mutating operatorOnly to
+// include principalRegionKey would change both sides and still pass. The three
+// routes below are the ones the design spec (section 4.5) says a leaked region
+// key must never reach -- sending a push (attacker text delivered to every
+// device in the region), cancelling one, and the cross-region region list --
+// so they get an assertion that does not depend on the value it is guarding.
+func TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys(t *testing.T) {
+	t.Parallel()
+
+	// Derived from the pattern, deliberately, not from principal.go.
+	operatorOnlyPatterns := map[string]bool{
+		"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes":            true,
+		"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}": true,
+		"GET /api/admin/v1/regions":                                           true,
+	}
+
+	f := newFullAdminFixture(t)
+	seen := map[string]bool{}
+	for _, rt := range adminRoutes(f.deps) {
+		if !operatorOnlyPatterns[rt.pattern] {
+			continue
+		}
+		seen[rt.pattern] = true
+		if rt.allowed.has(principalRegionKey) {
+			t.Errorf("route %q admits a region key; the spec makes it operator-only", rt.pattern)
+		}
+		if rt.allowed.has(principalService) {
+			t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
+		}
+		if !rt.allowed.has(principalOperator) {
+			t.Errorf("route %q does not admit an operator, so nobody can call it", rt.pattern)
+		}
+	}
+	for pattern := range operatorOnlyPatterns {
+		if !seen[pattern] {
+			t.Errorf("route %q is no longer in the table; this test has stopped guarding it", pattern)
 		}
 	}
 }
@@ -1603,6 +1649,56 @@ func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, e
 	return alarms.Alarm{}, errStoreBroken
 }
 
+// failingAPIKeys fails every call, so the key-management handlers' own
+// store-error paths are swept alongside the other six repositories. Without
+// it those three routes are not merely untested here -- they are absent from
+// adminRoutes entirely, since the family registers only when Deps.APIKeys is
+// set, so the sweep would walk past the one family that mints live
+// credentials.
+type failingAPIKeys struct{}
+
+func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Actor, time.Time) (apikey.RegionKey, error) {
+	return apikey.RegionKey{}, errStoreBroken
+}
+
+func (failingAPIKeys) GetRegionKeyByHash(context.Context, string) (apikey.RegionKey, error) {
+	return apikey.RegionKey{}, errStoreBroken
+}
+
+func (failingAPIKeys) ListRegionKeys(context.Context, int64) ([]apikey.RegionKey, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) ListRegionKeysByCreator(context.Context, apikey.Actor) ([]apikey.RegionKey, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) RevokeRegionKey(context.Context, int64, int64, apikey.Actor, time.Time) error {
+	return errStoreBroken
+}
+
+func (failingAPIKeys) RevokeRegionKeysByCreator(context.Context, apikey.Actor, apikey.Actor, time.Time) ([]int64, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) TouchRegionKey(context.Context, int64, time.Time) error { return errStoreBroken }
+
+func (failingAPIKeys) CreatePrincipal(context.Context, string, string, time.Time) (apikey.ServicePrincipal, error) {
+	return apikey.ServicePrincipal{}, errStoreBroken
+}
+
+func (failingAPIKeys) GetPrincipalByHash(context.Context, string) (apikey.ServicePrincipal, error) {
+	return apikey.ServicePrincipal{}, errStoreBroken
+}
+
+func (failingAPIKeys) ListPrincipals(context.Context) ([]apikey.ServicePrincipal, error) {
+	return nil, errStoreBroken
+}
+
+func (failingAPIKeys) RevokePrincipal(context.Context, int64, time.Time) error { return errStoreBroken }
+
+func (failingAPIKeys) TouchPrincipal(context.Context, int64, time.Time) error { return errStoreBroken }
+
 // TestAdminAPI_StoreFailuresAre500 pins the last rule of the API contract: a
 // broken store is a logged 500 with one fixed body on every route, never a 4xx
 // that would send an operator hunting for a client mistake, and never the
@@ -1634,6 +1730,7 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		Surveys:        failingSurveys{},
 		GhostBus:       failingGhostBus{},
 		Alarms:         failingAlarms{},
+		APIKeys:        failingAPIKeys{},
 	}
 	h := NewRouter(deps)
 	cookie := adminLogin(t, h)
@@ -1658,6 +1755,8 @@ func TestAdminAPI_StoreFailuresAre500(t *testing.T) {
 		case method == http.MethodPost && strings.HasSuffix(target, "/studies"):
 			body = `{"name":"x"}`
 		case method == http.MethodPatch && strings.Contains(target, "/studies/"):
+			body = `{"name":"x"}`
+		case method == http.MethodPost && strings.HasSuffix(target, "/api_keys"):
 			body = `{"name":"x"}`
 		case method == http.MethodPost && strings.HasSuffix(target, "/surveys"):
 			body = `{"study_id":1,"name":"x"}`

@@ -34,9 +34,10 @@ const (
 	// PrincipalPrefix is the first segment of a service principal's plaintext.
 	PrincipalPrefix = "obasp"
 	// MaxRawLen bounds the credential itself -- the part of the header after
-	// "Bearer " -- not the whole header value. A real key is 51 bytes at
-	// most; the cap exists so an unauthenticated caller cannot make the
-	// server SHA-256 a megabyte for free (spec section 4.2).
+	// "Bearer " -- not the whole header value. A real key is 51 bytes plus
+	// the region id's digits, so well under this cap for any region id the
+	// directory could carry; the cap exists so an unauthenticated caller
+	// cannot make the server SHA-256 a megabyte for free (spec section 4.2).
 	MaxRawLen = 128
 	// secretBytes is the entropy behind every key. 256 bits is what makes
 	// salting and constant-time comparison unnecessary (spec section 2.6).

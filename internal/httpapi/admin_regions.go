@@ -69,8 +69,10 @@ func (h *adminRegionsHandler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, h.deps.Logger, http.StatusOK, out)
 }
 
-// get handles GET /api/admin/v1/regions/{regionId}. It is the one region
-// endpoint a region key may call, and it carries "features" so a consumer
+// get handles GET /api/admin/v1/regions/{regionId}. It is one of the two
+// region-family endpoints a region key may call -- PATCH on the same path is
+// the other, and GET /regions, the cross-region list, is operator-only. It
+// carries "features" so a consumer
 // can distinguish "this family is not enabled here" from a 404 on a route
 // that was never registered (design spec section 5.1).
 func (h *adminRegionsHandler) get(w http.ResponseWriter, r *http.Request) {
