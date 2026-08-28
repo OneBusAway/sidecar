@@ -10,6 +10,11 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 )
 
+// seedAlarmServiceDate is the epoch-millisecond ServiceDate every seedAlarm
+// call writes, so tests asserting the field passes through unchanged have a
+// fixed value to compare against.
+const seedAlarmServiceDate = int64(1754809200000)
+
 // seedAlarm writes an alarm straight to the store. These tests are about the
 // admin read routes, so authoring goes through the repository rather than
 // through the rider-facing v1/v2 endpoints, whose own tests already cover
@@ -19,7 +24,7 @@ func (f *adminFixture) seedAlarm(t *testing.T, regionID int64, token, userPushID
 	a, err := f.store.Alarms().Create(context.Background(), alarms.NewAlarm{
 		RegionID: regionID, Token: token, APIVersion: 2, UserPushID: userPushID,
 		OperatingSystem: "ios", StopID: "1_570", TripID: "1_604370",
-		ServiceDate: 1754809200000, VehicleID: "1_4361",
+		ServiceDate: seedAlarmServiceDate, VehicleID: "1_4361",
 		SecondsBefore: 600, Message: "The 44 to Ballard leaves in 10 minutes",
 	}, testNow)
 	if err != nil {
@@ -59,9 +64,11 @@ func TestAdminAlarms_OmitsPushCredentials(t *testing.T) {
 		"id", "api_version", "operating_system", "stop_id", "trip_id", "service_date",
 		"vehicle_id", "stop_sequence", "seconds_before", "message", "failure_count", "created_at",
 	})
-	// service_date is epoch milliseconds and passes through as an integer.
-	if _, ok := one["service_date"].(float64); !ok {
-		t.Errorf("service_date = %#v, want a JSON number", one["service_date"])
+	// service_date is epoch milliseconds and passes through unchanged, not
+	// just as a JSON number: a handler that divided by 1000 (or otherwise
+	// reformatted it) would still satisfy a type-only check.
+	if got := int64(num(t, one, "service_date")); got != seedAlarmServiceDate {
+		t.Errorf("service_date = %v, want the integer %d unchanged", one["service_date"], seedAlarmServiceDate)
 	}
 }
 

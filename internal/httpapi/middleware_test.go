@@ -24,9 +24,10 @@ func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // stubAuth is an in-memory auth.Repository. These handler tests are about
 // HTTP semantics -- status codes, cookies, headers, indistinguishable failure
-// bodies -- so they use maps instead of SQLite; Task 6 exercises the real
-// store. Every field is guarded by mu because -race runs the suite and the
-// stub is shared across a request's middleware and handler.
+// bodies -- so they use maps instead of SQLite; other tests in this package
+// exercise the real store directly. Every field is guarded by mu because
+// -race runs the suite and the stub is shared across a request's middleware
+// and handler.
 type stubAuth struct {
 	mu          sync.Mutex
 	usersByName map[string]auth.User

@@ -90,9 +90,11 @@ func (h *authMiddleware) scopedRegion(next http.Handler, keyAdmin bool) http.Han
 			return
 		}
 
-		allowed := p.canAccessRegion(id)
+		var allowed bool
 		if keyAdmin {
 			allowed = p.kind == principalOperator || p.kind == principalService
+		} else {
+			allowed = p.canAccessRegion(id)
 		}
 		if !allowed {
 			h.regionNotFound(w, r, "principal may not access this region")

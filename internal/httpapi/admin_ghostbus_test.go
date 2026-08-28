@@ -261,7 +261,7 @@ func TestAdminGhostBus_CSVContract(t *testing.T) {
 	// The guarded cell has no comma, quote, or newline of its own, so
 	// encoding/csv leaves it unquoted -- the literal apostrophe-prefixed
 	// text appears verbatim in the body, with no wrapping double quote to
-	// look for (Task 9 learned this the hard way).
+	// look for.
 	if !strings.Contains(rec.Body.String(), "'=cmd") {
 		t.Errorf("rider comment not defused:\n%s", rec.Body.String())
 	}

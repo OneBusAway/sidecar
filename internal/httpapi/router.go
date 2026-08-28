@@ -590,14 +590,6 @@ func registerAdminRoutes(mux routeRegistrar, deps Deps) {
 // deployment (design spec section 5.1), so a consumer can tell "family not
 // enabled here" from a 404. It is derived from the same Deps fields the
 // route table gates on, so the two cannot drift.
-//
-// Read that last sentence as the destination, not today's state: only
-// "pushes" is currently gated on a field the admin route table consults.
-// "push_registrations", "surveys", "ghost_bus_reports" and "alarms" are gated
-// on fields that today back only the rider-facing routes, so this list
-// anticipates admin families that arrive in later tasks. Until they do, a
-// consumer that trusts a name here still meets the ordinary 404 of an
-// unregistered route -- an over-report, never an under-report.
 func adminFeatures(deps Deps) []string {
 	features := []string{"alerts"}
 	if alertPushRoutesEnabled(deps) {

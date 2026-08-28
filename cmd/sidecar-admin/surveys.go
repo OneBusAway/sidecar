@@ -317,8 +317,8 @@ func surveyDelete(ctx context.Context, store *sqlite.Store, args []string) error
 }
 
 // surveyResponses writes the survey's responses as long-format CSV (one row
-// per answer; see surveys.WriteResponsesCSV for the format itself, moved
-// there in task 9 so the HTTP admin API's CSV route can share it).
+// per answer; see surveys.WriteResponsesCSV for the format itself, so the
+// admin CSV route can share it).
 func surveyResponses(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
 	id, err := parseSurveyIDArg("survey responses", args)
 	if err != nil {

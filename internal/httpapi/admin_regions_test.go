@@ -12,8 +12,8 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
-// regionJSONFields are the field names the SPA's region screen (task 11) is
-// written against.
+// regionJSONFields are the field names the SPA's region screen is written
+// against.
 var regionJSONFields = []string{
 	"id", "name", "oba_base_url", "sidecar_base_url", "language", "active",
 	"default_agency_id", "timezone", "latitude", "longitude", "oba_api_key",

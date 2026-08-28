@@ -635,17 +635,17 @@ mints region keys the same way OBACloud will, over HTTP:
 ```sh
 # An operator mints the deployment-wide principal once, up front.
 ./bin/sidecar-admin --db ./sidecar.db principal create --name "obacloud"
-# obasp_972so11ncVZAgGSHJAActb4Qo6CiZCNggdjCNl-t6uQ
+# obasp_972so11ncVZAgGSH…
 # id: 1  name: obacloud
 
 # The consumer holding that principal mints a key scoped to one region by
 # calling the sidecar itself -- this is the provisioning flow OBACloud's
 # integration automates (see below):
 curl -s -X POST https://sidecar.example.org/api/admin/v1/regions/1/api_keys \
-  -H "Authorization: Bearer obasp_972so11ncVZAgGSHJAActb4Qo6CiZCNggdjCNl-t6uQ" \
+  -H "Authorization: Bearer obasp_972so11ncVZAgGSH…" \
   -H "Content-Type: application/json" \
   -d '{"name":"obacloud rails1"}'
-# {"id":1,"name":"obacloud rails1","key":"obask_1_L_RvltB_P6G8UwZ9_QljL8RlQvfd-l2Ir2tl4m-7wtU", …}
+# {"id":1,"name":"obacloud rails1","key":"obask_1_L_RvltB_P6G8UwZ9…", …}
 ```
 
 An operator can also mint a region key directly, without a principal, for
@@ -653,7 +653,7 @@ manual testing or a deployment with no external consumer yet:
 
 ```sh
 ./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name "manual test key"
-# obask_1_WlDL9LeQxtC1KYwwnuy7ry8zqA4MVFHy8ahZOlPq3XM
+# obask_1_WlDL9LeQxtC1KYww…
 # id: 2  name: manual test key
 
 ./bin/sidecar-admin --db ./sidecar.db key list --region 1
