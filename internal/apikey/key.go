@@ -43,10 +43,22 @@ const (
 	secretBytes = 32
 )
 
-// regionSegment is the exact grammar of the region id in a region key's
-// plaintext: no leading zeros, no sign, no whitespace (spec section 3.1).
-// The same grammar governs the {regionId} path segment.
+// regionSegment is the exact grammar of a region id wherever one is spelled
+// out: no leading zeros, no sign, no whitespace (spec section 3.1). It
+// governs both the region id inside a region key's plaintext and the
+// {regionId} path segment of the admin API -- ValidRegionSegment is what the
+// HTTP layer calls, so the two cannot drift into accepting different
+// spellings of the same tenant.
 var regionSegment = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+
+// ValidRegionSegment reports whether s spells a region id in the one form
+// this system accepts. It is exported for internal/httpapi's {regionId}
+// middleware; see regionSegment for why they share one grammar.
+//
+// It does NOT report whether the id fits an int64 -- a caller still has to
+// strconv.ParseInt and handle the range error, since a digit string can pass
+// this and still overflow.
+func ValidRegionSegment(s string) bool { return regionSegment.MatchString(s) }
 
 // newSecret returns 43 characters of raw URL-safe base64 over 32 random bytes.
 func newSecret() (string, error) {

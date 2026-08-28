@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strconv"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/surveys"
@@ -37,12 +37,15 @@ const (
 // (design spec section 2.5).
 const regionNotFoundBody = "region not found"
 
-// adminRegionSegment is the exact grammar of {regionId}: no leading zeros,
-// no sign, no whitespace. It deliberately differs from the rider feed's
-// lenient ParseRegionSegment, which the admin API does not reuse -- a feed
-// that shrugs at "01" costs a rider nothing, while an admin API that does
-// hands a caller two spellings of the same tenant.
-var adminRegionSegment = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+// The grammar of {regionId} -- no leading zeros, no sign, no whitespace --
+// lives in apikey.ValidRegionSegment, because a region key's plaintext spells
+// a region id the same way and the two must not drift into accepting
+// different spellings of the same tenant.
+//
+// It deliberately differs from the rider feed's lenient ParseRegionSegment,
+// which the admin API does not reuse: a feed that shrugs at "01" costs a
+// rider nothing, while an admin API that does hands a caller two spellings of
+// the same tenant.
 
 // requireRegion is the tenancy fence for every region-scoped route except
 // the key-management family. It parses {regionId}, checks the principal,
@@ -79,7 +82,7 @@ func (h *authMiddleware) scopedRegion(next http.Handler, keyAdmin bool) http.Han
 		}
 
 		raw := r.PathValue("regionId")
-		if !adminRegionSegment.MatchString(raw) {
+		if !apikey.ValidRegionSegment(raw) {
 			h.regionNotFound(w, r, "malformed region segment")
 			return
 		}

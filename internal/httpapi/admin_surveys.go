@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 )
 
@@ -255,6 +256,19 @@ func (h *adminSurveysHandler) listSurveys(w http.ResponseWriter, r *http.Request
 	writeJSON(w, h.deps.Logger, http.StatusOK, out)
 }
 
+// definitionFromRequest converts an authoring document into a validated
+// Definition, reading its dates against the request's region.
+//
+// The region only ever supplies the timezone named in a parse error --
+// parseInstantJSON still requires an explicit UTC offset, so nothing is
+// interpreted in the region's zone. It exists so POST and PUT cannot drift
+// on how a document's dates are read.
+func definitionFromRequest(doc surveys.Document, region regions.Region) (surveys.Definition, error) {
+	return surveys.DefinitionFromDocument(doc, func(s string) (time.Time, error) {
+		return parseInstantJSON(s, region)
+	})
+}
+
 // createSurvey handles POST /api/admin/v1/regions/{regionId}/surveys.
 //
 // The document is decoded strictly (decodeJSONStrict): see json.go for why
@@ -281,9 +295,7 @@ func (h *adminSurveysHandler) createSurvey(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, h.deps.Logger, http.StatusUnprocessableEntity, "study_id is required")
 		return
 	}
-	def, err := surveys.DefinitionFromDocument(req.Document, func(s string) (time.Time, error) {
-		return parseInstantJSON(s, region)
-	})
+	def, err := definitionFromRequest(req.Document, region)
 	if err != nil {
 		writeJSONError(w, h.deps.Logger, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -341,9 +353,7 @@ func (h *adminSurveysHandler) putSurvey(w http.ResponseWriter, r *http.Request) 
 			"study_id cannot be changed; a survey cannot be moved between studies")
 		return
 	}
-	def, err := surveys.DefinitionFromDocument(req.Document, func(s string) (time.Time, error) {
-		return parseInstantJSON(s, region)
-	})
+	def, err := definitionFromRequest(req.Document, region)
 	if err != nil {
 		writeJSONError(w, h.deps.Logger, http.StatusUnprocessableEntity, err.Error())
 		return

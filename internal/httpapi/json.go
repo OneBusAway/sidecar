@@ -67,20 +67,7 @@ func serverErrorJSON(w http.ResponseWriter, logger *slog.Logger, op string, err 
 // a newer SPA sending a field this server has not learned about yet should not
 // have its request rejected outright.
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
-		// http.MaxBytesReader's error wraps a message written for a Go
-		// developer ("http: request body too large"), not for whoever hit
-		// this endpoint -- every other 4xx on this API is copy written for an
-		// operator, and this is the one place that was leaking Go internals
-		// instead.
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			return errBodyTooLarge
-		}
-		return fmt.Errorf("invalid JSON body: %w", err)
-	}
-	return nil
+	return decodeJSONBody(w, r, maxBytes, dst, false)
 }
 
 // decodeJSONStrict is decodeJSON with DisallowUnknownFields. It exists for
@@ -90,10 +77,27 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 // lenient, so a newer SPA sending a field this server has not learned about
 // yet is not rejected outright -- do not "unify" the two.
 func decodeJSONStrict(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	return decodeJSONBody(w, r, maxBytes, dst, true)
+}
+
+// decodeJSONBody is the shared body of decodeJSON and decodeJSONStrict. The
+// two differ by exactly one decoder setting, and that difference is a
+// deliberate API-level distinction (see both doc comments) -- but the size
+// cap and the error mapping are not, and keeping two copies of those is how
+// one of them quietly stops returning errBodyTooLarge and starts leaking
+// encoding/json's wording to an operator.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any, strict bool) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(dst); err != nil {
+		// http.MaxBytesReader's error wraps a message written for a Go
+		// developer ("http: request body too large"), not for whoever hit
+		// this endpoint -- every other 4xx on this API is copy written for an
+		// operator, and this is the one place that was leaking Go internals
+		// instead.
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			return errBodyTooLarge
