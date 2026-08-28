@@ -2,7 +2,68 @@
 // $lib/alerts is: the vitest project has no DOM, so anything that lives in
 // markup is untested.
 
-import type { KeyStatus } from './types';
+import type { AdminFeature, KeyStatus, Region } from './types';
+
+/** localStorage key for the last region an operator successfully reached. */
+export const LAST_REGION_KEY = 'sidecar.lastRegion';
+
+/**
+ * pickRegion resolves the region picker screen's outcome.
+ *
+ * One region auto-forwards: making an operator choose from a list of one is
+ * a click that can only have one outcome. Otherwise a remembered region is
+ * honoured only when it is still in the reachable list -- compared with
+ * `String(r.id) === remembered`, deliberately not `Number(remembered)`, so a
+ * non-numeric or since-removed value matches nothing rather than coercing to
+ * some region by accident.
+ *
+ * Returns null rather than a default for "no answer" (nothing remembered,
+ * several regions, or none at all): the picker screen is what handles that
+ * case, not this function guessing on its behalf.
+ */
+export function pickRegion(
+	regions: Region[],
+	remembered: string | null,
+): Region | null {
+	if (regions.length === 1) return regions[0];
+	if (remembered !== null) {
+		const match = regions.find((r) => String(r.id) === remembered);
+		if (match) return match;
+	}
+	return null;
+}
+
+/**
+ * hasFeature reports whether this deployment registered an admin route
+ * family for a region.
+ *
+ * `features` is populated only by `GET /regions/{id}` -- the list endpoint
+ * never includes it (see the trap documented on `Region.features`). An
+ * absent array must return false here, never true: reading "absent" as
+ * "everything is enabled" would render a control -- the push Send button, a
+ * survey editor -- against a route this deployment never registered.
+ */
+export function hasFeature(region: Region, feature: AdminFeature): boolean {
+	return region.features?.includes(feature) ?? false;
+}
+
+/**
+ * rememberRegion persists the last region an operator successfully reached,
+ * so a plain visit to the admin root (or a reload) can return them straight
+ * there instead of stopping at the picker every time.
+ *
+ * Wrapped in try/catch: localStorage throws outright in some privacy modes
+ * (Safari private browsing, a cookies-disabled profile), and remembering a
+ * region is a convenience -- it must never take down a page whose actual job
+ * is loading alerts.
+ */
+export function rememberRegion(id: number): void {
+	try {
+		localStorage.setItem(LAST_REGION_KEY, String(id));
+	} catch {
+		// Best-effort only; see the comment above.
+	}
+}
 
 /** The PATCH /regions/{id} body. All fields are optional; sending none is a 400. */
 export interface RegionPatchPayload {

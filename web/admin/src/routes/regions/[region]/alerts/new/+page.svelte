@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import AlertForm from '$lib/AlertForm.svelte';
-	import { api } from '$lib/api';
+	import { api, regionPath } from '$lib/api';
 	import { buildCreatePayload, type AlertFormValues } from '$lib/alerts';
 	import type { Alert } from '$lib/types';
 	import type { PageProps } from './$types';
@@ -14,19 +14,28 @@
 	// missing default agency id -- belongs.
 	async function create(vals: AlertFormValues, timezone: string) {
 		const created = await api.post<Alert>(
-			'/alerts',
+			regionPath(data.region.id, '/alerts'),
 			buildCreatePayload(vals, timezone),
 		);
-		await goto(resolve('/alerts/[id]', { id: String(created.id) }));
+		await goto(
+			resolve('/regions/[region]/alerts/[id]', {
+				region: String(data.region.id),
+				id: String(created.id),
+			}),
+		);
 	}
 </script>
 
-<h1>New alert</h1>
+<h1>New alert in {data.region.name}</h1>
 
-<AlertForm
-	regions={data.regions}
-	submitLabel="Create alert"
-	onsubmit={create}
-/>
+<AlertForm region={data.region} submitLabel="Create alert" onsubmit={create} />
 
-<p><a href={resolve('/')}>Back to alerts</a></p>
+<p>
+	<a
+		href={resolve('/regions/[region]/alerts', {
+			region: String(data.region.id),
+		})}
+	>
+		Back to alerts
+	</a>
+</p>

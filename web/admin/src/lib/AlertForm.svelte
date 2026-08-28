@@ -5,14 +5,18 @@
 	import {
 		blankFormValues,
 		formValuesFromAlert,
-		selectedRegion,
 		type AlertFormValues,
 	} from '$lib/alerts';
 	import { CAUSES, EFFECTS, SEVERITIES } from '$lib/enums';
 	import type { Alert, Region } from '$lib/types';
 
 	interface Props {
-		regions: Region[];
+		/**
+		 * The alert's region. Immutable through the API (see PatchAlertPayload),
+		 * so it is never a form field here -- offering a control the server
+		 * would refuse is worse than offering none at all.
+		 */
+		region: Region;
 		/** Present in edit mode; absent in create mode. */
 		initial?: Alert;
 		submitLabel: string;
@@ -25,7 +29,7 @@
 		onsubmit: (values: AlertFormValues, timezone: string) => Promise<void>;
 	}
 
-	let { regions, initial, submitLabel, onsubmit }: Props = $props();
+	let { region, initial, submitLabel, onsubmit }: Props = $props();
 
 	const editing = $derived(initial !== undefined);
 
@@ -37,41 +41,17 @@
 	let values = $state<AlertFormValues>(
 		untrack(() =>
 			initial
-				? formValuesFromAlert(
-						initial,
-						selectedRegion(regions, String(initial.region_id))?.timezone ?? '',
-					)
+				? formValuesFromAlert(initial, region.timezone)
 				: blankFormValues(),
 		),
 	);
 	let error = $state('');
 	let busy = $state(false);
 
-	const region = $derived(selectedRegion(regions, values.regionId));
 	// '' means the region has no configured timezone. It is the DEFAULT state:
 	// timezone is one of the two locally-managed region fields, so a freshly
 	// synced region has none until an operator sets one.
-	const zone = $derived(region?.timezone ?? '');
-
-	/**
-	 * Changing region can change what the timestamp fields mean -- a
-	 * datetime-local wall time in a zoned region, a raw RFC 3339 string in a
-	 * zoneless one. Moving between two zoned regions keeps the wall time (it
-	 * simply reinterprets it in the new zone, which is what an operator
-	 * correcting a mis-picked region wants); crossing between zoned and
-	 * zoneless clears both fields, because the text left behind would be
-	 * invalid in the other kind of input and a datetime-local silently drops
-	 * a value it cannot parse.
-	 */
-	function selectRegion(next: string) {
-		const wasZoned = zone !== '';
-		values.regionId = next;
-		const isZoned = (selectedRegion(regions, next)?.timezone ?? '') !== '';
-		if (wasZoned !== isZoned) {
-			values.start = '';
-			values.end = '';
-		}
-	}
+	const zone = $derived(region.timezone);
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -99,39 +79,15 @@
 <form onsubmit={submit}>
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
-	<div class="row">
-		<label>
-			Region
-			<select
-				value={values.regionId}
-				onchange={(e) => selectRegion(e.currentTarget.value)}
-				disabled={editing}
-				required
-			>
-				<!-- value="" is "nothing chosen". It is never 0: region 0 is Tampa Bay. -->
-				<option value="" disabled>Choose a region…</option>
-				{#each regions as r (r.id)}
-					<option value={String(r.id)}>{r.name} (#{r.id})</option>
-				{/each}
-			</select>
-		</label>
-		{#if editing}
-			<p class="hint">
-				Region cannot be changed after an alert is created. Delete and recreate
-				it to move it.
-			</p>
-		{/if}
-
-		<label>
-			Agency id
-			<input
-				bind:value={values.agencyId}
-				placeholder={region?.default_agency_id
-					? `default: ${region.default_agency_id}`
-					: 'no region default — required'}
-			/>
-		</label>
-	</div>
+	<label>
+		Agency id
+		<input
+			bind:value={values.agencyId}
+			placeholder={region.default_agency_id
+				? `default: ${region.default_agency_id}`
+				: 'no region default — required'}
+		/>
+	</label>
 
 	<label>
 		Header
@@ -184,13 +140,9 @@
 			hours with nothing on screen to show for it.
 		-->
 		<p class="hint">
-			{#if region}
-				{region.name} has no configured timezone, so times must be typed as RFC 3339
-				with an explicit offset — for example
-				<code>2026-08-15T14:00:00-04:00</code>.
-			{:else}
-				Choose a region first. Times are entered in the region's timezone.
-			{/if}
+			{region.name} has no configured timezone, so times must be typed as RFC 3339
+			with an explicit offset — for example
+			<code>2026-08-15T14:00:00-04:00</code>.
 			<a href={resolve('/regions')}>Set a timezone on the Regions screen</a> to get
 			a date picker instead.
 		</p>
@@ -224,7 +176,7 @@
 				silently mis-stamped alert costs riders.
 			-->
 			<p class="hint">
-				{region ? region.name : 'This region'} reads as
+				{region.name} reads as
 				<code>UTC</code>, which is also the default for a region nobody has
 				configured yet — times you enter will be read as UTC.
 				<a href={resolve('/regions')}>Set its timezone on the Regions screen</a>

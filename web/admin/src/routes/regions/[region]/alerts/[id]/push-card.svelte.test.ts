@@ -32,6 +32,8 @@ vi.mock('$lib/api', async () => {
 import AlertPage from './+page.svelte';
 import type { Alert, AlertPush, PushAudience, Region } from '$lib/types';
 
+// 'pushes' is in the default region's features, so the card renders its
+// configured state unless a test overrides `region` to say otherwise.
 const REGION: Region = {
 	id: 1,
 	name: 'Puget Sound',
@@ -44,6 +46,7 @@ const REGION: Region = {
 	latitude: null,
 	longitude: null,
 	oba_api_key: 'none',
+	features: ['alerts', 'pushes'],
 };
 
 const AUDIENCE: PushAudience = {
@@ -99,17 +102,18 @@ function mount(opts: {
 	alert?: Alert;
 	pushes?: AlertPush[];
 	audience?: PushAudience | null;
+	region?: Region;
 }) {
 	return render(AlertPage, {
 		data: {
 			user: { username: 'admin' },
 			sessionError: '',
 			alert: opts.alert ?? alert(),
-			regions: [REGION],
+			region: opts.region ?? REGION,
 			pushes: opts.pushes ?? [],
 			audience: opts.audience === undefined ? AUDIENCE : opts.audience,
 		},
-		params: { id: '7' },
+		params: { region: '1', id: '7' },
 	});
 }
 
@@ -129,13 +133,22 @@ beforeEach(() => {
 });
 
 describe('the push card', () => {
-	// A server with no gorush URL never registers the four push routes, so the
-	// load hands the page a null audience. Offering a Send button there would
-	// queue a push that can only ever fail.
-	it('says push is not configured when the routes are missing', () => {
-		mount({ audience: null });
+	// The "not configured" signal comes from the region's `features`, not from
+	// a swallowed 404 (see lib/pushes). A non-null audience here proves the
+	// card is reading the gate off `hasFeature`, not off `data.audience ===
+	// null` -- the old behaviour, which would have shown the Send button
+	// whenever the load happened to populate audience.
+	it('says push is not configured when the region does not have the feature', () => {
+		mount({ region: { ...REGION, features: ['alerts'] }, audience: AUDIENCE });
 		expect(screen.getByText(/not configured on this server/)).toBeVisible();
 		expect(screen.queryByRole('button', { name: /^Send push/ })).toBeNull();
+	});
+
+	// Absent `features` -- the shape GET /regions (the list) actually returns
+	// -- must read the same as "not configured", never as "everything is on".
+	it('says push is not configured when features is absent entirely', () => {
+		mount({ region: { ...REGION, features: undefined }, audience: AUDIENCE });
+		expect(screen.getByText(/not configured on this server/)).toBeVisible();
 	});
 
 	it('refuses to send an unpublished alert', () => {
@@ -152,7 +165,7 @@ describe('the push card', () => {
 		// button says so before it is pressed (design spec §2.10).
 		expect(sendButton()).toHaveAccessibleName('Send push to 1,200 devices');
 		await user.click(sendButton());
-		expect(postMock).toHaveBeenCalledWith('/alerts/7/pushes', {
+		expect(postMock).toHaveBeenCalledWith('/regions/1/alerts/7/pushes', {
 			audience: 'all',
 		});
 		expect(invalidateAllMock).toHaveBeenCalledTimes(1);
@@ -162,7 +175,7 @@ describe('the push card', () => {
 		// can never name different audiences.
 		expect(sendButton()).toHaveAccessibleName('Send push to 3 test devices');
 		await user.click(sendButton());
-		expect(postMock).toHaveBeenLastCalledWith('/alerts/7/pushes', {
+		expect(postMock).toHaveBeenLastCalledWith('/regions/1/alerts/7/pushes', {
 			audience: 'test',
 		});
 	});
@@ -209,7 +222,7 @@ describe('the push card', () => {
 		expect(sendButton()).toBeDisabled();
 
 		await user.click(screen.getByRole('button', { name: 'Cancel' }));
-		expect(delMock).toHaveBeenCalledWith('/alerts/7/pushes/9');
+		expect(delMock).toHaveBeenCalledWith('/regions/1/alerts/7/pushes/9');
 		expect(invalidateAllMock).toHaveBeenCalledTimes(1);
 	});
 

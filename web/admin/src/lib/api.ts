@@ -65,6 +65,17 @@ export const api = {
 };
 
 /**
+ * regionPath prefixes a region-scoped admin API path.
+ *
+ * Region 0 is Tampa Bay, a real region, so the id is interpolated
+ * unconditionally -- a truthiness test on it would emit '/regions//alerts'
+ * for Tampa and quietly send every request there to the wrong route.
+ */
+export function regionPath(region: string | number, path: string): string {
+	return `/regions/${region}${path}`;
+}
+
+/**
  * whoami reports the signed-in operator, or null when there is no session.
  *
  * Only a 401 means "signed out". Any other failure is rethrown: reporting a

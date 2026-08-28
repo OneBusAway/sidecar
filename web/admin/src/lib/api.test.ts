@@ -10,7 +10,7 @@ vi.mock('$app/paths', () => ({
 }));
 
 // vi.mock is hoisted above these imports by Vitest, so ./api sees the stubs.
-import { api, ApiError, whoami } from './api';
+import { api, ApiError, regionPath, whoami } from './api';
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -145,6 +145,22 @@ describe('401 handling', () => {
 		});
 
 		expect(gotoMock).not.toHaveBeenCalled();
+	});
+});
+
+describe('regionPath', () => {
+	it('builds a region-scoped path', () => {
+		expect(regionPath(1, '/alerts')).toBe('/regions/1/alerts');
+	});
+
+	// Region 0 is Tampa Bay: a template that tests the id for truthiness
+	// would emit '/regions//alerts'.
+	it('handles region 0', () => {
+		expect(regionPath(0, '/alerts/7')).toBe('/regions/0/alerts/7');
+	});
+
+	it('accepts the string form route params arrive as', () => {
+		expect(regionPath('2', '')).toBe('/regions/2');
 	});
 });
 

@@ -8,7 +8,7 @@
 // mistake is both easy to make and expensive -- an operator reading "3 test
 // devices" and hitting 1,200 real ones -- so they live out here.
 
-import { api, ApiError } from './api';
+import { api, regionPath } from './api';
 import type { Badge } from './alerts';
 import type {
 	AlertPush,
@@ -133,43 +133,34 @@ export function statusTone(status: PushStatus): Badge['tone'] {
 }
 
 /**
- * notConfigured reports the "this server has no push transport" signal.
+ * loadPushes reads an alert's push history, newest first.
  *
- * When gorush is unconfigured the four push routes are never registered, so
- * the request falls through to the router's plain 404 with a non-JSON body.
- * The alert itself being missing produces the same status here, but that case
- * is already fatal to the page: the load fetches the alert alongside these,
- * and its 404 becomes the error page before the card is ever rendered.
+ * The caller decides whether to call this at all, from the region's
+ * `features` (see `hasFeature` in lib/regions), and no longer from a
+ * swallowed 404 here. Inferring "not configured" from a 404 made a
+ * genuinely missing alert and a missing route look identical, and would
+ * silently render "not configured" for a deleted alert instead of the error
+ * page a caller building the URL from a region that has this feature would
+ * expect. Any error -- 404 included -- is therefore the caller's problem.
  */
-function notConfigured(err: unknown): boolean {
-	return err instanceof ApiError && err.status === 404;
+export async function loadPushes(
+	region: string | number,
+	id: string | number,
+): Promise<AlertPush[]> {
+	return api.get<AlertPush[]>(regionPath(region, `/alerts/${id}/pushes`));
 }
 
 /**
- * loadPushes reads an alert's push history, newest first, or an empty history
- * when the server has no push transport.
- */
-export async function loadPushes(id: string | number): Promise<AlertPush[]> {
-	try {
-		return await api.get<AlertPush[]>(`/alerts/${id}/pushes`);
-	} catch (err) {
-		if (notConfigured(err)) return [];
-		throw err;
-	}
-}
-
-/**
- * loadAudience reads how many devices each audience covers, or null when the
- * server has no push transport -- which is what the card renders its "not
- * configured" state from.
+ * loadAudience reads how many devices each audience covers. See loadPushes:
+ * the caller is expected to check `hasFeature(region, 'pushes')` before
+ * calling this, and any failure -- including a 404 -- propagates rather than
+ * being read as "not configured".
  */
 export async function loadAudience(
+	region: string | number,
 	id: string | number,
-): Promise<PushAudience | null> {
-	try {
-		return await api.get<PushAudience>(`/alerts/${id}/push_audience`);
-	} catch (err) {
-		if (notConfigured(err)) return null;
-		throw err;
-	}
+): Promise<PushAudience> {
+	return api.get<PushAudience>(
+		regionPath(region, `/alerts/${id}/push_audience`),
+	);
 }
