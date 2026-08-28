@@ -521,3 +521,28 @@ func TestDefaultListenAddr(t *testing.T) {
 		t.Errorf("SIDECAR_ADDR wins over PORT: got %q", got)
 	}
 }
+
+func TestNewDonations(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	if svc := newDonations(logger, "", "sk_test", "", ""); svc != nil {
+		t.Fatal("no live key must leave donations nil")
+	}
+	if !strings.Contains(buf.String(), "donations stay disabled") {
+		t.Errorf("orphan test key not warned: %q", buf.String())
+	}
+	buf.Reset()
+	svc := newDonations(logger, "sk_live", "", "prod_live", "")
+	if svc == nil || svc.Live == nil || svc.Test != nil {
+		t.Fatalf("live only: %+v", svc)
+	}
+	if !strings.Contains(buf.String(), "test_mode donation requests will fail") {
+		t.Errorf("missing test key not warned: %q", buf.String())
+	}
+	svc = newDonations(logger, "sk_live", "sk_test", "prod_live", "prod_test")
+	first, second := svc.NewID(), svc.NewID()
+	if svc.Test == nil || first == "" || first == second {
+		t.Fatalf("both keys: %+v ids=%q,%q", svc, first, second)
+	}
+}

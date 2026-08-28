@@ -543,6 +543,25 @@ Weather needs no separate coordinate configuration -- a region's centroid arrive
 automatically as part of `region sync`, computed from the regions directory's
 `bounds` rectangles for that region.
 
+## Donations
+
+`POST /api/v1/payment_intents` (spec section 11) powers the apps' in-app
+donations through Stripe's PaymentSheet. The route exists only when
+`SIDECAR_STRIPE_SECRET_KEY` is set; without it the apps get a 404 and hide
+the donations UI (note that the iOS app decides whether to *offer*
+donations per app bundle, not per region, so a deployment serving the
+OneBusAway app should set this up before taking over a region). The body
+is raw JSON -- the one endpoint that does not also accept form encoding --
+and the app's `test_mode: "1"` routes the request to
+`SIDECAR_STRIPE_TEST_SECRET_KEY`, so TestFlight builds exercise the flow
+against production. Recurring donations create a monthly price under
+`SIDECAR_STRIPE_RECURRING_PRODUCT_ID` (and the test-mode
+`SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID`); the OBACloud deployment used
+`prod_OqlLl6mR66dLVQ` and `prod_P1xUtsgjEfkGgu` respectively. Customers are
+found or created by email. A Stripe failure is a `500` with an empty
+body, which is what the shipped apps expect; a malformed request is a
+`400`. The endpoint is throttled at 10/minute per client address.
+
 ## Admin UI
 
 The sidecar server also serves a small admin single-page app at `/admin` for

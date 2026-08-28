@@ -22,6 +22,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/clientip"
+	"github.com/OneBusAway/sidecar/internal/donations"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -60,6 +61,14 @@ type Deps struct {
 	// sets a header-reading resolver only when SIDECAR_TRUSTED_PROXY opts in
 	// (README, Deployment). Tests inject their own to pin bucket identity.
 	ClientIP clientip.Resolver
+
+	// Donations backs POST /api/v1/payment_intents (spec section 11). Nil
+	// means the route is not registered; main sets it only when a Stripe
+	// key is configured.
+	Donations *donations.Service
+	// DonationLimiter is the per-source throttle on donation requests.
+	// NewRouter defaults it (10/minute).
+	DonationLimiter *ratelimit.Limiter
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -348,6 +357,16 @@ func NewRouter(deps Deps) http.Handler {
 			throttleByIP(deps.GhostBusIPLimiter, deps, gh.create))
 	}
 
+	// Donations (spec section 11) are optional: nil Donations means the route
+	// is not registered and the apps hide the UI on the resulting 404.
+	if deps.Donations != nil {
+		if deps.DonationLimiter == nil {
+			deps.DonationLimiter = ratelimit.New(donationsPerMinute, time.Minute)
+		}
+		dh := &donationsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v1/payment_intents", throttleByIP(deps.DonationLimiter, deps, dh.create))
+	}
+
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served
 	// unauthenticated (the login page is part of it) and must never pass
@@ -622,6 +641,9 @@ func adminFeatures(deps Deps) []string {
 	}
 	if deps.PushRegs != nil {
 		features = append(features, "push_registrations")
+	}
+	if deps.Donations != nil {
+		features = append(features, "donations")
 	}
 	if deps.APIKeys != nil {
 		// APIKeys also backs bearer authentication, and now the

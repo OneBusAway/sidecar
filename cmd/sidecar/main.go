@@ -23,10 +23,13 @@ import (
 	// valid one on such a host.
 	_ "time/tzdata"
 
+	"github.com/google/uuid"
+
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/clientip"
+	"github.com/OneBusAway/sidecar/internal/donations"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/errreport"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -148,6 +151,14 @@ func run(stdout, stderr io.Writer, args []string) error {
 		"Sentry DSN; when set, every error-level log line is also reported there. Unset disables reporting")
 	sentryEnv := fs.String("sentry-environment", envOrDefault("SIDECAR_SENTRY_ENVIRONMENT", ""),
 		"environment tag on Sentry events (e.g. production, staging)")
+	stripeKey := fs.String("stripe-secret-key", envOrDefault("SIDECAR_STRIPE_SECRET_KEY", ""),
+		"Stripe live secret key; enables POST /api/v1/payment_intents (donations). Unset leaves the route unregistered")
+	stripeTestKey := fs.String("stripe-test-secret-key", envOrDefault("SIDECAR_STRIPE_TEST_SECRET_KEY", ""),
+		"Stripe test secret key, used for requests with test_mode=1")
+	stripeProduct := fs.String("stripe-recurring-product-id", envOrDefault("SIDECAR_STRIPE_RECURRING_PRODUCT_ID", ""),
+		"id of the live Stripe product recurring donations bill against (prod_...)")
+	stripeTestProduct := fs.String("stripe-test-recurring-product-id", envOrDefault("SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID", ""),
+		"id of the test-mode Stripe product recurring donations bill against")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
@@ -293,6 +304,7 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
 	deps.ClientIP = resolveClientIP
+	deps.Donations = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
 	if *trustedProxy != "" {
 		// In the boot log on purpose: a wrong value here lets clients pick
 		// their own throttle bucket.
@@ -471,4 +483,30 @@ func buildVersion() string {
 		}
 	}
 	return ""
+}
+
+// newDonations wires spec section 11 when a live Stripe key is present and
+// returns nil (route unregistered, apps hide the UI) otherwise. A live key
+// without a product id still serves one-time donations; recurring ones
+// then fail at Stripe and surface as 500s, so the gap is logged at boot.
+func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduct string) *donations.Service {
+	if liveKey == "" {
+		if testKey != "" {
+			logger.Warn("SIDECAR_STRIPE_TEST_SECRET_KEY set without SIDECAR_STRIPE_SECRET_KEY; donations stay disabled")
+		}
+		return nil
+	}
+	if liveProduct == "" {
+		logger.Warn("no --stripe-recurring-product-id/SIDECAR_STRIPE_RECURRING_PRODUCT_ID set; recurring donations will fail")
+	}
+	svc := &donations.Service{
+		Live:  donations.NewStripeGateway(liveKey, liveProduct),
+		NewID: uuid.NewString,
+	}
+	if testKey != "" {
+		svc.Test = donations.NewStripeGateway(testKey, testProduct)
+	} else {
+		logger.Warn("no --stripe-test-secret-key/SIDECAR_STRIPE_TEST_SECRET_KEY set; test_mode donation requests will fail")
+	}
+	return svc
 }
