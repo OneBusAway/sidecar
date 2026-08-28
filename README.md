@@ -186,11 +186,11 @@ from "not enabled on this deployment" by checking that list first:
 ```text
 GET    /api/admin/v1/regions/{regionId}/studies                     studies: also POST, GET .../{id}, PATCH .../{id}
 GET    /api/admin/v1/regions/{regionId}/surveys                     surveys: also POST, GET/PUT/DELETE .../{id}
-GET    /api/admin/v1/regions/{regionId}/surveys/{id}/responses      survey responses, JSON (also .../responses.csv)
-GET    /api/admin/v1/regions/{regionId}/ghost_bus_reports           ghost bus reports, JSON (also .../ghost_bus_reports.csv)
+GET    /api/admin/v1/regions/{regionId}/surveys/{id}/responses      survey responses, JSON (also .../responses.csv); one by public id at regions/{regionId}/survey_responses/{publicId}
+GET    /api/admin/v1/regions/{regionId}/ghost_bus_reports           ghost bus reports, JSON (also .../ghost_bus_reports.csv, .../{publicId})
 GET    /api/admin/v1/regions/{regionId}/alarms                      alarms, read-only: also GET .../{id}
 GET    /api/admin/v1/regions/{regionId}/push_registrations/count    push registration audience counts, aggregate only
-POST   /api/admin/v1/regions/{regionId}/api_keys                    region API keys: mint (also GET, DELETE .../{keyId})
+POST   /api/admin/v1/regions/{regionId}/api_keys                    region API keys: mint, list (also DELETE .../{keyId})
 ```
 
 Studies and surveys are the CRUD family behind `sidecar-admin study`/`survey`
