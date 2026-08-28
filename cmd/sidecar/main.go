@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
+	"github.com/OneBusAway/sidecar/internal/errreport"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
@@ -140,6 +142,12 @@ func run(stdout, stderr io.Writer, args []string) error {
 		"proxy whose client-address header the per-IP throttles trust: off (default: the TCP peer), "+
 			"cloudflare (CF-Connecting-IP), render (True-Client-IP), or header:<Name>; "+
 			"set only when the proxy overwrites that header on every request")
+	logFormat := fs.String("log-format", envOrDefault("SIDECAR_LOG_FORMAT", "text"),
+		"log line format: text (default) or json (one object per line, for log aggregators)")
+	sentryDSN := fs.String("sentry-dsn", envOrDefault("SIDECAR_SENTRY_DSN", ""),
+		"Sentry DSN; when set, every error-level log line is also reported there. Unset disables reporting")
+	sentryEnv := fs.String("sentry-environment", envOrDefault("SIDECAR_SENTRY_ENVIRONMENT", ""),
+		"environment tag on Sentry events (e.g. production, staging)")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
@@ -176,7 +184,26 @@ func run(stdout, stderr io.Writer, args []string) error {
 		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}
 
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	var handler slog.Handler
+	switch strings.ToLower(*logFormat) {
+	case "text":
+		handler = slog.NewTextHandler(stderr, nil)
+	case "json":
+		handler = slog.NewJSONHandler(stderr, nil)
+	default:
+		return fmt.Errorf("--log-format/SIDECAR_LOG_FORMAT must be text or json, got %q", *logFormat)
+	}
+	if *sentryDSN != "" {
+		reporter, sentryErr := errreport.NewSentry(*sentryDSN, *sentryEnv, buildVersion())
+		if sentryErr != nil {
+			return fmt.Errorf("--sentry-dsn/SIDECAR_SENTRY_DSN: %w", sentryErr)
+		}
+		// Flushed on the way out so an error logged just before shutdown
+		// (a failed migration, say) still reaches Sentry.
+		defer reporter.Flush(2 * time.Second)
+		handler = errreport.New(handler, reporter)
+	}
+	logger := slog.New(handler)
 
 	store, err := sqlite.Open(*dbPath)
 	if err != nil {
@@ -428,4 +455,20 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// buildVersion is the module's VCS revision as recorded by `go build`, or
+// empty when built outside a checkout. It tags Sentry events so a report
+// can be tied to the image that produced it.
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, kv := range info.Settings {
+		if kv.Key == "vcs.revision" {
+			return kv.Value
+		}
+	}
+	return ""
 }

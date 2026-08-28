@@ -69,6 +69,7 @@ type regionLookup struct {
 // CheckAll runs one cycle over every subscription. Exported so tests and
 // the loop wiring drive cycles without a ticker.
 func (u *Updater) CheckAll(ctx context.Context) {
+	started := u.Now()
 	rows, err := u.Repo.List(ctx)
 	if err != nil {
 		u.Logger.Error("liveactivities: list", "err", err)
@@ -123,6 +124,7 @@ func (u *Updater) CheckAll(ctx context.Context) {
 	if err := g.Wait(); err != nil {
 		u.Logger.Error("liveactivities: check cycle", "err", err)
 	}
+	u.Logger.Info("liveactivities: cycle", "activities", len(rows), "ms", u.Now().Sub(started).Milliseconds())
 }
 
 func (u *Updater) check(ctx context.Context, la LiveActivity, lookup regionLookup) {

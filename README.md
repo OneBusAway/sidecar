@@ -836,6 +836,18 @@ First deploy:
    Render preserves `Host` and sets `X-Forwarded-Proto`, which its docs do
    not state explicitly.
 
+**Logs and error reporting.** The server writes one line per request to
+stderr (method, path, status, bytes, client address, duration; never the
+query string or any header -- rider identifiers and bearer keys travel in
+those), one summary line per background cycle (`alarms: cycle`,
+`liveactivities: cycle`, with row counts and elapsed time), and a `httpapi:
+panic` line with a stack when a handler panics (the client gets a 500). Set
+`SIDECAR_LOG_FORMAT=json` for log aggregators. Set `SIDECAR_SENTRY_DSN` to
+have every error-level line -- panics, failed pushes, loop failures, 5xx
+responses -- reported to Sentry as well, tagged with
+`SIDECAR_SENTRY_ENVIRONMENT` and the image's git revision; leave it unset
+and nothing leaves the box. `/healthz` is logged at debug level only.
+
 `SIDECAR_GORUSH_URL` on the sidecar service is populated from `gorush`'s
 `hostport`, which Render supplies with no scheme; the server assumes
 `http://` for a scheme-less value, which is correct here since Render's

@@ -38,6 +38,18 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: -1,
 		},
 		{
+			name:          "unknown log-format returns an error and writes nothing to stdout",
+			args:          []string{"--log-format=yaml"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "unparseable sentry DSN returns an error and writes nothing to stdout",
+			args:          []string{"--sentry-dsn=not-a-dsn"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
 			name:          "unknown trusted-proxy value returns an error and writes nothing to stdout",
 			args:          []string{"--trusted-proxy=xff"},
 			wantErr:       true,

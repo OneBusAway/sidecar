@@ -12,6 +12,7 @@ require (
 
 require (
 	github.com/OneBusAway/go-sdk v1.15.0
+	github.com/getsentry/sentry-go v0.49.0
 	golang.org/x/term v0.45.0
 )
 
@@ -20,6 +21,7 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
 
 require (
