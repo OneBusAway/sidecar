@@ -795,6 +795,26 @@ to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
 
+#### Migrating a region from OBACloud
+
+`sidecar-admin import --file <export.json>` loads one region's content and
+rider state from an export document (`internal/export`, format
+`sidecar-export/1`): alerts with their translations, studies, surveys and
+questions, survey responses, push registrations, and ghost bus reports
+with their enrichment snapshots. OBACloud produces the document with
+`bin/rails "sidecar:export[<region id>,<path>]"`. Ids are preserved -- the
+feed's `Alert_<id>` entity ids and the survey and question ids the apps
+persist locally must not change under riders -- and every row is
+re-validated the way the authoring paths validate it, so a bad row rejects
+the whole document before anything is written. Rows that already exist
+(same id, public id, or region+token) are skipped and counted, which makes
+the migration two runs of the same command: a bulk import the day before
+the region's `sidecar_base_url` flips, and a delta from a fresh export
+right after. `--dry-run` validates and reports without writing. The region
+itself must already be present (`sidecar-admin region sync`); alarms and
+Live Activities are deliberately not part of the document -- OBACloud
+keeps firing the ones it owns until they expire.
+
 #### Backups
 
 The image ships [Litestream](https://litestream.io). Set
