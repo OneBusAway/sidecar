@@ -22,8 +22,13 @@ envVarGroups:
 services:
   - type: web
     name: sidecar
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    # Prebuilt by .github/workflows/image.yml. `main` is a moving tag; to
+    # roll back, point this at an immutable `sha-<short>` tag (Dashboard ->
+    # sidecar -> Settings -> Image URL) and deploy. The GHCR package must be
+    # public, or Render needs a registry credential attached here.
+    runtime: image
+    image:
+      url: ghcr.io/onebusaway/sidecar:main
     plan: starter
     region: oregon
     healthCheckPath: /healthz

@@ -734,15 +734,22 @@ in front of sidecar must:
   turns ordinary log retention into credential retention -- anyone who can
   read the logs can read every live key that ever made a request.
 
-The push registration throttle (spec §2.6, 30/minute) keys on the TCP peer
-address of the request -- it does not read `X-Forwarded-For` or similar
+Every per-IP throttle (push registrations, Live Activities, surveys, ghost
+bus reports, failed bearer attempts) keys on the TCP peer address of the
+request by default -- it does not read `X-Forwarded-For` or similar
 headers, since those are trivially spoofable by the client they're meant to
-throttle. A reverse proxy in front of sidecar must be deployed in a mode
-that preserves the real client address as the TCP peer (for example, PROXY
-protocol, or a transparent/passthrough L4 proxy); terminating and
-re-originating the TCP connection instead means every request throttles
-against the proxy's own address, either merging every client into one
-shared bucket or (worse) rate-limiting all of them together.
+throttle. A reverse proxy in front of sidecar must either preserve the real
+client address as the TCP peer (PROXY protocol, or a transparent/passthrough
+L4 proxy), or be one that *overwrites* a client-address header of its own on
+every request, in which case set `SIDECAR_TRUSTED_PROXY` (`--trusted-proxy`)
+to name it: `cloudflare` reads `CF-Connecting-IP`, `render` reads
+`True-Client-IP`, and `header:<Name>` covers any other proxy with the same
+guarantee. Requests without the header, or with a value that is not an IP
+address, fall back to the peer. There is deliberately no `X-Forwarded-For`
+mode: its first entry is whatever the client sent. Leaving the setting off
+behind a proxy that terminates and re-originates TCP means every request
+throttles against the proxy's own address -- one shared bucket for all
+clients, which at any real traffic level is a 429 for nearly everyone.
 
 gorush's feedback webhook (spec §6.5, terminal APNs failures) should be
 pointed at `POST /webhooks/gorush` on this server. That endpoint deletes a
@@ -773,7 +780,18 @@ sets the shared secret; that is what the setting is for.
 
 `render.yaml` declares the same two services as `compose.yaml`: `sidecar` as
 a web service with a persistent disk at `/data` for SQLite, and `gorush` as
-a private service. First deploy:
+a private service. Both run prebuilt images: gorush's from Docker Hub and the
+sidecar's from GHCR, where `.github/workflows/image.yml` publishes
+`ghcr.io/onebusaway/sidecar` on every push to `main` (tags `main` and an
+immutable `sha-<short>`) and on every `vX.Y.Z` tag (`X.Y.Z`, `X.Y`,
+`latest`). The Blueprint pulls `:main`. Render re-pulls only when told to:
+set the repository secret `RENDER_DEPLOY_HOOK_URL` (Dashboard -> sidecar ->
+Settings -> Deploy Hook) and each `main` build deploys itself; leave it
+unset and deploy by hand. To roll back, set the service's image URL to the
+previous build's `sha-<short>` tag and deploy; set it back to `:main` when
+the fix lands. The package must be public (Packages -> sidecar -> Package
+settings -> Change visibility) or the service needs a registry credential.
+First deploy:
 
 1. New → Blueprint, pick this repo. Render creates both services and the
    `sidecar-shared` env group, which holds `SIDECAR_GORUSH_WEBHOOK_SECRET`.
@@ -824,9 +842,10 @@ a private service. First deploy:
 private network is plain HTTP.
 
 Because the disk pins the service to one instance, deploys restart rather
-than roll. Render's proxy re-originates TCP, so every per-IP throttle in
-this server shares one bucket there; that is a known limitation, not fixed
-here.
+than roll. Render's proxy re-originates TCP, so set
+`SIDECAR_TRUSTED_PROXY=render` on the service (or `cloudflare` when the
+custom domain is proxied through Cloudflare, which is then the hop that
+sets the header); without it every per-IP throttle shares one bucket.
 
 ### Development
 
