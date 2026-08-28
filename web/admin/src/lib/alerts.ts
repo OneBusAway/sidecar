@@ -9,21 +9,7 @@
 
 import { localInputToRFC3339, instantToLocalInput } from './datetime';
 import { DEFAULT_CAUSE, DEFAULT_EFFECT, DEFAULT_SEVERITY } from './enums';
-import type { Alert, Region } from './types';
-
-/** regionById finds a region by id, or undefined. Handles region 0. */
-export function regionById(regions: Region[], id: number): Region | undefined {
-	return regions.find((r) => r.id === id);
-}
-
-/**
- * regionName is the display name for an alert's region. An id with no
- * matching region still renders as something an operator can act on rather
- * than as a blank cell.
- */
-export function regionName(regions: Region[], id: number): string {
-	return regionById(regions, id)?.name ?? `region ${id}`;
-}
+import type { Alert } from './types';
 
 /**
  * formatInstantForRegion renders an API instant for display in a region's own

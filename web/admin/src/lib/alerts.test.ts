@@ -7,11 +7,10 @@ import {
 	formValuesFromAlert,
 	formatInstantForRegion,
 	fromInstant,
-	regionName,
 	toInstant,
 	type AlertFormValues,
 } from './alerts';
-import type { Alert, Region } from './types';
+import type { Alert } from './types';
 
 // Fixture zones are chosen so no plausible development machine can make an
 // assertion pass by accident: Asia/Kathmandu is +05:45 (a 45-minute offset no
@@ -21,23 +20,6 @@ import type { Alert, Region } from './types';
 // TZ=UTC and TZ=Asia/Kathmandu for the same reason.
 const KATHMANDU = 'Asia/Kathmandu';
 const LA = 'America/Los_Angeles';
-
-function region(over: Partial<Region> = {}): Region {
-	return {
-		id: 0,
-		name: 'Tampa Bay',
-		oba_base_url: 'https://api.tampa.example',
-		sidecar_base_url: 'https://sidecar.tampa.example',
-		language: 'en',
-		active: true,
-		default_agency_id: 'HART',
-		timezone: '',
-		latitude: null,
-		longitude: null,
-		oba_api_key: 'none',
-		...over,
-	};
-}
 
 function alert(over: Partial<Alert> = {}): Alert {
 	return {
@@ -77,21 +59,6 @@ function values(over: Partial<AlertFormValues> = {}): AlertFormValues {
 		...over,
 	};
 }
-
-describe('regionName', () => {
-	const regions = [
-		region({ id: 0, name: 'Tampa Bay' }),
-		region({ id: 5, name: 'Puget Sound' }),
-	];
-
-	it('names region 0', () => {
-		expect(regionName(regions, 0)).toBe('Tampa Bay');
-	});
-
-	it('falls back to the id when the region is unknown', () => {
-		expect(regionName(regions, 99)).toBe('region 99');
-	});
-});
 
 describe('formatInstantForRegion', () => {
 	// 21:00Z is the next day in Kathmandu, so this fails if the region zone is
