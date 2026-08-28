@@ -53,6 +53,24 @@ services:
         sync: false
       - key: SIDECAR_PIRATE_WEATHER_KEY
         sync: false
+      - key: SIDECAR_TRUSTED_PROXY
+        value: cloudflare
+      - key: SIDECAR_LOG_FORMAT
+        value: json
+      - key: SIDECAR_SENTRY_DSN
+        sync: false
+      - key: SIDECAR_SENTRY_ENVIRONMENT
+        value: production
+      # Continuous SQLite replication to an S3-compatible bucket (README,
+      # Backups). Leave SIDECAR_BACKUP_BUCKET empty to run without it.
+      - key: SIDECAR_BACKUP_BUCKET
+        sync: false
+      - key: SIDECAR_BACKUP_ENDPOINT
+        sync: false
+      - key: SIDECAR_BACKUP_ACCESS_KEY_ID
+        sync: false
+      - key: SIDECAR_BACKUP_SECRET_ACCESS_KEY
+        sync: false
 
   - type: pserv
     name: gorush

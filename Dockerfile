@@ -24,14 +24,29 @@ COPY --from=web /src/web/admin/build/ internal/httpapi/adminui/dist/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/sidecar ./cmd/sidecar-admin
 
-# --- Stage 3: runtime --------------------------------------------------------
+# --- Stage 3: litestream -----------------------------------------------------
+# Streams the SQLite file to an S3-compatible bucket (README, Backups). Only
+# active at runtime when SIDECAR_BACKUP_BUCKET is set; otherwise the binary
+# sits unused. Pinned by version; TARGETARCH comes from buildx.
+FROM alpine:3.22 AS litestream
+ARG TARGETARCH
+ARG LITESTREAM_VERSION=0.5.16
+RUN apk add --no-cache curl \
+ && case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=arm64 ;; *) echo "unsupported arch $TARGETARCH" && exit 1 ;; esac \
+ && curl -fsSL "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${arch}.tar.gz" \
+    | tar -xz -C /usr/local/bin litestream
+
+# --- Stage 4: runtime --------------------------------------------------------
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S sidecar && adduser -S -G sidecar sidecar \
  && mkdir -p /data && chown sidecar:sidecar /data
 COPY --from=build /out/sidecar /out/sidecar-admin /usr/local/bin/
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY deploy/litestream.yml /etc/litestream.yml
 USER sidecar
 WORKDIR /data
 ENV SIDECAR_DB=/data/sidecar.db
 EXPOSE 8080
-ENTRYPOINT ["sidecar"]
+ENTRYPOINT ["entrypoint.sh"]

@@ -776,6 +776,35 @@ to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
 
+#### Backups
+
+The image ships [Litestream](https://litestream.io). Set
+`SIDECAR_BACKUP_BUCKET` and the container entrypoint (`deploy/entrypoint.sh`)
+streams every committed SQLite transaction to that S3-compatible bucket
+for as long as the server runs, and -- when the local database file is
+missing, as on a fresh or replaced disk -- restores the latest replica
+before starting. Leave the variable empty and the entrypoint execs the
+server directly, as before. The other settings: `SIDECAR_BACKUP_ENDPOINT`
+(required for anything but AWS; for Cloudflare R2,
+`https://<account id>.r2.cloudflarestorage.com`), `SIDECAR_BACKUP_REGION`
+(default `auto`, which R2 wants), `SIDECAR_BACKUP_ACCESS_KEY_ID` /
+`SIDECAR_BACKUP_SECRET_ACCESS_KEY`, `SIDECAR_BACKUP_PATH` (key prefix,
+default `sidecar`; give staging and production different prefixes or
+buckets), and `SIDECAR_BACKUP_RETENTION` (how far back a point-in-time
+restore can reach, default `168h`). The config is `deploy/litestream.yml`.
+
+To restore by hand -- to inspect a backup, or to move to a new host --
+run, with the same environment:
+
+```sh
+litestream restore -config /etc/litestream.yml -o /tmp/restored.db /data/sidecar.db
+litestream restore -config /etc/litestream.yml -timestamp 2026-08-28T12:00:00Z -o /tmp/before.db /data/sidecar.db
+```
+
+Rehearse this on staging before relying on it. Render's own daily disk
+snapshots are a second, coarser line of defence; Litestream is the one
+that loses seconds rather than a day.
+
 #### Feed caching
 
 Both renderings of the alerts feed answer with
