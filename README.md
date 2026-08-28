@@ -175,6 +175,37 @@ Without a transport the admin UI reports that push notifications are not
 configured on this server, rather than letting an operator queue a send that
 could only fail. The feedback accounting below keeps working either way.
 
+#### Other admin route families
+
+`/api/admin/v1` covers seven more region-scoped route families beyond alerts
+and pushes above. Each one registers only when its backing repository is
+wired into `Deps`, exactly what `GET /api/admin/v1/regions/{regionId}`
+reports back as `"features"`, so a `404` on one of these can be told apart
+from "not enabled on this deployment" by checking that list first:
+
+```text
+GET    /api/admin/v1/regions/{regionId}/studies                     studies: also POST, GET .../{id}, PATCH .../{id}
+GET    /api/admin/v1/regions/{regionId}/surveys                     surveys: also POST, GET/PUT/DELETE .../{id}
+GET    /api/admin/v1/regions/{regionId}/surveys/{id}/responses      survey responses, JSON (also .../responses.csv)
+GET    /api/admin/v1/regions/{regionId}/ghost_bus_reports           ghost bus reports, JSON (also .../ghost_bus_reports.csv)
+GET    /api/admin/v1/regions/{regionId}/alarms                      alarms, read-only: also GET .../{id}
+GET    /api/admin/v1/regions/{regionId}/push_registrations/count    push registration audience counts, aggregate only
+POST   /api/admin/v1/regions/{regionId}/api_keys                    region API keys: mint (also GET, DELETE .../{keyId})
+```
+
+Studies and surveys are the CRUD family behind `sidecar-admin study`/`survey`
+below, gated on `Deps.Surveys` (feature `"surveys"`, covering both). Survey
+responses are read-only, reachable through the survey's own routes above.
+Ghost bus reports are read-only -- reports are rider-submitted, so there is
+no admin write route -- gated on `Deps.GhostBus` (feature
+`"ghost_bus_reports"`). Alarms are read-only and omit `token` and
+`user_push_id` from the JSON, since those are push credentials, not admin UI
+data, gated on `Deps.Alarms` (feature `"alarms"`). Push registration counts
+are aggregate only, never a token listing, gated on `Deps.PushRegs` (feature
+`"push_registrations"`). Region API keys are covered in their own section
+below, gated on `Deps.APIKeys` (feature `"api_keys"`, which also gates
+bearer authentication itself).
+
 #### Sending from `sidecar-admin`
 
 ```sh
