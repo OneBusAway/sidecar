@@ -21,6 +21,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -54,6 +55,11 @@ type Deps struct {
 	BearerFailLimiter *ratelimit.Limiter
 	Now               func() time.Time
 	Logger            *slog.Logger
+	// ClientIP is the key every per-IP throttle (and the failed-login log
+	// line) uses. NewRouter defaults it to the TCP peer, clientip.Peer; main
+	// sets a header-reading resolver only when SIDECAR_TRUSTED_PROXY opts in
+	// (README, Deployment). Tests inject their own to pin bucket identity.
+	ClientIP clientip.Resolver
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -177,6 +183,16 @@ func NewServer(cfg ServerConfig) *http.Server {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+// clientIP resolves the throttle key through Deps.ClientIP, defaulting to
+// the TCP peer so handlers built without NewRouter (tests) behave like the
+// unconfigured server.
+func (d Deps) clientIP(r *http.Request) string {
+	if d.ClientIP == nil {
+		return clientip.Peer(r)
+	}
+	return d.ClientIP(r)
 }
 
 // NewRouter builds the sidecar's HTTP handler.

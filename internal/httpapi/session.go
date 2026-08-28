@@ -41,7 +41,7 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 	fail := func() {
 		h.deps.Sleep(h.deps.FailDelay)
 		h.deps.Logger.Warn("httpapi: failed login",
-			"username", auth.NormalizeUsername(req.Username), "remote", r.RemoteAddr)
+			"username", auth.NormalizeUsername(req.Username), "remote", h.deps.clientIP(r))
 		writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, "invalid credentials")
 	}
 

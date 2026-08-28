@@ -165,13 +165,13 @@ func (h *authMiddleware) touch(r *http.Request, lastUsed *time.Time, write func(
 // wired would turn a missing dependency into an outage. NewRouter always
 // supplies one; a hand-built authMiddleware (tests) need not.
 func (h *authMiddleware) rejectBearer(w http.ResponseWriter, r *http.Request, reason string, fields ...any) (principal, bool) {
-	if h.deps.BearerFailLimiter != nil && !h.deps.BearerFailLimiter.Allow(clientIP(r), h.deps.Now()) {
+	if h.deps.BearerFailLimiter != nil && !h.deps.BearerFailLimiter.Allow(h.deps.clientIP(r), h.deps.Now()) {
 		h.deps.Logger.Debug("httpapi: bearer failures throttled",
-			"remote", clientIP(r), "path", r.URL.Path)
+			"remote", h.deps.clientIP(r), "path", r.URL.Path)
 		w.WriteHeader(http.StatusTooManyRequests)
 		return principal{}, false
 	}
-	attrs := append([]any{"reason_text", reason, "remote", clientIP(r), "path", r.URL.Path}, fields...)
+	attrs := append([]any{"reason_text", reason, "remote", h.deps.clientIP(r), "path", r.URL.Path}, fields...)
 	h.deps.Logger.Warn("httpapi: bearer authentication failed", attrs...)
 	writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, invalidAPIKeyBody)
 	return principal{}, false

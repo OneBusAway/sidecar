@@ -38,6 +38,12 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: -1,
 		},
 		{
+			name:          "unknown trusted-proxy value returns an error and writes nothing to stdout",
+			args:          []string{"--trusted-proxy=xff"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
 			name:          "unparseable refresh duration returns an error and writes nothing to stdout",
 			args:          []string{"--refresh=nonsense"},
 			wantErr:       true,

@@ -25,6 +25,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/cache"
+	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
@@ -135,6 +136,10 @@ func run(stdout, stderr io.Writer, args []string) error {
 			"unset leaves the webhook open but rate limited")
 	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
 		"base URL of the gorush push gateway; without it alarms are stored but never fire")
+	trustedProxy := fs.String("trusted-proxy", envOrDefault("SIDECAR_TRUSTED_PROXY", ""),
+		"proxy whose client-address header the per-IP throttles trust: off (default: the TCP peer), "+
+			"cloudflare (CF-Connecting-IP), render (True-Client-IP), or header:<Name>; "+
+			"set only when the proxy overwrites that header on every request")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
@@ -152,6 +157,11 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// more than two parts, so a secret containing ':' (or whitespace, which
 	// header values cannot carry) would make every prune 401 with nothing
 	// in the sidecar's logs to say why. Reject it here, where it is visible.
+	resolveClientIP, err := clientip.Parse(*trustedProxy)
+	if err != nil {
+		return fmt.Errorf("--trusted-proxy/SIDECAR_TRUSTED_PROXY: %w", err)
+	}
+
 	if strings.ContainsAny(*webhookSecret, ": \t\r\n") {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
 	}
@@ -255,6 +265,12 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// shares the same obaapi.Client that vehicle search uses, rather than
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
+	deps.ClientIP = resolveClientIP
+	if *trustedProxy != "" {
+		// In the boot log on purpose: a wrong value here lets clients pick
+		// their own throttle bucket.
+		logger.Info("per-IP throttles trust the proxy's client-address header", "trusted_proxy", *trustedProxy)
+	}
 
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),
