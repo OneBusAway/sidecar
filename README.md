@@ -764,8 +764,12 @@ every request, in which case set `SIDECAR_TRUSTED_PROXY` (`--trusted-proxy`)
 to name it: `cloudflare` reads `CF-Connecting-IP`, `render` reads
 `True-Client-IP`, and `header:<Name>` covers any other proxy with the same
 guarantee. Requests without the header, or with a value that is not an IP
-address, fall back to the peer. There is deliberately no `X-Forwarded-For`
-mode: its first entry is whatever the client sent. Leaving the setting off
+address, fall back to the peer. The key is the header address qualified
+by the peer address, so a request that reaches the origin without passing
+through the proxy (Render's `*.onrender.com` hostname stays reachable
+beside a proxied custom domain) can forge the header but only subdivides
+its own peer's bucket, never anyone else's. There is deliberately no
+`X-Forwarded-For` mode: its first entry is whatever the client sent. Leaving the setting off
 behind a proxy that terminates and re-originates TCP means every request
 throttles against the proxy's own address -- one shared bucket for all
 clients, which at any real traffic level is a 429 for nearly everyone.
@@ -819,13 +823,19 @@ questions, survey responses, push registrations, and ghost bus reports
 with their enrichment snapshots. OBACloud produces the document with
 `bin/rails "sidecar:export[<region id>,<path>]"`. Ids are preserved -- the
 feed's `Alert_<id>` entity ids and the survey and question ids the apps
-persist locally must not change under riders -- and every row is
-re-validated the way the authoring paths validate it, so a bad row rejects
-the whole document before anything is written. Rows that already exist
-(same id, public id, or region+token) are skipped and counted, which makes
-the migration two runs of the same command: a bulk import the day before
-the region's `sidecar_base_url` flips, and a delta from a fresh export
-right after. `--dry-run` validates and reports without writing. The region
+persist locally must not change under riders -- and every row is checked
+with the domain packages' own rules (enum names, question content, answer
+shape, time windows; not the HTTP layer's length caps) before anything is
+written, so a bad row rejects the whole document. Rows that already exist
+under this region (same id, public id, or region+token) are skipped and
+counted, which makes the migration two runs of the same command: a bulk
+import the day before the region's `sidecar_base_url` flips, and a delta
+from a fresh export right after -- translations added to an already
+migrated alert land on the delta run. An id that already belongs to
+another region's content (alerts, studies, surveys, and questions share
+one id sequence) is an error naming the row, never a silent skip.
+`--dry-run` runs the same checks, including that the region exists,
+without writing. The region
 itself must already be present (`sidecar-admin region sync`); alarms and
 Live Activities are deliberately not part of the document -- OBACloud
 keeps firing the ones it owns until they expire.
@@ -855,9 +865,19 @@ litestream restore -config /etc/litestream.yml -o /tmp/restored.db /data/sidecar
 litestream restore -config /etc/litestream.yml -timestamp 2026-08-28T12:00:00Z -o /tmp/before.db /data/sidecar.db
 ```
 
+The entrypoint fills in `SIDECAR_BACKUP_PATH=sidecar`,
+`SIDECAR_BACKUP_REGION=auto`, and `SIDECAR_BACKUP_RETENTION=168h` when
+unset; export the same three before running `litestream restore` from a
+shell, since `deploy/litestream.yml` expands them.
+
 Rehearse this on staging before relying on it. Render's own daily disk
 snapshots are a second, coarser line of defence; Litestream is the one
-that loses seconds rather than a day.
+that loses seconds rather than a day. Known gap: once replication is
+running, a revoked key or a changed bucket policy makes every upload fail
+while `/healthz` stays green and nothing is reported -- Litestream logs it
+and carries on. Until replica lag is surfaced, check the bucket's newest
+object age from outside (a cron against the bucket, or a periodic
+`litestream restore -o` rehearsal on staging).
 
 #### Feed caching
 
@@ -869,7 +889,8 @@ copy for ten minutes when the origin is down -- which covers the restart
 every deploy costs a single-instance service. Cloudflare honours
 `Cache-Control` for cacheable responses only when a cache rule marks the
 path eligible; add one for `/api/v1/regions/*/alerts*`. Error responses
-carry no cache directive.
+are `no-store`, so a cached miss cannot shadow a region added later even
+under the CDN's default TTL for 404s.
 
 #### Render
 
@@ -932,16 +953,22 @@ First deploy:
    not state explicitly.
 
 **Logs and error reporting.** The server writes one line per request to
-stderr (method, path, status, bytes, client address, duration; never the
-query string or any header -- rider identifiers and bearer keys travel in
-those), one summary line per background cycle (`alarms: cycle`,
-`liveactivities: cycle`, with row counts and elapsed time), and a `httpapi:
-panic` line with a stack when a handler panics (the client gets a 500). Set
-`SIDECAR_LOG_FORMAT=json` for log aggregators. Set `SIDECAR_SENTRY_DSN` to
-have every error-level line -- panics, failed pushes, loop failures, 5xx
-responses -- reported to Sentry as well, tagged with
-`SIDECAR_SENTRY_ENVIRONMENT` and the image's git revision; leave it unset
-and nothing leaves the box. `/healthz` is logged at debug level only.
+stderr (method, matched route pattern with its `{placeholders}`, status,
+bytes, client address, duration -- never the concrete path, the query
+string, or any header, since alarm and Live Activity tokens travel in the
+path and rider identifiers and bearer keys in the others), one summary
+line per background cycle (`alarms: cycle`, `liveactivities: cycle`, with
+row counts and elapsed time), and a `httpapi: panic` line with a stack
+when a handler panics (the client gets a 500 if nothing had been written
+yet; otherwise the connection is closed so a truncated body is not
+mistaken for a complete one). Set `SIDECAR_LOG_FORMAT=json` for log
+aggregators. Set `SIDECAR_SENTRY_DSN` to have every error-level line --
+panics, failed pushes, loop failures, the store and upstream errors
+handlers log before answering 5xx, and a failed boot -- reported to Sentry
+as well, tagged with `SIDECAR_SENTRY_ENVIRONMENT` and, for the published
+image, the git sha it was built from; Sentry's own delivery failures are
+logged as `errreport: sentry` warnings. Leave the DSN unset and nothing
+leaves the box. `/healthz` is logged at debug level only.
 
 `SIDECAR_GORUSH_URL` on the sidecar service is populated from `gorush`'s
 `hostport`, which Render supplies with no scheme; the server assumes

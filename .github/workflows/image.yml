@@ -1,9 +1,9 @@
 name: Image
 
 # Build the production image (the same Dockerfile `make image` uses) and
-# publish it to GHCR so Render pulls a prebuilt, immutable artifact instead of
-# rebuilding from source on every deploy, and so self-hosters have something
-# to run. Tags:
+# publish it to GHCR so Render pulls a prebuilt image (`:main`, with
+# immutable `sha-` tags for rollback) instead of rebuilding from source on
+# every deploy, and so self-hosters have something to run. Tags:
 #   sha-<short>   every build; immutable -- the rollback target
 #   main          moving tag for the main branch; what render.yaml pulls
 #   X.Y.Z / X.Y / latest   on a vX.Y.Z tag push
@@ -58,6 +58,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: VERSION=${{ github.sha }}
       # Render only re-pulls an image-backed service when told to. Set the
       # RENDER_DEPLOY_HOOK_URL repository secret (Dashboard -> sidecar ->
       # Settings -> Deploy Hook) and every main build deploys itself; leave it
@@ -68,7 +69,7 @@ jobs:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           if [ -z "$HOOK" ]; then
-            echo "RENDER_DEPLOY_HOOK_URL not set; skipping deploy trigger"
+            echo "::warning::RENDER_DEPLOY_HOOK_URL not set; image pushed but Render was not told to deploy it"
             exit 0
           fi
-          curl --fail --silent --show-error --request POST "$HOOK"
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 30 --request POST "$HOOK"

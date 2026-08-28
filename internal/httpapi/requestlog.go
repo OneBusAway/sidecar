@@ -59,15 +59,31 @@ func requestLog(deps Deps, next http.Handler) http.Handler {
 		started := now()
 		defer func() {
 			p := recover()
-			if p != nil && rec.status == 0 {
+			if p == http.ErrAbortHandler { //nolint:errorlint // sentinel compared by identity, as net/http does
+				// A handler's deliberate abort; net/http handles it.
+				panic(p)
+			}
+			status := rec.status
+			switch {
+			case p != nil && status == 0:
+				// Nothing sent yet: the client can still get a real 500.
 				rec.WriteHeader(http.StatusInternalServerError)
+				status = http.StatusInternalServerError
+			case p != nil:
+				// Headers (and likely part of the body) already went out.
+				// Returning normally would let net/http finish the response
+				// cleanly and the client would keep a truncated body that
+				// looks complete; abort so the connection is closed instead.
+				defer panic(http.ErrAbortHandler)
+			case status == 0:
+				status = http.StatusOK // handler returned without writing; net/http sends 200
 			}
 			route := r.Pattern
 			if route == "" {
 				route = "(unmatched)"
 			}
 			attrs := []any{
-				"method", r.Method, "route", route, "status", rec.status, "bytes", rec.bytes,
+				"method", r.Method, "route", route, "status", status, "bytes", rec.bytes,
 				"ip", deps.clientIP(r), "ms", now().Sub(started).Milliseconds(),
 			}
 			switch {

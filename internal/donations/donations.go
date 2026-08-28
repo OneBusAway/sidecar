@@ -43,7 +43,8 @@ type Gateway interface {
 	// uses to act on the customer.
 	CreateEphemeralKey(ctx context.Context, customerID string) (string, error)
 	// CreateSubscription creates a monthly subscription at amountCents and
-	// returns the client secret of its first invoice's payment.
+	// returns the client secret of its first invoice's payment. On error no
+	// subscription is left behind for the customer.
 	CreateSubscription(ctx context.Context, customerID string, amountCents int64) (string, error)
 }
 
@@ -65,7 +66,7 @@ type Service struct {
 
 // Create runs one donation request.
 func (s *Service) Create(ctx context.Context, req Request) (Response, error) {
-	if err := validate(req); err != nil {
+	if err := req.Validate(); err != nil {
 		return Response{}, err
 	}
 	gw := s.Live
@@ -99,11 +100,12 @@ func (s *Service) Create(ctx context.Context, req Request) (Response, error) {
 	return resp, nil
 }
 
-func validate(req Request) error {
+// Validate reports ErrInvalid for a request the app should not have sent.
+func (r Request) Validate() error {
 	switch {
-	case req.AmountCents <= 0:
+	case r.AmountCents <= 0:
 		return fmt.Errorf("%w: donation_amount_in_cents must be positive", ErrInvalid)
-	case strings.TrimSpace(req.Email) == "" || !strings.Contains(req.Email, "@"):
+	case strings.TrimSpace(r.Email) == "" || !strings.Contains(r.Email, "@"):
 		return fmt.Errorf("%w: email is required", ErrInvalid)
 	}
 	return nil

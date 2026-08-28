@@ -17,9 +17,10 @@ type Reporter interface {
 	Report(ctx context.Context, msg string, attrs map[string]any)
 }
 
-// Handler is a slog.Handler that passes every record to Next and, for
-// records at slog.LevelError or above, also to Reporter. Attributes and
-// groups added through WithAttrs/WithGroup reach both.
+// Handler is a slog.Handler that passes every record to next and, for
+// records at slog.LevelError or above, also to the Reporter -- even when
+// next is configured to drop them, so an error always reaches the tracker.
+// Attributes and groups added through WithAttrs/WithGroup reach both.
 type Handler struct {
 	next     slog.Handler
 	reporter Reporter

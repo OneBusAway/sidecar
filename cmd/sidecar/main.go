@@ -114,14 +114,14 @@ func main() {
 // -h/-help, which is a request for usage, not a failure, so it is printed to
 // stdout and reported as success (nil), following the convention that
 // --help is not an error condition.
-func run(stdout, stderr io.Writer, args []string) error {
+func run(stdout, stderr io.Writer, args []string) (err error) {
 	// Before the flag definitions, not just before Parse: the envOrDefault
 	// calls below read the environment at flag-registration time, so a .env
 	// loaded any later could never reach a flag default. Real environment
 	// variables win over the file (dotenv.Load never overwrites), keeping
 	// platform-provided production configuration unaffected.
-	if err := dotenv.Load(".env"); err != nil {
-		return err
+	if loadErr := dotenv.Load(".env"); loadErr != nil {
+		return loadErr
 	}
 
 	fs := flag.NewFlagSet("sidecar", flag.ContinueOnError)
@@ -162,13 +162,18 @@ func run(stdout, stderr io.Writer, args []string) error {
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+	if parseErr := fs.Parse(args); parseErr != nil {
+		if errors.Is(parseErr, flag.ErrHelp) {
 			fs.SetOutput(stdout)
 			fs.Usage()
 			return nil
 		}
-		return err
+		return parseErr
+	}
+
+	resolveClientIP, err := clientip.Parse(*trustedProxy)
+	if err != nil {
+		return fmt.Errorf("--trusted-proxy/SIDECAR_TRUSTED_PROXY: %w", err)
 	}
 
 	// gorush builds its feedback header from "name:value" by splitting on
@@ -176,11 +181,6 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// more than two parts, so a secret containing ':' (or whitespace, which
 	// header values cannot carry) would make every prune 401 with nothing
 	// in the sidecar's logs to say why. Reject it here, where it is visible.
-	resolveClientIP, err := clientip.Parse(*trustedProxy)
-	if err != nil {
-		return fmt.Errorf("--trusted-proxy/SIDECAR_TRUSTED_PROXY: %w", err)
-	}
-
 	if strings.ContainsAny(*webhookSecret, ": \t\r\n") {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
 	}
@@ -205,16 +205,26 @@ func run(stdout, stderr io.Writer, args []string) error {
 		return fmt.Errorf("--log-format/SIDECAR_LOG_FORMAT must be text or json, got %q", *logFormat)
 	}
 	if *sentryDSN != "" {
-		reporter, sentryErr := errreport.NewSentry(*sentryDSN, *sentryEnv, buildVersion())
+		// Sentry's own diagnostics go to the bare handler, never through
+		// the tee, or a delivery failure would try to report itself.
+		reporter, sentryErr := errreport.NewSentry(*sentryDSN, *sentryEnv, buildVersion(), slog.New(handler))
 		if sentryErr != nil {
 			return fmt.Errorf("--sentry-dsn/SIDECAR_SENTRY_DSN: %w", sentryErr)
 		}
-		// Flushed on the way out so an error logged just before shutdown
-		// (a failed migration, say) still reaches Sentry.
+		// Flushed on the way out so errors logged during shutdown -- and
+		// the fatal-error line below for a failed boot -- reach Sentry.
 		defer reporter.Flush(2 * time.Second)
 		handler = errreport.New(handler, reporter)
 	}
 	logger := slog.New(handler)
+	// Boot failures from here on (open, migrate, listen) are returned to
+	// main, which prints them; log them too so they reach Sentry and the
+	// structured log rather than only the process's stderr line.
+	defer func() {
+		if err != nil {
+			logger.Error("sidecar: fatal", "err", err)
+		}
+	}()
 
 	store, err := sqlite.Open(*dbPath)
 	if err != nil {
@@ -305,10 +315,10 @@ func run(stdout, stderr io.Writer, args []string) error {
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
 	deps.ClientIP = resolveClientIP
 	deps.Donations = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
-	if *trustedProxy != "" {
-		// In the boot log on purpose: a wrong value here lets clients pick
-		// their own throttle bucket.
-		logger.Info("per-IP throttles trust the proxy's client-address header", "trusted_proxy", *trustedProxy)
+	if setting := strings.ToLower(strings.TrimSpace(*trustedProxy)); setting != "" && setting != "off" {
+		// In the boot log on purpose: a wrong value here mis-keys every
+		// throttle bucket.
+		logger.Info("per-IP throttles key on the proxy's client-address header", "trusted_proxy", setting)
 	}
 
 	sched := &alarms.Scheduler{
@@ -469,10 +479,17 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-// buildVersion is the module's VCS revision as recorded by `go build`, or
-// empty when built outside a checkout. It tags Sentry events so a report
-// can be tied to the image that produced it.
+// version is stamped by the image build (`-ldflags -X main.version=<git
+// sha>`; the Docker build has no .git to read). It tags Sentry events so a
+// report can be tied to the image that produced it.
+var version string
+
+// buildVersion is the stamped version, else the VCS revision `go build`
+// records when building inside a checkout, else empty.
 func buildVersion() string {
+	if version != "" {
+		return version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return ""
@@ -500,13 +517,16 @@ func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduc
 		logger.Warn("no --stripe-recurring-product-id/SIDECAR_STRIPE_RECURRING_PRODUCT_ID set; recurring donations will fail")
 	}
 	svc := &donations.Service{
-		Live:  donations.NewStripeGateway(liveKey, liveProduct),
+		Live:  donations.NewStripeGateway(liveKey, liveProduct, logger),
 		NewID: uuid.NewString,
 	}
 	if testKey == "" {
 		logger.Warn("no --stripe-test-secret-key/SIDECAR_STRIPE_TEST_SECRET_KEY set; test_mode donation requests will fail")
 		return svc
 	}
-	svc.Test = donations.NewStripeGateway(testKey, testProduct)
+	if testProduct == "" {
+		logger.Warn("no --stripe-test-recurring-product-id/SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID set; recurring test_mode donations will fail")
+	}
+	svc.Test = donations.NewStripeGateway(testKey, testProduct, logger)
 	return svc
 }

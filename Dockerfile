@@ -20,9 +20,12 @@ COPY . .
 RUN rm -rf internal/httpapi/adminui/dist && mkdir -p internal/httpapi/adminui/dist
 COPY --from=web /src/web/admin/build/ internal/httpapi/adminui/dist/
 # One invocation builds both binaries so shared packages compile once; the
-# cache mounts keep incremental builds across `make image` runs.
+# cache mounts keep incremental builds across `make image` runs. VERSION is
+# the git sha the CI workflow passes in (.dockerignore drops .git, so the
+# binary cannot read it itself); it tags Sentry events.
+ARG VERSION=
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/sidecar ./cmd/sidecar-admin
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/ ./cmd/sidecar ./cmd/sidecar-admin
 
 # --- Stage 3: litestream -----------------------------------------------------
 # Streams the SQLite file to an S3-compatible bucket (README, Backups). Only

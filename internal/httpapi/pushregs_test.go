@@ -565,8 +565,8 @@ func TestThrottle_TrustedProxyHeader(t *testing.T) {
 	if got := post("c", "203.0.113.1"); got != http.StatusTooManyRequests {
 		t.Fatalf("first client's second request: %d, want 429", got)
 	}
-	// No header: keyed on the peer, which is the proxy -- shared by every
-	// headerless request, but not by the header-bearing ones above.
+	// No header: keyed on the peer alone, which is the proxy -- shared by
+	// every headerless request, but not by the header-bearing ones above.
 	if got := post("d", ""); got != http.StatusNoContent {
 		t.Fatalf("headerless request: %d", got)
 	}

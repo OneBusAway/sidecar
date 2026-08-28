@@ -86,7 +86,7 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	one := export.Counts{Added: 1}
-	want := export.Summary{Alerts: one, Studies: one, Surveys: one, Questions: export.Counts{Added: 2}, SurveyResponses: one, PushRegistrations: export.Counts{Added: 2}, GhostBusReports: one}
+	want := export.Summary{Alerts: one, Translations: export.Counts{Added: 2}, Studies: one, Surveys: one, Questions: export.Counts{Added: 2}, SurveyResponses: one, PushRegistrations: export.Counts{Added: 2}, GhostBusReports: one}
 	if sum != want {
 		t.Fatalf("summary %+v, want %+v", sum, want)
 	}
@@ -161,18 +161,133 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	// skipped, the new row lands, nothing is duplicated.
 	doc := importDoc()
 	doc.PushRegistrations = append(doc.PushRegistrations, export.PushRegistration{Token: "tok-new", OperatingSystem: "ios", LastSeenAt: importBase})
+	// A translation added to an already-migrated alert must land on the
+	// delta run; that is the case the delta exists for.
+	doc.Alerts[0].Translations = append(doc.Alerts[0].Translations, export.AlertTranslation{Language: "fr", HeaderText: "Ligne 44", DescriptionText: "Prenez la 43e."})
 	sum, err = store.Import(ctx, doc, importBase.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	skipped := export.Counts{Skipped: 1}
-	wantDelta := export.Summary{Alerts: skipped, Studies: skipped, Surveys: skipped, Questions: export.Counts{Skipped: 2}, SurveyResponses: skipped, PushRegistrations: export.Counts{Added: 1, Skipped: 2}, GhostBusReports: skipped}
+	wantDelta := export.Summary{Alerts: skipped, Translations: export.Counts{Added: 2, Skipped: 2}, Studies: skipped, Surveys: skipped, Questions: export.Counts{Skipped: 2}, SurveyResponses: skipped, PushRegistrations: export.Counts{Added: 1, Skipped: 2}, GhostBusReports: skipped}
 	if sum != wantDelta {
 		t.Fatalf("delta summary %+v, want %+v", sum, wantDelta)
 	}
 	count, countErr := store.PushRegs().CountAudience(ctx, 1, false)
 	if countErr != nil || count.Total != 3 {
 		t.Fatalf("audience %+v %v", count, countErr)
+	}
+	alert, err = store.Alerts().Get(ctx, 4242)
+	if err != nil || len(alert.Translations) != 4 {
+		t.Fatalf("fr translation not imported on the delta run: %v %+v", err, alert.Translations)
+	}
+}
+
+// TestImport_CrossRegionConflict pins that a source id already used by
+// another region's content is an error, never a silent skip or a merge:
+// alerts, studies, surveys, and questions share one id sequence.
+func TestImport_CrossRegionConflict(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 2, Name: "Elsewhere", OBABaseURL: "https://example.org/", Active: true,
+	}}, importBase); err != nil {
+		t.Fatal(err)
+	}
+	// Region 2 gets the same document first, so every id now belongs to it.
+	other := importDoc()
+	other.RegionID = 2
+	if _, err := store.Import(ctx, other, importBase); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(*export.Document){
+		"alert":           func(d *export.Document) { d.Studies, d.SurveyResponses, d.GhostBusReports = nil, nil, nil },
+		"study":           func(d *export.Document) { d.Alerts, d.SurveyResponses, d.GhostBusReports = nil, nil, nil },
+		"ghost bus":       func(d *export.Document) { d.Alerts, d.Studies, d.SurveyResponses = nil, nil, nil },
+		"survey response": func(d *export.Document) { d.Alerts, d.Studies, d.GhostBusReports = nil, nil, nil },
+	}
+	for name, trim := range cases {
+		doc := importDoc()
+		trim(doc)
+		_, err := store.Import(ctx, doc, importBase)
+		if !errors.Is(err, sqlite.ErrImportConflict) {
+			t.Errorf("%s owned by another region: err %v, want ErrImportConflict", name, err)
+		}
+	}
+	// A survey under a different study than the one it already belongs to
+	// is a conflict too, even within the region.
+	doc := importDoc()
+	doc.RegionID = 2
+	doc.Studies[0].ID = 8
+	_, err := store.Import(ctx, doc, importBase)
+	if !errors.Is(err, sqlite.ErrImportConflict) {
+		t.Fatalf("survey re-parented: err %v", err)
+	}
+	if _, err := store.Alerts().Feed(ctx, 1, true, 10); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestImport_SecondaryRows covers the branches the round trip does not:
+// timestamp fallback, the unavailable/pending snapshot bookkeeping, and
+// the pre-transaction rejections that only prepareImport performs.
+func TestImport_SecondaryRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	doc := importDoc()
+	doc.GhostBusReports = append(doc.GhostBusReports,
+		export.GhostBusReport{PublicID: "gb-pending", UserIdentifier: "u2", TripIdentifier: "1_t2", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "pending", Snapshot: json.RawMessage(`{"ignored":true}`)},
+		export.GhostBusReport{PublicID: "gb-gone", UserIdentifier: "u3", TripIdentifier: "1_t3", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "unavailable"},
+	)
+	if _, err := store.Import(ctx, doc, importBase); err != nil {
+		t.Fatal(err)
+	}
+	study, err := store.Surveys().GetStudy(ctx, 7)
+	if err != nil || !study.CreatedAt.Equal(importBase) {
+		t.Fatalf("zero created_at should fall back to now: %v %v", err, study.CreatedAt)
+	}
+	pending, err := store.GhostBus().ListPendingSnapshots(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0].PublicID != "gb-pending" || pending[0].SnapshotJSON != "" {
+		t.Fatalf("pending queue %+v %v", pending, err)
+	}
+	gone, err := store.GhostBus().GetByPublicID(ctx, 1, "gb-gone")
+	if err != nil || gone.SnapshotAttempts != 3 {
+		t.Fatalf("unavailable report %+v %v", gone, err)
+	}
+
+	rejected := map[string]func(*export.Document){
+		"uppercase english":    func(d *export.Document) { d.Alerts[0].Translations[0].Language = " EN " },
+		"captured no snapshot": func(d *export.Document) { d.GhostBusReports[0].Snapshot = nil },
+		"alert end before start": func(d *export.Document) {
+			early := d.Alerts[0].StartTime.Add(-time.Minute)
+			d.Alerts[0].EndTime = &early
+		},
+		"survey end before start": func(d *export.Document) {
+			a, b := importBase, importBase.Add(-time.Hour)
+			d.Studies[0].Surveys[0].StartTime, d.Studies[0].Surveys[0].EndTime = &a, &b
+		},
+		"malformed answers": func(d *export.Document) { d.SurveyResponses[0].Answers = json.RawMessage(`[{"question_id":"x"}]`) },
+		"duplicate question id": func(d *export.Document) {
+			d.Studies[0].Surveys[0].Questions[1].ID = d.Studies[0].Surveys[0].Questions[0].ID
+		},
+	}
+	for name, mutate := range rejected {
+		d := importDoc()
+		mutate(d)
+		if err := store.ValidateImport(ctx, d, importBase); err == nil {
+			t.Errorf("%s: ValidateImport accepted it", name)
+		}
+	}
+	if err := store.ValidateImport(ctx, importDoc(), importBase); err != nil {
+		t.Fatalf("valid document rejected: %v", err)
+	}
+	empty := sqlitetest.Open(t)
+	if err := empty.ValidateImport(ctx, importDoc(), importBase); !errors.Is(err, sqlite.ErrRegionMissing) {
+		t.Fatalf("dry run must notice the missing region: %v", err)
 	}
 }
 

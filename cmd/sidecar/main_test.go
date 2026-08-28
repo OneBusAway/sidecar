@@ -540,6 +540,13 @@ func TestNewDonations(t *testing.T) {
 	if !strings.Contains(buf.String(), "test_mode donation requests will fail") {
 		t.Errorf("missing test key not warned: %q", buf.String())
 	}
+	buf.Reset()
+	newDonations(logger, "sk_live", "sk_test", "", "")
+	for _, want := range []string{"SIDECAR_STRIPE_RECURRING_PRODUCT_ID", "SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("missing product id not warned (%s): %q", want, buf.String())
+		}
+	}
 	svc = newDonations(logger, "sk_live", "sk_test", "prod_live", "prod_test")
 	first, second := svc.NewID(), svc.NewID()
 	if svc.Test == nil || first == "" || first == second {

@@ -27,6 +27,22 @@ config=/etc/litestream.yml
 # hangs looks the same as one that is working. Failing instead makes the
 # outage a visible crash loop -- deliberately not a fallback to an empty
 # database, which would fork history from the replica.
-timeout "${SIDECAR_BACKUP_RESTORE_TIMEOUT:-120}" \
-  litestream restore -config "$config" -if-db-not-exists -if-replica-exists "$SIDECAR_DB"
+restore_timeout="${SIDECAR_BACKUP_RESTORE_TIMEOUT:-120}"
+timeout "$restore_timeout" litestream restore -config "$config" -if-db-not-exists -if-replica-exists "$SIDECAR_DB" || {
+  rc=$?
+  # GNU timeout reports 124; busybox's (this image) passes through the
+  # child's SIGTERM status, 143.
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
+    echo "litestream restore timed out after ${restore_timeout}s: bucket unreachable or credentials wrong?" >&2
+  fi
+  exit "$rc"
+}
+if [ ! -f "$SIDECAR_DB" ]; then
+  # -if-replica-exists cannot tell a first boot from a wrong bucket or
+  # path: both look like "no replica". Say so loudly; the first
+  # replicated transaction below starts a new history at this path.
+  echo "WARNING: no replica found at ${SIDECAR_BACKUP_BUCKET}/${SIDECAR_BACKUP_PATH}; starting with an empty database" >&2
+fi
+# Litestream re-splits the -exec string with shell word rules, so a sidecar
+# flag value containing whitespace would be broken apart; none does today.
 exec litestream replicate -config "$config" -exec "sidecar $*"

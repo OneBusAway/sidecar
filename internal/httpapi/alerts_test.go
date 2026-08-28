@@ -418,8 +418,8 @@ func itoa(n int64) string {
 
 // TestFeed_CacheControl pins the CDN contract on both feed renderings: a
 // successful feed is cacheable for a minute and servable stale through a
-// deploy restart, while a 404 carries no cache directive at all so a region
-// that appears later is not shadowed by a cached miss.
+// deploy restart, while a 404 is no-store so a region that appears later is
+// not shadowed by a cached miss, even behind a CDN with a default TTL.
 func TestFeed_CacheControl(t *testing.T) {
 	t.Parallel()
 	h, alertRepo, regionRepo := newTestServer(t)
@@ -440,7 +440,7 @@ func TestFeed_CacheControl(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown region: status %d", rec.Code)
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "" {
-		t.Errorf("404 carries Cache-Control %q; a cached miss would shadow a region added later", got)
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("404 Cache-Control = %q, want no-store; a CDN default TTL would shadow a region added later", got)
 	}
 }

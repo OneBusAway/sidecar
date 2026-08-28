@@ -3,12 +3,13 @@ package donations
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	stripe "github.com/stripe/stripe-go/v83"
 )
 
 // ephemeralKeyStripeVersion is the API version the shipped iOS PaymentSheet
-// was built against, carried over from the previous implementation. An
+// was built against, carried over from OBACloud's implementation. An
 // ephemeral key is only valid for the version it was minted for.
 const ephemeralKeyStripeVersion = "2023-08-16"
 
@@ -16,6 +17,9 @@ const ephemeralKeyStripeVersion = "2023-08-16"
 // test keys are two instances.
 type StripeGateway struct {
 	client *stripe.Client
+	// Logger receives the one condition worth an operator's eye: several
+	// Stripe customers sharing an email, where the first is used.
+	Logger *slog.Logger
 	// productID is the pre-existing Stripe product recurring donations bill
 	// against; the rider-chosen amount becomes an inline price on each
 	// subscription.
@@ -24,19 +28,28 @@ type StripeGateway struct {
 
 // NewStripeGateway builds a gateway for a secret key and the id of the
 // product recurring donations bill against.
-func NewStripeGateway(secretKey, recurringProductID string) *StripeGateway {
-	return &StripeGateway{client: stripe.NewClient(secretKey), productID: recurringProductID}
+func NewStripeGateway(secretKey, recurringProductID string, logger *slog.Logger) *StripeGateway {
+	return &StripeGateway{client: stripe.NewClient(secretKey), productID: recurringProductID, Logger: logger}
 }
 
-// FindOrCreateCustomer implements Gateway.
+// FindOrCreateCustomer implements Gateway. Stripe has no find-or-create
+// and permits duplicate emails; the first listed customer is used and a
+// duplicate is logged rather than silently picked.
 func (g *StripeGateway) FindOrCreateCustomer(ctx context.Context, email, name string) (string, error) {
 	list := &stripe.CustomerListParams{Email: stripe.String(email)}
-	list.Limit = stripe.Int64(1)
+	list.Limit = stripe.Int64(2)
+	var found []string
 	for c, err := range g.client.V1Customers.List(ctx, list) {
 		if err != nil {
 			return "", err
 		}
-		return c.ID, nil
+		found = append(found, c.ID)
+	}
+	if len(found) > 1 && g.Logger != nil {
+		g.Logger.Warn("donations: several Stripe customers share an email; using the first", "customer_id", found[0])
+	}
+	if len(found) > 0 {
+		return found[0], nil
 	}
 	c, err := g.client.V1Customers.Create(ctx, &stripe.CustomerCreateParams{
 		Email: stripe.String(email), Name: stripe.String(name),
@@ -97,7 +110,13 @@ func (g *StripeGateway) CreateSubscription(ctx context.Context, customerID strin
 		return "", err
 	}
 	if sub.LatestInvoice == nil || sub.LatestInvoice.ConfirmationSecret == nil || sub.LatestInvoice.ConfirmationSecret.ClientSecret == "" {
-		return "", fmt.Errorf("stripe: subscription %s has no confirmation secret on its first invoice", sub.ID)
+		// The subscription exists (incomplete) but the rider cannot pay
+		// it; cancel it so it does not linger in the dashboard, and say
+		// what the likely cause is.
+		if _, cancelErr := g.client.V1Subscriptions.Cancel(ctx, sub.ID, nil); cancelErr != nil {
+			return "", fmt.Errorf("stripe: subscription %s has no confirmation secret on its first invoice (API version without latest_invoice.confirmation_secret?); cancelling it also failed: %w", sub.ID, cancelErr)
+		}
+		return "", fmt.Errorf("stripe: subscription %s had no confirmation secret on its first invoice (API version without latest_invoice.confirmation_secret?); cancelled", sub.ID)
 	}
 	return sub.LatestInvoice.ConfirmationSecret.ClientSecret, nil
 }

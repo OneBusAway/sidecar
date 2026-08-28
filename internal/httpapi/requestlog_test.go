@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -86,4 +87,41 @@ func (panicRegions) UpsertFromDirectory(context.Context, []regions.Region, time.
 }
 func (panicRegions) SetLocalFields(context.Context, int64, regions.LocalFields, time.Time) error {
 	panic("boom")
+}
+
+// TestRequestLog_PanicAfterHeaders pins the other half of the panic
+// contract: once a handler has written, the middleware logs the status the
+// client actually saw and aborts the connection (http.ErrAbortHandler)
+// rather than letting a truncated body be finished as if complete.
+func TestRequestLog_PanicAfterHeaders(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	deps := httpapi.Deps{Now: func() time.Time { return base }, Logger: slog.New(slog.NewTextHandler(&buf, nil))}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /late", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		panic("late")
+	})
+	mux.HandleFunc("GET /silent", func(http.ResponseWriter, *http.Request) {})
+	h := httpapi.RequestLogForTest(deps, mux)
+
+	rec := httptest.NewRecorder()
+	func() {
+		defer func() {
+			p := recover()
+			if perr, ok := p.(error); !ok || !errors.Is(perr, http.ErrAbortHandler) {
+				t.Fatalf("recovered %v, want http.ErrAbortHandler", p)
+			}
+		}()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/late", nil))
+	}()
+	if rec.Code != http.StatusOK || !strings.Contains(buf.String(), "status=200") || !strings.Contains(buf.String(), "httpapi: panic") {
+		t.Fatalf("late panic: code %d log %q", rec.Code, buf.String())
+	}
+	buf.Reset()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/silent", nil))
+	if !strings.Contains(buf.String(), "status=200") {
+		t.Fatalf("handler that wrote nothing should log 200: %q", buf.String())
+	}
 }

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -59,10 +60,17 @@ func (h *donationsHandler) create(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		writeJSON(w, h.deps.Logger, http.StatusOK, resp)
 	case errors.Is(err, donations.ErrInvalid):
-		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		// The wire message drops the package prefix; the class is the status.
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, strings.TrimPrefix(err.Error(), donations.ErrInvalid.Error()+": "))
+	case errors.Is(err, donations.ErrTestModeUnavailable):
+		// A static configuration gap already warned about at boot; Warn so
+		// each test-mode tap does not become a tracked error.
+		h.deps.Logger.Warn("httpapi: donation", "recurring", req.Recurring, "test_mode", true, "err", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	case errors.Is(err, context.Canceled):
+		h.deps.Logger.Info("httpapi: donation abandoned by client", "recurring", req.Recurring)
+		w.WriteHeader(http.StatusInternalServerError)
 	default:
-		// Includes ErrTestModeUnavailable: a test-mode request against a
-		// deployment with no test key is a configuration gap, logged as such.
 		h.deps.Logger.Error("httpapi: donation", "recurring", req.Recurring, "test_mode", req.TestMode, "err", err)
 		w.WriteHeader(http.StatusInternalServerError)
 	}

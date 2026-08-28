@@ -13,6 +13,7 @@ package export
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -73,8 +74,8 @@ type Study struct {
 	Surveys     []Survey  `json:"surveys"`
 }
 
-// Survey is one questionnaire. VisibleStopList / VisibleRouteList nil
-// means everywhere.
+// Survey is one questionnaire. VisibleStopList / VisibleRouteList nil or
+// empty means everywhere.
 type Survey struct {
 	ID                      int64      `json:"id"`
 	Name                    string     `json:"name"`
@@ -173,7 +174,7 @@ func (c *Counts) Tally(n int64) bool {
 
 // Summary counts what an import did, per kind.
 type Summary struct {
-	Alerts, Studies, Surveys, Questions, SurveyResponses, PushRegistrations, GhostBusReports Counts
+	Alerts, Translations, Studies, Surveys, Questions, SurveyResponses, PushRegistrations, GhostBusReports Counts
 }
 
 // Lines renders the summary one kind per line, for the CLI.
@@ -182,7 +183,7 @@ func (s Summary) Lines() []string {
 		label string
 		c     Counts
 	}{
-		{"alerts", s.Alerts}, {"studies", s.Studies}, {"surveys", s.Surveys}, {"questions", s.Questions},
+		{"alerts", s.Alerts}, {"translations", s.Translations}, {"studies", s.Studies}, {"surveys", s.Surveys}, {"questions", s.Questions},
 		{"survey responses", s.SurveyResponses}, {"push registrations", s.PushRegistrations}, {"ghost bus reports", s.GhostBusReports},
 	}
 	out := make([]string, len(kinds))
@@ -207,7 +208,9 @@ func (d *Document) Validate() error {
 			return fmt.Errorf("export: alert %d needs a positive id, header_text, and start_time", a.ID)
 		}
 		for _, t := range a.Translations {
-			if t.Language == "" || t.Language == "en" {
+			// Compared normalized, the way the store writes it, so "EN" is
+			// caught here and not by the CHECK constraint mid-transaction.
+			if lang := strings.ToLower(strings.TrimSpace(t.Language)); lang == "" || lang == "en" {
 				return fmt.Errorf("export: alert %d translation language %q must be a non-English BCP-47 tag", a.ID, t.Language)
 			}
 		}
@@ -245,7 +248,11 @@ func (d *Document) Validate() error {
 			return fmt.Errorf("export: ghost bus report %q needs public_id, user_identifier, and trip_identifier", g.PublicID)
 		}
 		switch g.SnapshotStatus {
-		case "pending", "captured", "unavailable":
+		case "pending", "unavailable":
+		case "captured":
+			if len(g.Snapshot) == 0 || string(g.Snapshot) == "null" {
+				return fmt.Errorf("export: ghost bus report %q is captured but has no snapshot", g.PublicID)
+			}
 		default:
 			return fmt.Errorf("export: ghost bus report %q has snapshot_status %q", g.PublicID, g.SnapshotStatus)
 		}

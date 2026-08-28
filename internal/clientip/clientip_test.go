@@ -21,6 +21,7 @@ func TestParse(t *testing.T) {
 		{setting: "Cloudflare", header: "CF-Connecting-IP"},
 		{setting: "render", header: "True-Client-IP"},
 		{setting: "header:X-Real-IP", header: "X-Real-IP"},
+		{setting: "Header:x-real-ip", header: "X-Real-IP"},
 		{setting: "header:", wantErr: true},
 		{setting: "header:bad header", wantErr: true},
 		{setting: "xff", wantErr: true},
@@ -44,7 +45,7 @@ func TestParse(t *testing.T) {
 			r.Header.Set("X-Real-IP", "203.0.113.3")
 			want := "10.0.0.7"
 			if tc.header != "" {
-				want = r.Header.Get(tc.header)
+				want = "10.0.0.7|" + r.Header.Get(tc.header)
 			}
 			if got := res(r); got != want {
 				t.Fatalf("Parse(%q) resolver = %q, want %q", tc.setting, got, want)
@@ -68,8 +69,14 @@ func TestHeaderFallsBackToPeer(t *testing.T) {
 		t.Fatalf("garbage header: got %q, want peer", got)
 	}
 	r.Header.Set("CF-Connecting-IP", " 2001:db8::1 ")
-	if got := res(r); got != "2001:db8::1" {
+	if got := res(r); got != "10.0.0.7|2001:db8::1" {
 		t.Fatalf("ipv6 header: got %q", got)
+	}
+	// A forged header from a different peer lands in that peer's own
+	// buckets, never in the proxied client's.
+	r.RemoteAddr = "198.51.100.9:1"
+	if got := res(r); got != "198.51.100.9|2001:db8::1" {
+		t.Fatalf("forged header not peer-qualified: got %q", got)
 	}
 }
 

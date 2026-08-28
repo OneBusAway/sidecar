@@ -14,6 +14,9 @@ dbs:
       region: ${SIDECAR_BACKUP_REGION}
       access-key-id: ${SIDECAR_BACKUP_ACCESS_KEY_ID}
       secret-access-key: ${SIDECAR_BACKUP_SECRET_ACCESS_KEY}
-      # How long a restore can reach back (Litestream retains snapshots and
-      # WAL segments for this window, then compacts).
-      retention: ${SIDECAR_BACKUP_RETENTION}
+
+# How long a point-in-time restore can reach back. In Litestream 0.5 this
+# lives under `snapshot`, not on the replica (an unknown replica key is
+# silently ignored, which is how a misplaced setting would fail).
+snapshot:
+  retention: ${SIDECAR_BACKUP_RETENTION}

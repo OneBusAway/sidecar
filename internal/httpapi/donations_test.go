@@ -149,3 +149,35 @@ func TestDonations_ThrottleAndAbsence(t *testing.T) {
 		t.Errorf("unconfigured deployment: %d, want 404", rec.Code)
 	}
 }
+
+// TestDonations_TestModeSpellings pins which test_mode encodings route to
+// the test key: a wrong answer here charges a real card during testing.
+func TestDonations_TestModeSpellings(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		`"1"`: true, `"true"`: true, `"T"`: true, `"on"`: true, `true`: true,
+		`"0"`: false, `"false"`: false, `false`: false, `"yes"`: false, `null`: false, ``: false,
+	}
+	for raw, wantTest := range cases {
+		live, test := &donationGateway{}, &donationGateway{}
+		h := newDonationsServer(t, live, test)
+		body := `{"donation_amount_in_cents":"500","donation_frequency":"onetime","name":"x","email":"x@example.com"`
+		if raw != `` {
+			body += `,"test_mode":` + raw
+		}
+		body += `}`
+		rec := postDonation(h, body, "203.0.113.7")
+		if rec.Code != http.StatusOK {
+			t.Errorf("test_mode=%s: status %d %s", raw, rec.Code, rec.Body.String())
+			continue
+		}
+		if gotTest := test.last.Email != ""; gotTest != wantTest {
+			t.Errorf("test_mode=%s routed to test=%v, want %v", raw, gotTest, wantTest)
+		}
+	}
+	// A fractional amount is rejected.
+	rec := postDonation(newDonationsServer(t, &donationGateway{}, nil), `{"donation_amount_in_cents":500.5,"email":"x@example.com"}`, "203.0.113.8")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("fractional amount: %d", rec.Code)
+	}
+}

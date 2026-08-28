@@ -30,17 +30,24 @@ func Peer(r *http.Request) string {
 	return host
 }
 
-// Header returns a Resolver that reads the named header, falling back to
-// Peer when the header is absent or is not a bare IP address. The fallback
-// keeps a misconfigured deployment throttling on something rather than on
-// the empty string, which every request would share.
+// Header returns a Resolver that keys on the named header's address
+// qualified by the TCP peer -- "peer|client" -- and on the peer alone when
+// the header is absent or is not a bare IP address. Qualifying by the peer
+// is what makes the header safe to trust: a request that reaches the origin
+// without passing through the proxy (Render's own *.onrender.com hostname
+// stays reachable beside a Cloudflare-proxied custom domain) can forge the
+// header, but a forged value only subdivides that sender's own peer bucket;
+// it can never join or escape anyone else's. Traffic that does come through
+// the proxy shares the proxy's peer address and is told apart by the header,
+// which is the whole point.
 func Header(name string) Resolver {
 	return func(r *http.Request) string {
+		peer := Peer(r)
 		v := strings.TrimSpace(r.Header.Get(name))
 		if ip := net.ParseIP(v); ip != nil {
-			return ip.String()
+			return peer + "|" + ip.String()
 		}
-		return Peer(r)
+		return peer
 	}
 }
 
@@ -58,7 +65,7 @@ func Parse(setting string) (Resolver, error) {
 	case "render":
 		return Header("True-Client-IP"), nil
 	}
-	if name, ok := strings.CutPrefix(s, "header:"); ok {
+	if name, ok := strings.CutPrefix(strings.ToLower(s[:min(len(s), len("header:"))])+s[min(len(s), len("header:")):], "header:"); ok {
 		name = strings.TrimSpace(name)
 		if name == "" || !validHeaderName(name) {
 			return nil, fmt.Errorf("trusted proxy: %q is not a valid header name", name)

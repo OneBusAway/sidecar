@@ -41,10 +41,13 @@ func runImport(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	if decodeErr := dec.Decode(&doc); decodeErr != nil {
 		return fmt.Errorf("import: %s: %w", *file, decodeErr)
 	}
-	if validateErr := doc.Validate(); validateErr != nil {
-		return validateErr
-	}
 	if *dryRun {
+		// The same pre-checks the real import runs, so a clean dry run
+		// means the import will not stop on validation (it can still
+		// stop on a conflict, which needs the database).
+		if validateErr := store.ValidateImport(ctx, &doc, now); validateErr != nil {
+			return validateErr
+		}
 		fmt.Fprintf(stdout, "dry run: %s is a valid %s document for region %d: %d alerts, %d studies, %d survey responses, %d push registrations, %d ghost bus reports\n",
 			*file, doc.Format, doc.RegionID, len(doc.Alerts), len(doc.Studies), len(doc.SurveyResponses), len(doc.PushRegistrations), len(doc.GhostBusReports))
 		return nil

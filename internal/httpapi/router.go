@@ -56,8 +56,8 @@ type Deps struct {
 	BearerFailLimiter *ratelimit.Limiter
 	Now               func() time.Time
 	Logger            *slog.Logger
-	// ClientIP is the key every per-IP throttle (and the failed-login log
-	// line) uses, read through deps.clientIP, which falls back to the TCP
+	// ClientIP is the key every per-IP throttle, the request log's ip, and
+	// the failed-auth log lines use, read through deps.clientIP, which falls back to the TCP
 	// peer (clientip.Peer) when nil; main sets a header-reading resolver only
 	// when SIDECAR_TRUSTED_PROXY opts in (README, Deployment). Tests inject
 	// their own to pin bucket identity.

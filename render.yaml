@@ -61,6 +61,10 @@ services:
         sync: false
       - key: SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID
         sync: false
+      # Riders arrive through the Cloudflare-proxied custom domain, which
+      # sets CF-Connecting-IP. The *.onrender.com hostname stays reachable
+      # and does not; a request there can forge the header, but the key is
+      # peer-qualified so a forgery only subdivides that sender's own bucket.
       - key: SIDECAR_TRUSTED_PROXY
         value: cloudflare
       - key: SIDECAR_LOG_FORMAT

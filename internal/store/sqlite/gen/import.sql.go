@@ -10,13 +10,25 @@ import (
 	"database/sql"
 )
 
+const getQuestionSurveyID = `-- name: GetQuestionSurveyID :one
+SELECT survey_id FROM survey_questions WHERE id = ?
+`
+
+func (q *Queries) GetQuestionSurveyID(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getQuestionSurveyID, id)
+	var survey_id int64
+	err := row.Scan(&survey_id)
+	return survey_id, err
+}
+
 const importAlert = `-- name: ImportAlert :execrows
 
-INSERT OR IGNORE INTO alerts (
+INSERT INTO alerts (
   id, region_id, agency_id, header_text, description_text, url,
   cause, effect, severity_level, start_time, end_time,
   published, is_test, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING
 `
 
 type ImportAlertParams struct {
@@ -38,9 +50,13 @@ type ImportAlertParams struct {
 }
 
 // Import statements (internal/export): every insert carries the source's
-// id or natural key and ignores a row that already exists, so re-running
-// an import on a later export adds only what is new. :execrows reports
-// whether the row landed. Timestamps are epoch seconds, as everywhere.
+// id or natural key and does nothing when THAT key already exists, so
+// re-running an import on a later export adds only what is new. The
+// conflict target is named per statement on purpose: any other constraint
+// (a CHECK, a second UNIQUE such as a question's position or a ghost bus
+// report's dedupe key) still fails loudly instead of being counted as
+// "already present". :execrows reports whether the row landed. Timestamps
+// are epoch seconds, as everywhere.
 func (q *Queries) ImportAlert(ctx context.Context, arg ImportAlertParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, importAlert,
 		arg.ID,
@@ -66,9 +82,10 @@ func (q *Queries) ImportAlert(ctx context.Context, arg ImportAlertParams) (int64
 }
 
 const importAlertTranslation = `-- name: ImportAlertTranslation :execrows
-INSERT OR IGNORE INTO alert_translations (
+INSERT INTO alert_translations (
   alert_id, language, field, text, source_sha256, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (alert_id, language, field) DO NOTHING
 `
 
 type ImportAlertTranslationParams struct {
@@ -98,7 +115,7 @@ func (q *Queries) ImportAlertTranslation(ctx context.Context, arg ImportAlertTra
 }
 
 const importGhostBusReport = `-- name: ImportGhostBusReport :execrows
-INSERT OR IGNORE INTO ghost_bus_reports (
+INSERT INTO ghost_bus_reports (
   region_id, public_identifier, user_identifier, trip_identifier, service_date,
   route_identifier, stop_identifier, vehicle_identifier, stop_sequence,
   predicted, schedule_deviation_minutes, wait_duration_minutes, comment,
@@ -107,6 +124,7 @@ INSERT OR IGNORE INTO ghost_bus_reports (
   snapshot_status, snapshot_json, snapshot_captured_at, snapshot_attempts,
   created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (public_identifier) DO NOTHING
 `
 
 type ImportGhostBusReportParams struct {
@@ -170,10 +188,11 @@ func (q *Queries) ImportGhostBusReport(ctx context.Context, arg ImportGhostBusRe
 }
 
 const importPushRegistration = `-- name: ImportPushRegistration :execrows
-INSERT OR IGNORE INTO push_registrations (
+INSERT INTO push_registrations (
   region_id, token, operating_system, apns_sandbox, locale, test_device, description,
   last_seen_at, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (region_id, token) DO NOTHING
 `
 
 type ImportPushRegistrationParams struct {
@@ -209,8 +228,9 @@ func (q *Queries) ImportPushRegistration(ctx context.Context, arg ImportPushRegi
 }
 
 const importStudy = `-- name: ImportStudy :execrows
-INSERT OR IGNORE INTO studies (id, region_id, name, description, created_at, updated_at)
+INSERT INTO studies (id, region_id, name, description, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING
 `
 
 type ImportStudyParams struct {
@@ -238,11 +258,12 @@ func (q *Queries) ImportStudy(ctx context.Context, arg ImportStudyParams) (int64
 }
 
 const importSurvey = `-- name: ImportSurvey :execrows
-INSERT OR IGNORE INTO surveys (
+INSERT INTO surveys (
   id, study_id, name, available, start_time, end_time,
   show_on_map, show_on_stops, always_visible, allows_multiple_responses,
   visible_stop_list, visible_route_list, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING
 `
 
 type ImportSurveyParams struct {
@@ -286,9 +307,10 @@ func (q *Queries) ImportSurvey(ctx context.Context, arg ImportSurveyParams) (int
 }
 
 const importSurveyQuestion = `-- name: ImportSurveyQuestion :execrows
-INSERT OR IGNORE INTO survey_questions (
+INSERT INTO survey_questions (
   id, survey_id, position, required, question_type, content, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (id) DO NOTHING
 `
 
 type ImportSurveyQuestionParams struct {
@@ -320,10 +342,11 @@ func (q *Queries) ImportSurveyQuestion(ctx context.Context, arg ImportSurveyQues
 }
 
 const importSurveyResponse = `-- name: ImportSurveyResponse :execrows
-INSERT OR IGNORE INTO survey_responses (
+INSERT INTO survey_responses (
   survey_id, public_id, user_identifier, stop_identifier, stop_latitude, stop_longitude,
   answers, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (public_id) DO NOTHING
 `
 
 type ImportSurveyResponseParams struct {
