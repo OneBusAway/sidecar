@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -50,6 +51,26 @@ type Runner struct {
 	Logger *slog.Logger
 	// Poll overrides DefaultPoll; tests set it to milliseconds.
 	Poll time.Duration
+
+	wg sync.WaitGroup
+}
+
+// Go runs l on its own goroutine, tracked so Wait can block on it.
+func (r *Runner) Go(ctx context.Context, l Loop) {
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		r.Run(ctx, l)
+	}()
+}
+
+// Wait blocks until every loop started with Go has returned -- which, once
+// their ctx is done, means every lease has been released. cmd/sidecar
+// calls it before closing the store and exiting: a process that exits
+// with its leases still written leaves the replacement waiting out the
+// full TTL for each loop instead of taking over on its next poll.
+func (r *Runner) Wait() {
+	r.wg.Wait()
 }
 
 // Run drives l until ctx is done. It ticks immediately on acquiring the
@@ -96,7 +117,10 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 			holding = true
 			next = time.Time{}
 		}
-		if now.Before(next) {
+		// Due within half a poll counts as due: next is stamped after the
+		// tick returns, so the ticker fire that should run it lands a hair
+		// early, and an exact comparison would skip every other tick.
+		if now.Add(poll / 2).Before(next) {
 			return
 		}
 		l.Tick(ctx)

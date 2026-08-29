@@ -265,15 +265,23 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// the server starts serving from whatever rows already exist while,
 	// for example, the first directory fetch is still in flight.
 	loops := &lease.Runner{Repo: store.Leases(), Holder: leaseHolder(), Now: time.Now, Logger: logger}
+	// Registered after store.Close's defer, so it runs first: every loop
+	// must have released its lease before the store it releases through
+	// is closed. stop() is what ends the loops; on a signal the context
+	// is already done, on a serve error it is not.
+	defer func() {
+		stop()
+		loops.Wait()
+	}()
 
 	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
-	go loops.Run(ctx, lease.Loop{Name: "regions-sync", Interval: *refresh, Tick: func(ctx context.Context) {
+	loops.Go(ctx, lease.Loop{Name: "regions-sync", Interval: *refresh, Tick: func(ctx context.Context) {
 		if syncErr := regions.Sync(ctx, client, store.Regions(), time.Now); syncErr != nil {
 			logger.Error("regions: sync failed", "error", syncErr)
 		}
 	}})
 
-	go loops.Run(ctx, lease.Loop{Name: "pushreg-prune", Interval: pushRegPruneEvery, Tick: func(ctx context.Context) {
+	loops.Go(ctx, lease.Loop{Name: "pushreg-prune", Interval: pushRegPruneEvery, Tick: func(ctx context.Context) {
 		pushreg.Prune(ctx, store.PushRegs(), pushRegMaxAge, time.Now, logger)
 	}})
 
@@ -319,7 +327,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:      time.Now,
 		Logger:   logger,
 	}
-	go loops.Run(ctx, lease.Loop{Name: "alert-pushes", Interval: alertPushInterval, Wake: dispatcher.WakeC(), Tick: dispatcher.RunOnce})
+	loops.Go(ctx, lease.Loop{Name: "alert-pushes", Interval: alertPushInterval, Wake: dispatcher.WakeC(), Tick: dispatcher.RunOnce})
 
 	// The waker, unlike the dispatcher itself, is set only when a transport
 	// exists: it is what registers the admin push routes (design spec
@@ -353,13 +361,13 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:     time.Now,
 		Logger:  logger,
 	}
-	go loops.Run(ctx, lease.Loop{Name: "alarms", Interval: alarmCheckInterval, Tick: sched.CheckAll})
+	loops.Go(ctx, lease.Loop{Name: "alarms", Interval: alarmCheckInterval, Tick: sched.CheckAll})
 
 	// Live Activities share the alarm cadence (spec §6.3: once per minute)
 	// and the same store-only rule: without a sender, rows still expire and
 	// reap (design spec §2.5).
 	updater := liveactivities.NewUpdater(store.LiveActivities(), store.Regions(), deps.OBA, laSender, time.Now, logger)
-	go loops.Run(ctx, lease.Loop{Name: "live-activities", Interval: alarmCheckInterval, Tick: updater.CheckAll})
+	loops.Go(ctx, lease.Loop{Name: "live-activities", Interval: alarmCheckInterval, Tick: updater.CheckAll})
 
 	// Always runs, mirroring the alarm scheduler above: a region that
 	// resolves no OBA key just yields per-report 'unavailable' snapshots
@@ -372,7 +380,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:     time.Now,
 		Logger:  logger,
 	}
-	go loops.Run(ctx, lease.Loop{Name: "ghostbus-snapshots", Interval: ghostbus.SnapshotInterval, Tick: snapSched.CheckAll})
+	loops.Go(ctx, lease.Loop{Name: "ghostbus-snapshots", Interval: ghostbus.SnapshotInterval, Tick: snapSched.CheckAll})
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,

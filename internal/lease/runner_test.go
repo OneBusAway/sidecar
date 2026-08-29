@@ -243,3 +243,48 @@ func TestRunFloorsNonPositiveInterval(t *testing.T) {
 		stop()
 	}
 }
+
+// TestWaitReturnsOnceEveryLoopHasReleased: Go/Wait is how cmd/sidecar
+// keeps the process alive until every lease is released -- without it,
+// exit races the loops' Release and a replacement waits out the full TTL.
+func TestWaitReturnsOnceEveryLoopHasReleased(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	r := newRunner(repo)
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &counter{}
+	r.Go(ctx, lease.Loop{Name: "a", Interval: time.Hour, Tick: c.tick})
+	r.Go(ctx, lease.Loop{Name: "b", Interval: time.Hour, Tick: c.tick})
+	waitFor(t, "both leases acquired", func() bool { return repo.holderOf("a") == "me" && repo.holderOf("b") == "me" })
+
+	cancel()
+	done := make(chan struct{})
+	go func() { r.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return after ctx was cancelled")
+	}
+	if a, b := repo.holderOf("a"), repo.holderOf("b"); a != "" || b != "" {
+		t.Fatalf("holders after Wait = %q, %q; want both released", a, b)
+	}
+}
+
+// TestRunDoesNotSkipTicksOnTimerJitter: the next-tick instant is stamped
+// after a tick returns, so the following ticker fire lands a few
+// microseconds before it. Treated as "not yet due", every other tick would
+// be skipped -- the trap spec section 6.3 describes for the Live Activity
+// keepalive. With interval == poll, roughly every poll must tick: 500ms at
+// 20ms is ~25 ticks; the every-other-tick bug yields ~12.
+func TestRunDoesNotSkipTicksOnTimerJitter(t *testing.T) {
+	t.Parallel()
+	c := &counter{}
+	r := newRunner(newFakeRepo())
+	r.Poll = 20 * time.Millisecond
+	stop := start(t, r, lease.Loop{Name: "alarms", Interval: 20 * time.Millisecond, Tick: c.tick})
+	time.Sleep(500 * time.Millisecond)
+	stop()
+	if n := c.n.Load(); n < 18 {
+		t.Fatalf("ticked %d times in 500ms at a 20ms interval, want at least 18 (every-other-tick skip?)", n)
+	}
+}
