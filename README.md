@@ -1158,7 +1158,12 @@ line rather than leaning on the image's `SIDECAR_DB`, and on staging
 `SIDECAR_REGIONS_URL` from its own environment, and a non-interactive
 `ssh host command` is not guaranteed to inherit the service's, so a bare
 `region sync` there can quietly pull the production directory over the
-staging one.
+staging one. `--regions-url` is a flag on `sidecar-admin` itself, not on
+`region sync`, so it has to come before the subcommand:
+
+```sh
+render ssh sidecar-staging -- sidecar-admin --db /data/sidecar.db --regions-url https://<staging directory>/regions-v3.json region sync
+```
 
 The first admin user needs a real terminal, because the password is
 prompted for twice and deliberately cannot be passed as an argument:
