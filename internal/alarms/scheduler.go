@@ -246,7 +246,3 @@ func (s *Scheduler) countFailure(ctx context.Context, alarm Alarm) {
 		s.Logger.Info("alarms: reaped unresolvable alarm", "region_id", alarm.RegionID, "failures", streak)
 	}
 }
-
-// The once-a-minute cadence (§5.3) is cmd/sidecar's: it drives CheckAll
-// through a lease.Runner so that, with a shared database, one process at
-// a time runs the sweep.

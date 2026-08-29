@@ -298,9 +298,13 @@ func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Ala
 }
 
 const listDueAlarms = `-- name: ListDueAlarms :many
-SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE check_after <= ?1 ORDER BY id
+
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE check_after <= ?1
 `
 
+// ListDueAlarms is deliberately unordered and unindexed: the sweep fans
+// out concurrently, most rows match (every fresh alarm is due), and the
+// 3-strike reaper bounds the table, so a plain scan is the cheap path.
 func (q *Queries) ListDueAlarms(ctx context.Context, now int64) ([]Alarm, error) {
 	rows, err := q.db.QueryContext(ctx, listDueAlarms, now)
 	if err != nil {

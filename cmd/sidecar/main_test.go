@@ -74,12 +74,9 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: 0,
 		},
 		{
-			// time.NewTicker panics on a duration <= 0. --refresh=0 is a
-			// natural way to try to disable the sync loop; it must be
-			// rejected here, cleanly, rather than reaching RunSyncLoop's
-			// goroutine (which has no recover) and taking the whole
-			// process -- including the already-serving HTTP server -- down
-			// with it.
+			// --refresh=0 is a natural way to try to disable directory
+			// sync; it must be rejected explicitly rather than silently
+			// run at the lease runner's fallback cadence.
 			name:          "non-positive refresh (zero) returns an error and writes nothing to stdout",
 			args:          []string{"--refresh=0"},
 			wantErr:       true,

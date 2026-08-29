@@ -132,6 +132,3 @@ func (s *SnapshotScheduler) markUnavailable(ctx context.Context, rep Report, why
 	}
 	s.Logger.Info("ghostbus: snapshot unavailable", "region_id", rep.RegionID, "reason", why)
 }
-
-// The SnapshotInterval cadence is cmd/sidecar's, through a lease.Runner,
-// as for alarms.Scheduler.CheckAll.

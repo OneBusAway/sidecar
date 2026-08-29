@@ -278,6 +278,3 @@ func (u *Updater) end(ctx context.Context, la LiveActivity, reason string) {
 			"region_id", la.RegionID, "stop_id", la.StopID, "reason", reason)
 	}
 }
-
-// The once-a-minute cadence (§6.3) is cmd/sidecar's, through a
-// lease.Runner, as for alarms.Scheduler.CheckAll.

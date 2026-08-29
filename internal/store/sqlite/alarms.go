@@ -60,9 +60,19 @@ func alarmFromRow(a gen.Alarm) alarms.Alarm {
 	}
 }
 
+func alarmsFromRows(rows []gen.Alarm) []alarms.Alarm {
+	out := make([]alarms.Alarm, len(rows))
+	for i, row := range rows {
+		out[i] = alarmFromRow(row)
+	}
+	return out
+}
+
 // checkAfterToTime maps the column's 0 ("due now") to the zero time.Time
 // the domain uses for the same meaning; unixToTime would render it as the
-// Unix epoch, which is a real instant.
+// Unix epoch, which is a real instant. The column is NOT NULL DEFAULT 0
+// rather than nullable so the sweep's predicate is one comparison and a
+// fresh row needs no explicit value.
 func checkAfterToTime(n int64) time.Time {
 	if n == 0 {
 		return time.Time{}
@@ -152,11 +162,7 @@ func (r *alarmRepo) List(ctx context.Context) ([]alarms.Alarm, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list alarms: %w", err)
 	}
-	out := make([]alarms.Alarm, len(rows))
-	for i, row := range rows {
-		out[i] = alarmFromRow(row)
-	}
-	return out, nil
+	return alarmsFromRows(rows), nil
 }
 
 func (r *alarmRepo) ListDue(ctx context.Context, now time.Time) ([]alarms.Alarm, error) {
@@ -164,11 +170,7 @@ func (r *alarmRepo) ListDue(ctx context.Context, now time.Time) ([]alarms.Alarm,
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list due alarms: %w", err)
 	}
-	out := make([]alarms.Alarm, len(rows))
-	for i, row := range rows {
-		out[i] = alarmFromRow(row)
-	}
-	return out, nil
+	return alarmsFromRows(rows), nil
 }
 
 // Defer treats a missing row as success, like DeleteByID: the sweep may
@@ -210,11 +212,7 @@ func (r *alarmRepo) ListByRegion(ctx context.Context, regionID int64) ([]alarms.
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list alarms (region %d): %w", regionID, err)
 	}
-	out := make([]alarms.Alarm, len(rows))
-	for i, row := range rows {
-		out[i] = alarmFromRow(row)
-	}
-	return out, nil
+	return alarmsFromRows(rows), nil
 }
 
 // GetInRegion reports alarms.ErrNotFound for an unknown id -- including an

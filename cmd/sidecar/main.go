@@ -195,12 +195,11 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
 	}
 
-	// time.NewTicker panics on a duration <= 0. --refresh=0 is a natural way
-	// to try to disable the sync loop, and --refresh=nonsense is already
-	// rejected by fs.Parse above; a non-positive value that parses cleanly
-	// (0 or a negative duration) must be rejected the same clean way here,
-	// before the sync loop's goroutine can panic and take the whole process
-	// -- including the HTTP server, already serving by then -- down with it.
+	// --refresh=0 is a natural way to try to disable directory sync, and
+	// --refresh=nonsense is already rejected by fs.Parse above; a
+	// non-positive value that parses cleanly must be rejected the same
+	// explicit way rather than silently run at the lease runner's fallback
+	// cadence.
 	if *refresh <= 0 {
 		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}

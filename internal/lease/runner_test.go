@@ -2,7 +2,6 @@ package lease_test
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -75,7 +74,7 @@ func newRunner(repo lease.Repository) *lease.Runner {
 		Holder: "me",
 		Now:    time.Now,
 		Poll:   2 * time.Millisecond,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.DiscardHandler),
 	}
 }
 
@@ -270,12 +269,11 @@ func TestWaitReturnsOnceEveryLoopHasReleased(t *testing.T) {
 	}
 }
 
-// TestRunDoesNotSkipTicksOnTimerJitter: the next-tick instant is stamped
-// after a tick returns, so the following ticker fire lands a few
-// microseconds before it. Treated as "not yet due", every other tick would
-// be skipped -- the trap spec section 6.3 describes for the Live Activity
-// keepalive. With interval == poll, roughly every poll must tick: 500ms at
-// 20ms is ~25 ticks; the every-other-tick bug yields ~12.
+// TestRunDoesNotSkipTicksOnTimerJitter pins the tick cadence against the
+// trap spec section 6.3 describes for the Live Activity keepalive: a
+// scheduler that stamps "next tick" after a tick returns and compares
+// exactly skips every other ticker fire. 500ms at 20ms is ~25 ticks; the
+// every-other-tick bug yields ~12.
 func TestRunDoesNotSkipTicksOnTimerJitter(t *testing.T) {
 	t.Parallel()
 	c := &counter{}

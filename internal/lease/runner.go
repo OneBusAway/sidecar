@@ -8,14 +8,14 @@ import (
 )
 
 // DefaultPoll is the cadence at which a Runner renews a lease it holds and
-// retries one it does not, unless the loop's own interval is shorter. One
-// cheap single-row upsert per loop per minute; a holder that dies is
-// replaced within TTL (three polls).
+// retries one it does not, independent of any loop's tick interval: one
+// cheap single-row upsert per loop per minute.
 const DefaultPoll = time.Minute
 
 // ttlPolls is the lease TTL expressed in polls. Three, not one: a single
 // missed renewal -- a slow tick, a GC pause, a busy database -- must not
 // hand the loop to another process while the holder is still running it.
+// A holder that dies is replaced within TTL.
 const ttlPolls = 3
 
 // releaseTimeout bounds the shutdown Release, which runs after the loop's
@@ -73,11 +73,12 @@ func (r *Runner) Wait() {
 	r.wg.Wait()
 }
 
-// Run drives l until ctx is done. It ticks immediately on acquiring the
-// lease (so a fresh deploy catches up at boot rather than an interval
-// later), then every l.Interval; a Tick that outlives the TTL can overlap
-// with a new holder's, which every loop tolerates (at-least-once, spec
-// section 12).
+// Run drives l until ctx is done. Two clocks: the lease is renewed (or
+// retried) every poll, and while it is held the loop ticks every
+// l.Interval, starting with an immediate tick on acquiring the lease so a
+// fresh deploy catches up at boot rather than an interval later. A Tick
+// that outlives the TTL can overlap with a new holder's, which every loop
+// tolerates (at-least-once, spec section 12).
 func (r *Runner) Run(ctx context.Context, l Loop) {
 	interval := l.Interval
 	if interval <= 0 {
@@ -88,59 +89,48 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 	if poll <= 0 {
 		poll = DefaultPoll
 	}
-	if interval < poll {
-		poll = interval
-	}
 	ttl := ttlPolls * poll
 
 	holding := false
-	var next time.Time // zero: a tick is due as soon as the lease is held
-	step := func() {
-		now := r.Now()
-		ok, err := r.Repo.Acquire(ctx, l.Name, r.Holder, now, ttl)
-		if err != nil {
+	// renew acquires or renews the lease and reports whether it is held.
+	// On acquiring it, the loop ticks at once.
+	renew := func() {
+		ok, err := r.Repo.Acquire(ctx, l.Name, r.Holder, r.Now(), ttl)
+		switch {
+		case err != nil:
 			// Conservative: a store we cannot reach is one we cannot renew
 			// through either, so assume the lease is lost until it answers.
 			r.Logger.Warn("lease: acquire", "loop", l.Name, "err", err)
-			holding = false
-			return
+		case !ok && holding:
+			r.Logger.Warn("lease: lost to another process", "loop", l.Name)
 		}
-		if !ok {
-			if holding {
-				r.Logger.Warn("lease: lost to another process", "loop", l.Name)
-			}
-			holding = false
-			return
-		}
-		if !holding {
+		was := holding
+		holding = err == nil && ok
+		if holding && !was {
 			r.Logger.Info("lease: acquired", "loop", l.Name, "holder", r.Holder)
-			holding = true
-			next = time.Time{}
+			l.Tick(ctx)
 		}
-		// Due within half a poll counts as due: next is stamped after the
-		// tick returns, so the ticker fire that should run it lands a hair
-		// early, and an exact comparison would skip every other tick.
-		if now.Add(poll / 2).Before(next) {
-			return
-		}
-		l.Tick(ctx)
-		next = r.Now().Add(interval)
 	}
 
-	step()
-	ticker := time.NewTicker(poll)
+	renew()
+	poller := time.NewTicker(poll)
+	defer poller.Stop()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			r.release(l.Name)
 			return
+		case <-poller.C:
+			renew()
 		case <-ticker.C:
-			step()
+			if holding {
+				l.Tick(ctx)
+			}
 		case <-l.Wake:
 			if holding {
 				l.Tick(ctx)
-				next = r.Now().Add(interval)
 			}
 		}
 	}
