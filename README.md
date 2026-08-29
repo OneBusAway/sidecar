@@ -101,7 +101,7 @@ sidecar-admin survey  create --study N --file <path|->
                        delete ID
                        responses ID        # long-format CSV, one row per answer
 sidecar-admin ghostbus export --region N [--since RFC3339]   # CSV, one row per report
-sidecar-admin key     create --region N --name S              # prints the raw key once
+sidecar-admin key     create --region N --name S [--scope push]  # prints the raw key once
                        list   --region N | --minted-by-principal N
                        revoke --region N --id N
 sidecar-admin principal create --name S                        # prints the raw key once
@@ -677,11 +677,23 @@ manual testing or a deployment with no external consumer yet:
 ```sh
 ./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name "manual test key"
 # obask_1_WlDL9LeQxtC1KYww…
-# id: 2  name: manual test key
+# id: 2  name: manual test key  scopes: —
 
 ./bin/sidecar-admin --db ./sidecar.db key list --region 1
-# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —  —
-# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —
+# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —  —  —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —  —
+```
+
+A key carries **scopes**: named capabilities on top of the ordinary
+region-scoped authoring surface. `--scope push` is repeatable and is the only
+one defined; `key list` renders a key's scopes in its last column, `—` for a
+key with none. Existing keys have no scopes and so keep exactly the reach
+they had.
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name rails --scope push
+# obask_1_9nQ2sVb7pKdT0mXe…
+# id: 3  name: rails  scopes: push
 ```
 
 A key is never scoped to more than one region, and nothing limits a region

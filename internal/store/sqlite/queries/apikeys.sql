@@ -5,9 +5,9 @@
 
 -- name: CreateRegionAPIKey :one
 INSERT INTO region_api_keys (
-  region_id, name, key_hash, created_by_kind, created_by_id, created_at
+  region_id, name, key_hash, scopes, created_by_kind, created_by_id, created_at
 ) VALUES (
-  sqlc.arg(region_id), sqlc.arg(name), sqlc.arg(key_hash),
+  sqlc.arg(region_id), sqlc.arg(name), sqlc.arg(key_hash), sqlc.arg(scopes),
   sqlc.arg(created_by_kind), sqlc.arg(created_by_id), sqlc.arg(created_at)
 )
 RETURNING *;

@@ -1661,7 +1661,7 @@ func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, e
 // credentials.
 type failingAPIKeys struct{}
 
-func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Actor, time.Time) (apikey.RegionKey, error) {
+func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Scopes, apikey.Actor, time.Time) (apikey.RegionKey, error) {
 	return apikey.RegionKey{}, errStoreBroken
 }
 

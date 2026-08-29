@@ -115,7 +115,7 @@ func (h *adminAPIKeysHandler) create(w http.ResponseWriter, r *http.Request) {
 		serverErrorJSON(w, h.deps.Logger, "mint region api key", err)
 		return
 	}
-	created, err := h.deps.APIKeys.CreateRegionKey(r.Context(), region.ID, name, hash, p.actor(), h.deps.Now())
+	created, err := h.deps.APIKeys.CreateRegionKey(r.Context(), region.ID, name, hash, nil, p.actor(), h.deps.Now())
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "create region api key", err)
 		return

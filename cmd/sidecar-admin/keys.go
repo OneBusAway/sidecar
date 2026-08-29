@@ -38,6 +38,29 @@ func formatActor(a apikey.Actor) string {
 // key
 // ---------------------------------------------------------------------------
 
+// scopeFlag collects a repeatable --scope. flag.Value rather than a
+// comma-split string so `--scope push --scope other` reads the way every
+// other repeatable flag in this CLI would.
+type scopeFlag []string
+
+// String implements flag.Value.
+func (s *scopeFlag) String() string { return strings.Join(*s, ",") }
+
+// Set implements flag.Value.
+func (s *scopeFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// formatScopes renders a key's scopes for a table cell: comma-joined, or a
+// dash for none, matching the other optional columns.
+func formatScopes(s apikey.Scopes) string {
+	if len(s) == 0 {
+		return "—"
+	}
+	return strings.Join(s.Strings(), ",")
+}
+
 // runKey dispatches `sidecar-admin key`'s subcommands.
 func runKey(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	if len(args) == 0 {
@@ -65,6 +88,8 @@ func keyCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	fs.SetOutput(io.Discard)
 	regionID := fs.Int64("region", 0, "region id (required; 0 is a real region, Tampa Bay)")
 	name := fs.String("name", "", "a label for this key (required)")
+	var scopeNames scopeFlag
+	fs.Var(&scopeNames, "scope", "grant a scope (repeatable); the only defined scope is push")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,17 +116,22 @@ func keyCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 		return fmt.Errorf("key create: %w", err)
 	}
 
+	scopes, err := apikey.ParseScopes(scopeNames)
+	if err != nil {
+		return fmt.Errorf("key create: %w", err)
+	}
+
 	raw, hash, err := apikey.NewRegionKey(*regionID)
 	if err != nil {
 		return fmt.Errorf("key create: %w", err)
 	}
-	created, err := store.APIKeys().CreateRegionKey(ctx, *regionID, *name, hash, apikey.Actor{Kind: apikey.ActorCLI}, now)
+	created, err := store.APIKeys().CreateRegionKey(ctx, *regionID, *name, hash, scopes, apikey.Actor{Kind: apikey.ActorCLI}, now)
 	if err != nil {
 		return fmt.Errorf("key create: %w", err)
 	}
 
 	fmt.Fprintln(stdout, raw)
-	fmt.Fprintf(stdout, "id: %d\tname: %s\n", created.ID, created.Name)
+	fmt.Fprintf(stdout, "id: %d\tname: %s\tscopes: %s\n", created.ID, created.Name, formatScopes(created.Scopes))
 	return nil
 }
 
@@ -158,9 +188,9 @@ func keyList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []
 		// repository directly, as this CLI's own `key create` does -- must
 		// not repaint the terminal of the operator investigating a
 		// compromise.
-		fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			k.ID, regions.StripControlChars(k.Name), formatActor(k.CreatedBy),
-			formatKeyInstant(k.CreatedAt), lastUsed, revoked, revokedBy)
+			formatKeyInstant(k.CreatedAt), lastUsed, revoked, revokedBy, formatScopes(k.Scopes))
 	}
 	return nil
 }

@@ -37,10 +37,13 @@ const (
 
 // RegionKey is one bearer credential scoped to exactly one region.
 type RegionKey struct {
-	ID         int64
-	RegionID   int64
-	Name       string
-	KeyHash    string
+	ID       int64
+	RegionID int64
+	Name     string
+	KeyHash  string
+	// Scopes widens what the key may do beyond the region-scoped authoring
+	// surface; see Scope. Empty for every key minted before scopes existed.
+	Scopes     Scopes
 	CreatedBy  Actor
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
@@ -56,6 +59,7 @@ func (k RegionKey) LogValue() slog.Value {
 		slog.Int64("id", k.ID),
 		slog.Int64("region_id", k.RegionID),
 		slog.String("name", k.Name),
+		slog.Any("scopes", k.Scopes.Strings()),
 		slog.String("created_by_kind", k.CreatedBy.Kind),
 		slog.Int64("created_by_id", k.CreatedBy.ID),
 		slog.Bool("revoked", k.RevokedAt != nil),
@@ -93,7 +97,9 @@ func (p ServicePrincipal) LogValue() slog.Value {
 // `key list` shows history and a revoked hash can never be re-minted by
 // accident.
 type Repository interface {
-	CreateRegionKey(ctx context.Context, regionID int64, name, keyHash string, by Actor, now time.Time) (RegionKey, error)
+	// CreateRegionKey mints a key. scopes is stored as given (already
+	// normalized by ParseScopes); nil is an empty set.
+	CreateRegionKey(ctx context.Context, regionID int64, name, keyHash string, scopes Scopes, by Actor, now time.Time) (RegionKey, error)
 	// GetRegionKeyByHash returns ErrNotFound for unknown hashes and
 	// ErrRevoked for a hash that matches a revoked row, so the caller can
 	// log a replay distinctly.

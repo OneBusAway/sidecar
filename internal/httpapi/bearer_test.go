@@ -26,7 +26,7 @@ func (f *adminFixture) mintRegionKey(t *testing.T, regionID int64) string {
 		t.Fatalf("NewRegionKey: %v", err)
 	}
 	_, err = f.store.APIKeys().CreateRegionKey(context.Background(), regionID, "test",
-		hash, apikey.Actor{Kind: apikey.ActorCLI}, testNow)
+		hash, nil, apikey.Actor{Kind: apikey.ActorCLI}, testNow)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestBearer_PrefixRowMismatchIs401(t *testing.T) {
 		t.Fatalf("NewRegionKey: %v", err)
 	}
 	if _, err := f.store.APIKeys().CreateRegionKey(context.Background(), regionTampa, "mismatched",
-		hash, apikey.Actor{Kind: apikey.ActorCLI}, testNow); err != nil {
+		hash, nil, apikey.Actor{Kind: apikey.ActorCLI}, testNow); err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 
