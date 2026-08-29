@@ -103,7 +103,7 @@ func (h *authMiddleware) authenticateRegionKey(w http.ResponseWriter, r *http.Re
 	h.touch(r, key.LastUsedAt, func(now time.Time) error {
 		return h.deps.APIKeys.TouchRegionKey(r.Context(), key.ID, now)
 	})
-	return principal{kind: principalRegionKey, regionID: key.RegionID, keyID: key.ID}, true
+	return principal{kind: principalRegionKey, regionID: key.RegionID, keyID: key.ID, scopes: key.Scopes}, true
 }
 
 // authenticatePrincipalKey resolves an obasp_ credential. There is no region

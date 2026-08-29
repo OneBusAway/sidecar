@@ -96,7 +96,7 @@ func (h *authMiddleware) requirePrincipal(allowed principalSet, next http.Handle
 		if !ok {
 			return
 		}
-		if !allowed.has(p.kind) {
+		if !allowed.admits(p) {
 			h.deps.Logger.Warn("httpapi: principal not allowed on route",
 				"principal", p, "path", r.URL.Path, "method", r.Method)
 			writeJSONError(w, h.deps.Logger, http.StatusForbidden, forbiddenBody)

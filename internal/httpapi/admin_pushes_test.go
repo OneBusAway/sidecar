@@ -10,6 +10,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
@@ -599,5 +600,41 @@ func TestAdminPushes_AlertPushStoreFailuresAre500(t *testing.T) {
 		if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
 			t.Errorf("%s: body = %q, want %q", tc.name, got, want)
 		}
+	}
+}
+
+// TestAdminPushes_PushScopedKeyCanSendAndCancel is the OBACloud send path
+// end to end: a push-scoped region key queues and cancels a push for its
+// own region, an unscoped key is refused with 403 on both, and the scope
+// widens nothing else -- key management stays 403 and another region stays
+// 404.
+func TestAdminPushes_PushScopedKeyCanSendAndCancel(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+	pushKey := "Bearer " + f.mintRegionKeyWithScopes(t, regionPuget, apikey.Scopes{apikey.ScopePush})
+	plainKey := "Bearer " + f.mintRegionKey(t, regionPuget)
+
+	if rec := sendBearer(f.handler, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`, plainKey); rec.Code != http.StatusForbidden {
+		t.Errorf("unscoped key POST pushes: status = %d, want 403", rec.Code)
+	}
+	got := object(t, sendBearer(f.handler, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`, pushKey), http.StatusAccepted)
+	pushID := jsonID(t, got)
+
+	cancelPath := fmt.Sprintf("%s/%d", pushesPath(regionPuget, id), pushID)
+	if rec := sendBearer(f.handler, http.MethodDelete, cancelPath, "", plainKey); rec.Code != http.StatusForbidden {
+		t.Errorf("unscoped key DELETE push: status = %d, want 403", rec.Code)
+	}
+	if rec := sendBearer(f.handler, http.MethodDelete, cancelPath, "", pushKey); rec.Code != http.StatusNoContent {
+		t.Errorf("push-scoped key DELETE push: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := sendBearer(f.handler, http.MethodPost, "/api/admin/v1/regions/1/api_keys", `{"name":"x"}`, pushKey); rec.Code != http.StatusForbidden {
+		t.Errorf("push-scoped key on key management: status = %d, want 403", rec.Code)
+	}
+	if rec := sendBearer(f.handler, http.MethodPost, pushesPath(regionTampa, id), `{}`, pushKey); rec.Code != http.StatusNotFound {
+		t.Errorf("push-scoped key on another region: status = %d, want 404", rec.Code)
 	}
 }
