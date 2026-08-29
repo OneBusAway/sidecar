@@ -36,7 +36,7 @@ ARG TARGETARCH
 ARG LITESTREAM_VERSION=0.5.16
 RUN apk add --no-cache curl \
  && case "$TARGETARCH" in amd64) arch=x86_64 ;; arm64) arch=arm64 ;; *) echo "unsupported arch $TARGETARCH" && exit 1 ;; esac \
- && curl -fsSL "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${arch}.tar.gz" \
+ && curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-${arch}.tar.gz" \
     | tar -xz -C /usr/local/bin litestream
 
 # --- Stage 4: runtime --------------------------------------------------------
