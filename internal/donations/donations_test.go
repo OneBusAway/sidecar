@@ -21,7 +21,7 @@ func (f *fake) rec(m string) error {
 	}
 	return nil
 }
-func (f *fake) FindOrCreateCustomer(_ context.Context, email, _ string) (string, error) {
+func (f *fake) CreateCustomer(_ context.Context, email, _ string) (string, error) {
 	return "cus_" + f.name + "_" + email, f.rec("customer")
 }
 func (f *fake) CreatePaymentIntent(_ context.Context, cus string, amount int64, _ string) (string, error) {

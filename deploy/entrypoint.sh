@@ -15,6 +15,17 @@ if [ -z "${SIDECAR_BACKUP_BUCKET:-}" ]; then
 fi
 
 : "${SIDECAR_DB:?SIDECAR_DB must be set when backups are enabled}"
+case "${SIDECAR_BACKUP_ENDPOINT:-}" in
+  ""|https://*) ;;
+  *)
+    # Credentials and database pages must not cross the network in the
+    # clear; a plain-http endpoint is only for a local MinIO rehearsal.
+    if [ "${SIDECAR_BACKUP_ALLOW_INSECURE:-}" != "1" ]; then
+      echo "SIDECAR_BACKUP_ENDPOINT must be https:// (set SIDECAR_BACKUP_ALLOW_INSECURE=1 for a local test store)" >&2
+      exit 1
+    fi
+    ;;
+esac
 export SIDECAR_BACKUP_PATH="${SIDECAR_BACKUP_PATH:-sidecar}"
 export SIDECAR_BACKUP_REGION="${SIDECAR_BACKUP_REGION:-auto}"
 export SIDECAR_BACKUP_RETENTION="${SIDECAR_BACKUP_RETENTION:-168h}"
@@ -43,6 +54,10 @@ if [ ! -f "$SIDECAR_DB" ]; then
   # replicated transaction below starts a new history at this path.
   echo "WARNING: no replica found at ${SIDECAR_BACKUP_BUCKET}/${SIDECAR_BACKUP_PATH}; starting with an empty database" >&2
 fi
-# Litestream re-splits the -exec string with shell word rules, so a sidecar
-# flag value containing whitespace would be broken apart; none does today.
-exec litestream replicate -config "$config" -exec "sidecar $*"
+# Litestream re-splits the -exec string with shell word rules, so each
+# argument is single-quoted (with embedded quotes escaped) to survive it.
+cmd=sidecar
+for arg in "$@"; do
+  cmd="$cmd '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
+done
+exec litestream replicate -config "$config" -exec "$cmd"

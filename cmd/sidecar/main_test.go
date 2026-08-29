@@ -56,6 +56,18 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: 0,
 		},
 		{
+			name:          "header trusted-proxy without secret or cidrs returns an error",
+			args:          []string{"--trusted-proxy=cloudflare"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "malformed trusted-proxy-cidrs returns an error",
+			args:          []string{"--trusted-proxy=cloudflare", "--trusted-proxy-cidrs=10.0.0.0"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
 			name:          "unparseable refresh duration returns an error and writes nothing to stdout",
 			args:          []string{"--refresh=nonsense"},
 			wantErr:       true,
@@ -526,28 +538,30 @@ func TestNewDonations(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	if svc := newDonations(logger, "", "sk_test", "", ""); svc != nil {
-		t.Fatal("no live key must leave donations nil")
+	if svc, err := newDonations(logger, "", "sk_test", "", ""); svc != nil || err != nil {
+		t.Fatalf("no live key must leave donations nil: %v %v", svc, err)
 	}
 	if !strings.Contains(buf.String(), "donations stay disabled") {
 		t.Errorf("orphan test key not warned: %q", buf.String())
 	}
+	if _, err := newDonations(logger, "sk_live", "", "", ""); err == nil || !strings.Contains(err.Error(), "SIDECAR_STRIPE_RECURRING_PRODUCT_ID") {
+		t.Fatalf("live key without product must fail boot: %v", err)
+	}
+	if _, err := newDonations(logger, "sk_live", "sk_test", "prod_live", ""); err == nil || !strings.Contains(err.Error(), "SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID") {
+		t.Fatalf("test key without product must fail boot: %v", err)
+	}
 	buf.Reset()
-	svc := newDonations(logger, "sk_live", "", "prod_live", "")
-	if svc == nil || svc.Live == nil || svc.Test != nil {
-		t.Fatalf("live only: %+v", svc)
+	svc, err := newDonations(logger, "sk_live", "", "prod_live", "")
+	if err != nil || svc == nil || svc.Live == nil || svc.Test != nil {
+		t.Fatalf("live only: %+v %v", svc, err)
 	}
 	if !strings.Contains(buf.String(), "test_mode donation requests will fail") {
 		t.Errorf("missing test key not warned: %q", buf.String())
 	}
-	buf.Reset()
-	newDonations(logger, "sk_live", "sk_test", "", "")
-	for _, want := range []string{"SIDECAR_STRIPE_RECURRING_PRODUCT_ID", "SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("missing product id not warned (%s): %q", want, buf.String())
-		}
+	svc, err = newDonations(logger, "sk_live", "sk_test", "prod_live", "prod_test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	svc = newDonations(logger, "sk_live", "sk_test", "prod_live", "prod_test")
 	first, second := svc.NewID(), svc.NewID()
 	if svc.Test == nil || first == "" || first == second {
 		t.Fatalf("both keys: %+v ids=%q,%q", svc, first, second)

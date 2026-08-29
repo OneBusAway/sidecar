@@ -52,15 +52,20 @@ func (w sentryDebugWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Report implements Reporter. Records that carry an "err" attribute are
-// grouped by message plus error text; every attribute is attached under a
-// "log" context.
+// Report implements Reporter. Records that carry an "err" (or "error")
+// attribute are grouped by message plus error text; every attribute is
+// attached under a "log" context.
 func (s *Sentry) Report(_ context.Context, msg string, attrs map[string]any) {
 	ev := sentry.NewEvent()
 	ev.Level = sentry.LevelError
 	ev.Message = msg
-	if e, ok := attrs["err"]; ok {
-		ev.Exception = []sentry.Exception{{Type: msg, Value: fmt.Sprint(e)}}
+	// Both spellings are in use across the codebase ("err" in the
+	// handlers and loops, "error" in a few older call sites).
+	for _, key := range []string{"err", "error"} {
+		if e, ok := attrs[key]; ok {
+			ev.Exception = []sentry.Exception{{Type: msg, Value: fmt.Sprint(e)}}
+			break
+		}
 	}
 	if p, ok := attrs["panic"]; ok {
 		ev.Level = sentry.LevelFatal

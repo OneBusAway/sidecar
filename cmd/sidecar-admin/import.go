@@ -41,6 +41,11 @@ func runImport(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	if decodeErr := dec.Decode(&doc); decodeErr != nil {
 		return fmt.Errorf("import: %s: %w", *file, decodeErr)
 	}
+	// One document per file: a second JSON value would otherwise be read
+	// past silently and never imported.
+	if _, trailingErr := dec.Token(); !errors.Is(trailingErr, io.EOF) {
+		return fmt.Errorf("import: %s: unexpected content after the document", *file)
+	}
 	if *dryRun {
 		// The same pre-checks the real import runs, so a clean dry run
 		// means the import will not stop on validation (it can still

@@ -77,7 +77,6 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		}
 	}()
 	q := gen.New(tx)
-
 	if _, err := q.GetRegion(ctx, doc.RegionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return sum, fmt.Errorf("%w (region %d)", ErrRegionMissing, doc.RegionID)
@@ -85,146 +84,195 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		return sum, fmt.Errorf("sqlite: import: region %d: %w", doc.RegionID, err)
 	}
 
-	nowUnix := now.Unix()
+	im := &importer{ctx: ctx, q: q, region: doc.RegionID, now: now.Unix(), prepared: prepared, sum: &sum}
+	for _, step := range []func(*export.Document) error{im.alerts, im.studies, im.responses, im.registrations, im.reports} {
+		if err := step(doc); err != nil {
+			return sum, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return sum, fmt.Errorf("sqlite: import: commit: %w", err)
+	}
+	return sum, nil
+}
+
+// importer carries one import's transaction state through the per-entity
+// steps below.
+type importer struct {
+	ctx      context.Context
+	q        *gen.Queries
+	region   int64
+	now      int64
+	prepared preparedImport
+	sum      *export.Summary
+}
+
+func (im *importer) alerts(doc *export.Document) error {
 	for i, a := range doc.Alerts {
-		p := prepared.alerts[i]
-		n, err := q.ImportAlert(ctx, gen.ImportAlertParams{
-			ID: a.ID, RegionID: doc.RegionID, AgencyID: a.AgencyID,
+		p := im.prepared.alerts[i]
+		n, err := im.q.ImportAlert(im.ctx, gen.ImportAlertParams{
+			ID: a.ID, RegionID: im.region, AgencyID: a.AgencyID,
 			HeaderText: a.HeaderText, DescriptionText: a.DescriptionText, Url: a.URL,
 			Cause: p.cause, Effect: p.effect, SeverityLevel: p.severity,
 			StartTime: a.StartTime.Unix(), EndTime: timeToNullUnix(a.EndTime),
 			Published: a.Published, IsTest: a.IsTest,
-			CreatedAt: orNow(a.CreatedAt, nowUnix), UpdatedAt: orNow(a.UpdatedAt, nowUnix),
+			CreatedAt: orNow(a.CreatedAt, im.now), UpdatedAt: orNow(a.UpdatedAt, im.now),
 		})
 		if err != nil {
-			return sum, fmt.Errorf("sqlite: import alert %d: %w", a.ID, err)
+			return fmt.Errorf("sqlite: import alert %d: %w", a.ID, err)
 		}
-		if !sum.Alerts.Tally(n) {
-			existing, err := q.GetAlert(ctx, a.ID)
-			if err != nil || existing.RegionID != doc.RegionID {
-				return sum, conflict("alert", a.ID, err)
+		if !im.sum.Alerts.Tally(n) {
+			existing, err := im.q.GetAlert(im.ctx, a.ID)
+			if err != nil || existing.RegionID != im.region {
+				return conflict("alert", a.ID, err)
 			}
 		}
-		// Translations are attempted whether or not the alert row was new:
-		// a later export can add a language to an alert already migrated,
-		// and that is exactly what the delta run is for.
-		for _, t := range a.Translations {
-			lang := alerts.NormalizeLanguage(t.Language)
-			for _, f := range []struct {
-				field        alerts.Field
-				text, source string
-			}{
-				{alerts.FieldHeader, t.HeaderText, firstNonEmpty(t.SourceHeader, a.HeaderText)},
-				{alerts.FieldDescription, t.DescriptionText, firstNonEmpty(t.SourceDescription, a.DescriptionText)},
-			} {
-				if f.text == "" {
-					continue
-				}
-				n, err := q.ImportAlertTranslation(ctx, gen.ImportAlertTranslationParams{
-					AlertID: a.ID, Language: lang, Field: string(f.field), Text: f.text,
-					SourceSha256: alerts.SourceHash(f.source), CreatedAt: nowUnix, UpdatedAt: nowUnix,
-				})
-				if err != nil {
-					return sum, fmt.Errorf("sqlite: import alert %d translation %s/%s: %w", a.ID, lang, f.field, err)
-				}
-				sum.Translations.Tally(n)
-			}
+		if err := im.translations(a); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
+// translations are attempted whether or not the alert row was new: a
+// later export can add a language to an alert already migrated, and that
+// is exactly what the delta run is for.
+func (im *importer) translations(a export.Alert) error {
+	for _, t := range a.Translations {
+		lang := alerts.NormalizeLanguage(t.Language)
+		for _, f := range []struct {
+			field        alerts.Field
+			text, source string
+		}{
+			{alerts.FieldHeader, t.HeaderText, firstNonEmpty(t.SourceHeader, a.HeaderText)},
+			{alerts.FieldDescription, t.DescriptionText, firstNonEmpty(t.SourceDescription, a.DescriptionText)},
+		} {
+			if f.text == "" {
+				continue
+			}
+			n, err := im.q.ImportAlertTranslation(im.ctx, gen.ImportAlertTranslationParams{
+				AlertID: a.ID, Language: lang, Field: string(f.field), Text: f.text,
+				SourceSha256: alerts.SourceHash(f.source), CreatedAt: im.now, UpdatedAt: im.now,
+			})
+			if err != nil {
+				return fmt.Errorf("sqlite: import alert %d translation %s/%s: %w", a.ID, lang, f.field, err)
+			}
+			im.sum.Translations.Tally(n)
+		}
+	}
+	return nil
+}
+
+func (im *importer) studies(doc *export.Document) error {
 	for _, st := range doc.Studies {
-		n, err := q.ImportStudy(ctx, gen.ImportStudyParams{
-			ID: st.ID, RegionID: doc.RegionID, Name: st.Name, Description: st.Description,
-			CreatedAt: orNow(st.CreatedAt, nowUnix), UpdatedAt: orNow(st.UpdatedAt, nowUnix),
+		n, err := im.q.ImportStudy(im.ctx, gen.ImportStudyParams{
+			ID: st.ID, RegionID: im.region, Name: st.Name, Description: st.Description,
+			CreatedAt: orNow(st.CreatedAt, im.now), UpdatedAt: orNow(st.UpdatedAt, im.now),
 		})
 		if err != nil {
-			return sum, fmt.Errorf("sqlite: import study %d: %w", st.ID, err)
+			return fmt.Errorf("sqlite: import study %d: %w", st.ID, err)
 		}
-		if !sum.Studies.Tally(n) {
-			existing, err := q.GetStudy(ctx, st.ID)
-			if err != nil || existing.RegionID != doc.RegionID {
-				return sum, conflict("study", st.ID, err)
+		if !im.sum.Studies.Tally(n) {
+			existing, err := im.q.GetStudy(im.ctx, st.ID)
+			if err != nil || existing.RegionID != im.region {
+				return conflict("study", st.ID, err)
 			}
 		}
 		for _, sv := range st.Surveys {
-			sp := prepared.surveys[sv.ID]
-			n, err := q.ImportSurvey(ctx, gen.ImportSurveyParams{
-				ID: sv.ID, StudyID: st.ID, Name: sv.Name, Available: sv.Available,
-				StartTime: timeToNullUnix(sv.StartTime), EndTime: timeToNullUnix(sv.EndTime),
-				ShowOnMap: sv.ShowOnMap, ShowOnStops: sv.ShowOnStops, AlwaysVisible: sv.AlwaysVisible,
-				AllowsMultipleResponses: sv.AllowsMultipleResponses,
-				VisibleStopList:         sp.stops, VisibleRouteList: sp.routes,
-				CreatedAt: orNow(sv.CreatedAt, nowUnix), UpdatedAt: orNow(sv.UpdatedAt, nowUnix),
-			})
-			if err != nil {
-				return sum, fmt.Errorf("sqlite: import survey %d: %w", sv.ID, err)
-			}
-			if !sum.Surveys.Tally(n) {
-				existing, err := q.GetSurvey(ctx, sv.ID)
-				if err != nil || existing.StudyID != st.ID {
-					return sum, conflict("survey", sv.ID, err)
-				}
-			}
-			for _, qd := range sv.Questions {
-				content := prepared.questions[qd.ID]
-				n, err := q.ImportSurveyQuestion(ctx, gen.ImportSurveyQuestionParams{
-					ID: qd.ID, SurveyID: sv.ID, Position: qd.Position, Required: qd.Required,
-					QuestionType: content.typ, Content: content.json,
-					CreatedAt: nowUnix, UpdatedAt: nowUnix,
-				})
-				if err != nil {
-					return sum, fmt.Errorf("sqlite: import question %d (survey %d): %w", qd.ID, sv.ID, err)
-				}
-				if !sum.Questions.Tally(n) {
-					owner, err := q.GetQuestionSurveyID(ctx, qd.ID)
-					if err != nil || owner != sv.ID {
-						return sum, conflict("question", qd.ID, err)
-					}
-				}
+			if err := im.survey(st.ID, sv); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
+}
 
+func (im *importer) survey(studyID int64, sv export.Survey) error {
+	sp := im.prepared.surveys[sv.ID]
+	n, err := im.q.ImportSurvey(im.ctx, gen.ImportSurveyParams{
+		ID: sv.ID, StudyID: studyID, Name: sv.Name, Available: sv.Available,
+		StartTime: timeToNullUnix(sv.StartTime), EndTime: timeToNullUnix(sv.EndTime),
+		ShowOnMap: sv.ShowOnMap, ShowOnStops: sv.ShowOnStops, AlwaysVisible: sv.AlwaysVisible,
+		AllowsMultipleResponses: sv.AllowsMultipleResponses,
+		VisibleStopList:         sp.stops, VisibleRouteList: sp.routes,
+		CreatedAt: orNow(sv.CreatedAt, im.now), UpdatedAt: orNow(sv.UpdatedAt, im.now),
+	})
+	if err != nil {
+		return fmt.Errorf("sqlite: import survey %d: %w", sv.ID, err)
+	}
+	if !im.sum.Surveys.Tally(n) {
+		existing, err := im.q.GetSurvey(im.ctx, sv.ID)
+		if err != nil || existing.StudyID != studyID {
+			return conflict("survey", sv.ID, err)
+		}
+	}
+	for _, qd := range sv.Questions {
+		content := im.prepared.questions[qd.ID]
+		n, err := im.q.ImportSurveyQuestion(im.ctx, gen.ImportSurveyQuestionParams{
+			ID: qd.ID, SurveyID: sv.ID, Position: qd.Position, Required: qd.Required,
+			QuestionType: content.typ, Content: content.json,
+			CreatedAt: im.now, UpdatedAt: im.now,
+		})
+		if err != nil {
+			return fmt.Errorf("sqlite: import question %d (survey %d): %w", qd.ID, sv.ID, err)
+		}
+		if !im.sum.Questions.Tally(n) {
+			owner, err := im.q.GetQuestionSurveyID(im.ctx, qd.ID)
+			if err != nil || owner != sv.ID {
+				return conflict("question", qd.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (im *importer) responses(doc *export.Document) error {
 	for i, r := range doc.SurveyResponses {
 		// The survey a response names must be this region's, whether it
 		// came with the document or was migrated earlier: the foreign key
 		// alone would happily attach a rider's answers to another region's
 		// survey of the same id.
-		if err := surveyInRegion(ctx, q, r.SurveyID, doc.RegionID); err != nil {
-			return sum, fmt.Errorf("survey response %s: %w", r.PublicID, err)
+		if err := surveyInRegion(im.ctx, im.q, r.SurveyID, im.region); err != nil {
+			return fmt.Errorf("survey response %s: %w", r.PublicID, err)
 		}
-		n, err := q.ImportSurveyResponse(ctx, gen.ImportSurveyResponseParams{
+		n, err := im.q.ImportSurveyResponse(im.ctx, gen.ImportSurveyResponseParams{
 			SurveyID: r.SurveyID, PublicID: r.PublicID, UserIdentifier: r.UserIdentifier,
 			StopIdentifier: nullString(r.StopIdentifier),
 			StopLatitude:   floatToNull(r.StopLatitude), StopLongitude: floatToNull(r.StopLongitude),
-			Answers:   prepared.answers[i],
-			CreatedAt: orNow(r.CreatedAt, nowUnix), UpdatedAt: orNow(r.UpdatedAt, nowUnix),
+			Answers:   im.prepared.answers[i],
+			CreatedAt: orNow(r.CreatedAt, im.now), UpdatedAt: orNow(r.UpdatedAt, im.now),
 		})
 		if err != nil {
-			return sum, fmt.Errorf("sqlite: import survey response %s: %w", r.PublicID, err)
+			return fmt.Errorf("sqlite: import survey response %s: %w", r.PublicID, err)
 		}
-		if !sum.SurveyResponses.Tally(n) {
-			existing, err := q.GetResponseByPublicID(ctx, r.PublicID)
+		if !im.sum.SurveyResponses.Tally(n) {
+			existing, err := im.q.GetResponseByPublicID(im.ctx, r.PublicID)
 			if err != nil || existing.SurveyID != r.SurveyID {
-				return sum, fmt.Errorf("%w: survey response %s", ErrImportConflict, r.PublicID)
+				return fmt.Errorf("%w: survey response %s", ErrImportConflict, r.PublicID)
 			}
 		}
 	}
+	return nil
+}
 
+// registrations: the natural key includes the region, so a skip is always
+// this region's own earlier row (or the device re-registering directly).
+func (im *importer) registrations(doc *export.Document) error {
 	for _, p := range doc.PushRegistrations {
-		// The natural key includes the region, so a skip is always this
-		// region's own earlier row (or the device re-registering directly).
-		n, err := q.ImportPushRegistration(ctx, gen.ImportPushRegistrationParams{
-			RegionID: doc.RegionID, Token: p.Token, OperatingSystem: p.OperatingSystem,
+		n, err := im.q.ImportPushRegistration(im.ctx, gen.ImportPushRegistrationParams{
+			RegionID: im.region, Token: p.Token, OperatingSystem: p.OperatingSystem,
 			ApnsSandbox: p.APNSSandbox, Locale: p.Locale, TestDevice: p.TestDevice, Description: p.Description,
-			LastSeenAt: orNow(p.LastSeenAt, nowUnix), CreatedAt: orNow(p.CreatedAt, nowUnix), UpdatedAt: nowUnix,
+			LastSeenAt: orNow(p.LastSeenAt, im.now), CreatedAt: orNow(p.CreatedAt, im.now), UpdatedAt: im.now,
 		})
 		if err != nil {
-			return sum, fmt.Errorf("sqlite: import push registration: %w", err)
+			return fmt.Errorf("sqlite: import push registration: %w", err)
 		}
-		sum.PushRegistrations.Tally(n)
+		im.sum.PushRegistrations.Tally(n)
 	}
+	return nil
+}
 
+func (im *importer) reports(doc *export.Document) error {
 	for _, g := range doc.GhostBusReports {
 		var attempts int64
 		if g.SnapshotStatus == "unavailable" {
@@ -234,8 +282,8 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 		if g.SnapshotStatus == "captured" {
 			snapshot = string(g.Snapshot)
 		}
-		n, err := q.ImportGhostBusReport(ctx, gen.ImportGhostBusReportParams{
-			RegionID: doc.RegionID, PublicIdentifier: g.PublicID, UserIdentifier: g.UserIdentifier,
+		n, err := im.q.ImportGhostBusReport(im.ctx, gen.ImportGhostBusReportParams{
+			RegionID: im.region, PublicIdentifier: g.PublicID, UserIdentifier: g.UserIdentifier,
 			TripIdentifier: g.TripIdentifier, ServiceDate: g.ServiceDateMS,
 			RouteIdentifier: g.RouteIdentifier, StopIdentifier: g.StopIdentifier, VehicleIdentifier: g.VehicleIdentifier,
 			StopSequence: int64ToNullInt64(g.StopSequence), Predicted: boolToNullInt64(g.Predicted),
@@ -245,26 +293,22 @@ func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time)
 			PredictionLastUpdatedAt: int64ToNullInt64(g.PredictionLastUpdatedMS),
 			SnapshotStatus:          g.SnapshotStatus, SnapshotJson: snapshot,
 			SnapshotCapturedAt: timeToNullUnix(g.SnapshotCapturedAt), SnapshotAttempts: attempts,
-			CreatedAt: orNow(g.CreatedAt, nowUnix), UpdatedAt: nowUnix,
+			CreatedAt: orNow(g.CreatedAt, im.now), UpdatedAt: im.now,
 		})
 		if err != nil {
-			return sum, fmt.Errorf("sqlite: import ghost bus report %s: %w", g.PublicID, err)
+			return fmt.Errorf("sqlite: import ghost bus report %s: %w", g.PublicID, err)
 		}
-		if !sum.GhostBusReports.Tally(n) {
+		if !im.sum.GhostBusReports.Tally(n) {
 			// The lookup is region-scoped, so "not found" means the public
 			// id exists under another region.
-			if _, err := q.GetGhostBusReportByPublicID(ctx, gen.GetGhostBusReportByPublicIDParams{
-				RegionID: doc.RegionID, PublicIdentifier: g.PublicID,
+			if _, err := im.q.GetGhostBusReportByPublicID(im.ctx, gen.GetGhostBusReportByPublicIDParams{
+				RegionID: im.region, PublicIdentifier: g.PublicID,
 			}); err != nil {
-				return sum, fmt.Errorf("%w: ghost bus report %s", ErrImportConflict, g.PublicID)
+				return fmt.Errorf("%w: ghost bus report %s", ErrImportConflict, g.PublicID)
 			}
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return sum, fmt.Errorf("sqlite: import: commit: %w", err)
-	}
-	return sum, nil
+	return nil
 }
 
 // surveyInRegion is ErrImportConflict unless survey id exists and its
@@ -315,74 +359,98 @@ func prepareImport(doc *export.Document, now time.Time) (preparedImport, error) 
 	if err := doc.Validate(); err != nil {
 		return p, err
 	}
+	for _, step := range []func(*export.Document) error{
+		func(d *export.Document) error { return p.prepareAlerts(d, now) },
+		p.prepareSurveys,
+		p.prepareAnswers,
+	} {
+		if err := step(doc); err != nil {
+			return p, err
+		}
+	}
+	return p, nil
+}
+
+func (p *preparedImport) prepareAlerts(doc *export.Document, now time.Time) error {
 	for i, a := range doc.Alerts {
 		var err error
 		if p.alerts[i].cause, err = alerts.ParseCause(a.Cause); err != nil {
-			return p, fmt.Errorf("export: alert %d: %w", a.ID, err)
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 		if p.alerts[i].effect, err = alerts.ParseEffect(a.Effect); err != nil {
-			return p, fmt.Errorf("export: alert %d: %w", a.ID, err)
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 		if p.alerts[i].severity, err = alerts.ParseSeverity(a.Severity); err != nil {
-			return p, fmt.Errorf("export: alert %d: %w", a.ID, err)
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 		if err := alerts.ValidateWindow(a.StartTime, a.EndTime, now); err != nil {
-			return p, fmt.Errorf("export: alert %d: %w", a.ID, err)
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 	}
-	seenQuestions := make(map[int64]int64) // question id -> survey id
+	return nil
+}
+
+func (p *preparedImport) prepareSurveys(doc *export.Document) error {
 	for _, st := range doc.Studies {
 		for _, sv := range st.Surveys {
 			if err := surveys.ValidateWindow(sv.StartTime, sv.EndTime); err != nil {
-				return p, fmt.Errorf("export: survey %d: %w", sv.ID, err)
+				return fmt.Errorf("export: survey %d: %w", sv.ID, err)
 			}
 			stops, err := listToNull(sv.VisibleStopList)
 			if err != nil {
-				return p, fmt.Errorf("export: survey %d: %w", sv.ID, err)
+				return fmt.Errorf("export: survey %d: %w", sv.ID, err)
 			}
 			routes, err := listToNull(sv.VisibleRouteList)
 			if err != nil {
-				return p, fmt.Errorf("export: survey %d: %w", sv.ID, err)
+				return fmt.Errorf("export: survey %d: %w", sv.ID, err)
 			}
 			p.surveys[sv.ID] = preparedSurvey{stops: stops, routes: routes}
 			for _, qd := range sv.Questions {
-				if other, dup := seenQuestions[qd.ID]; dup {
-					return p, fmt.Errorf("export: question %d appears in surveys %d and %d", qd.ID, other, sv.ID)
-				}
-				seenQuestions[qd.ID] = sv.ID
-				var c surveys.Content
-				if err := json.Unmarshal(qd.Content, &c); err != nil {
-					return p, fmt.Errorf("export: question %d: content: %w", qd.ID, err)
-				}
-				if err := c.Validate(); err != nil {
-					return p, fmt.Errorf("export: question %d: %w", qd.ID, err)
-				}
-				raw, err := json.Marshal(c)
+				pq, err := prepareQuestion(qd)
 				if err != nil {
-					return p, fmt.Errorf("export: question %d: %w", qd.ID, err)
+					return err
 				}
-				p.questions[qd.ID] = preparedQuestion{typ: c.Type, json: string(raw)}
+				p.questions[qd.ID] = pq
 			}
 		}
 	}
+	return nil
+}
+
+func prepareQuestion(qd export.Question) (preparedQuestion, error) {
+	var c surveys.Content
+	if err := json.Unmarshal(qd.Content, &c); err != nil {
+		return preparedQuestion{}, fmt.Errorf("export: question %d: content: %w", qd.ID, err)
+	}
+	if err := c.Validate(); err != nil {
+		return preparedQuestion{}, fmt.Errorf("export: question %d: %w", qd.ID, err)
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return preparedQuestion{}, fmt.Errorf("export: question %d: %w", qd.ID, err)
+	}
+	return preparedQuestion{typ: c.Type, json: string(raw)}, nil
+}
+
+// prepareAnswers runs each response through ParseAnswers, the rider API's
+// own decoder: strict structure, string coercion, merge-by-question_id.
+func (p *preparedImport) prepareAnswers(doc *export.Document) error {
 	for i, r := range doc.SurveyResponses {
 		raw := "[]"
 		if rawPresent(r.Answers) {
 			raw = string(r.Answers)
 		}
-		// ParseAnswers is the rider API's own decoder: strict structure,
-		// string coercion, and merge-by-question_id.
 		answers, err := surveys.ParseAnswers(raw)
 		if err != nil {
-			return p, fmt.Errorf("export: survey response %s: answers: %w", r.PublicID, err)
+			return fmt.Errorf("export: survey response %s: answers: %w", r.PublicID, err)
 		}
 		encoded, err := encodeAnswers(answers)
 		if err != nil {
-			return p, fmt.Errorf("export: survey response %s: %w", r.PublicID, err)
+			return fmt.Errorf("export: survey response %s: %w", r.PublicID, err)
 		}
 		p.answers[i] = encoded
 	}
-	return p, nil
+	return nil
 }
 
 // rawPresent reports whether a JSON value was supplied and is not null.

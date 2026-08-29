@@ -3,7 +3,6 @@ package donations
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	stripe "github.com/stripe/stripe-go/v83"
 )
@@ -17,9 +16,6 @@ const ephemeralKeyStripeVersion = "2023-08-16"
 // test keys are two instances.
 type StripeGateway struct {
 	client *stripe.Client
-	// Logger receives the one condition worth an operator's eye: several
-	// Stripe customers sharing an email, where the first is used.
-	Logger *slog.Logger
 	// productID is the pre-existing Stripe product recurring donations bill
 	// against; the rider-chosen amount becomes an inline price on each
 	// subscription.
@@ -28,29 +24,13 @@ type StripeGateway struct {
 
 // NewStripeGateway builds a gateway for a secret key and the id of the
 // product recurring donations bill against.
-func NewStripeGateway(secretKey, recurringProductID string, logger *slog.Logger) *StripeGateway {
-	return &StripeGateway{client: stripe.NewClient(secretKey), productID: recurringProductID, Logger: logger}
+func NewStripeGateway(secretKey, recurringProductID string) *StripeGateway {
+	return &StripeGateway{client: stripe.NewClient(secretKey), productID: recurringProductID}
 }
 
-// FindOrCreateCustomer implements Gateway. Stripe has no find-or-create
-// and permits duplicate emails; the first listed customer is used and a
-// duplicate is logged rather than silently picked.
-func (g *StripeGateway) FindOrCreateCustomer(ctx context.Context, email, name string) (string, error) {
-	list := &stripe.CustomerListParams{Email: stripe.String(email)}
-	list.Limit = stripe.Int64(2)
-	var found []string
-	for c, err := range g.client.V1Customers.List(ctx, list) {
-		if err != nil {
-			return "", err
-		}
-		found = append(found, c.ID)
-	}
-	if len(found) > 1 && g.Logger != nil {
-		g.Logger.Warn("donations: several Stripe customers share an email; using the first", "customer_id", found[0])
-	}
-	if len(found) > 0 {
-		return found[0], nil
-	}
+// CreateCustomer implements Gateway. See Gateway for why it never looks
+// up an existing customer by email.
+func (g *StripeGateway) CreateCustomer(ctx context.Context, email, name string) (string, error) {
 	c, err := g.client.V1Customers.Create(ctx, &stripe.CustomerCreateParams{
 		Email: stripe.String(email), Name: stripe.String(name),
 	})

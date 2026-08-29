@@ -193,9 +193,13 @@ func (s Summary) Lines() []string {
 	return out
 }
 
-// Validate checks the document's framing and the invariants the stores
-// enforce with CHECK constraints, naming the offending row so the operator
-// can fix the source rather than decode a constraint error.
+// Validate checks the document's framing, the invariants the stores
+// enforce with CHECK constraints, and that every persisted key (ids,
+// public ids, tokens, translation languages) appears once, naming the
+// offending row so the operator can fix the source rather than decode a
+// constraint error. Domain rules that need the domain packages (enum
+// names, question content, answers, time windows) are checked by the
+// importer before its transaction opens.
 func (d *Document) Validate() error {
 	if d.Format != Format {
 		return fmt.Errorf("export: unsupported format %q (want %q)", d.Format, Format)
@@ -203,49 +207,124 @@ func (d *Document) Validate() error {
 	if d.RegionID <= 0 {
 		return fmt.Errorf("export: region_id must be positive, got %d", d.RegionID)
 	}
+	for _, check := range []func() error{d.validateAlerts, d.validateStudies, d.validateResponses, d.validateRegistrations, d.validateReports} {
+		if err := check(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// keySet rejects a repeated persisted key.
+type keySet map[string]struct{}
+
+func (k keySet) add(kind string, key any) error {
+	s := fmt.Sprint(key)
+	if _, dup := k[s]; dup {
+		return fmt.Errorf("export: %s %s appears more than once", kind, s)
+	}
+	k[s] = struct{}{}
+	return nil
+}
+
+func (d *Document) validateAlerts() error {
+	ids := keySet{}
 	for _, a := range d.Alerts {
 		if a.ID <= 0 || a.HeaderText == "" || a.StartTime.IsZero() {
 			return fmt.Errorf("export: alert %d needs a positive id, header_text, and start_time", a.ID)
 		}
+		if err := ids.add("alert", a.ID); err != nil {
+			return err
+		}
+		langs := keySet{}
 		for _, t := range a.Translations {
 			// Compared normalized, the way the store writes it, so "EN" is
 			// caught here and not by the CHECK constraint mid-transaction.
-			if lang := strings.ToLower(strings.TrimSpace(t.Language)); lang == "" || lang == "en" {
+			lang := strings.ToLower(strings.TrimSpace(t.Language))
+			if lang == "" || lang == "en" {
 				return fmt.Errorf("export: alert %d translation language %q must be a non-English BCP-47 tag", a.ID, t.Language)
+			}
+			if err := langs.add(fmt.Sprintf("alert %d translation", a.ID), lang); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
+}
+
+func (d *Document) validateStudies() error {
+	studies, surveys, questions := keySet{}, keySet{}, keySet{}
 	for _, s := range d.Studies {
 		if s.ID <= 0 || s.Name == "" {
 			return fmt.Errorf("export: study %d needs a positive id and a name", s.ID)
 		}
+		if err := studies.add("study", s.ID); err != nil {
+			return err
+		}
 		for _, sv := range s.Surveys {
-			if sv.ID <= 0 || sv.Name == "" {
-				return fmt.Errorf("export: survey %d (study %d) needs a positive id and a name", sv.ID, s.ID)
-			}
-			if (sv.StartTime == nil) != (sv.EndTime == nil) {
-				return fmt.Errorf("export: survey %d has only one of start_time/end_time; set both or neither", sv.ID)
-			}
-			for _, q := range sv.Questions {
-				if q.ID <= 0 || len(q.Content) == 0 {
-					return fmt.Errorf("export: question %d (survey %d) needs a positive id and content", q.ID, sv.ID)
-				}
+			if err := validateSurvey(s.ID, sv, surveys, questions); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
+}
+
+func validateSurvey(studyID int64, sv Survey, surveys, questions keySet) error {
+	if sv.ID <= 0 || sv.Name == "" {
+		return fmt.Errorf("export: survey %d (study %d) needs a positive id and a name", sv.ID, studyID)
+	}
+	if (sv.StartTime == nil) != (sv.EndTime == nil) {
+		return fmt.Errorf("export: survey %d has only one of start_time/end_time; set both or neither", sv.ID)
+	}
+	if err := surveys.add("survey", sv.ID); err != nil {
+		return err
+	}
+	for _, q := range sv.Questions {
+		if q.ID <= 0 || len(q.Content) == 0 {
+			return fmt.Errorf("export: question %d (survey %d) needs a positive id and content", q.ID, sv.ID)
+		}
+		if err := questions.add("question", q.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Document) validateResponses() error {
+	ids := keySet{}
 	for _, r := range d.SurveyResponses {
 		if r.SurveyID <= 0 || r.PublicID == "" || r.UserIdentifier == "" {
 			return fmt.Errorf("export: survey response %q needs survey_id, public_id, and user_identifier", r.PublicID)
 		}
+		if err := ids.add("survey response", r.PublicID); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (d *Document) validateRegistrations() error {
+	tokens := keySet{}
 	for _, p := range d.PushRegistrations {
 		if p.Token == "" || (p.OperatingSystem != "ios" && p.OperatingSystem != "android") {
 			return fmt.Errorf("export: push registration %q needs a token and operating_system ios|android", p.Token)
 		}
+		if err := tokens.add("push registration", p.Token); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func (d *Document) validateReports() error {
+	ids := keySet{}
 	for _, g := range d.GhostBusReports {
 		if g.PublicID == "" || g.UserIdentifier == "" || g.TripIdentifier == "" {
 			return fmt.Errorf("export: ghost bus report %q needs public_id, user_identifier, and trip_identifier", g.PublicID)
+		}
+		if err := ids.add("ghost bus report", g.PublicID); err != nil {
+			return err
 		}
 		switch g.SnapshotStatus {
 		case "pending", "unavailable":

@@ -527,8 +527,9 @@ func TestRegister_InvalidRequestCostsNoStoreRead(t *testing.T) {
 }
 
 // TestThrottle_TrustedProxyHeader pins that Deps.ClientIP, not RemoteAddr, is
-// the bucket key: two clients arriving through one proxy address are
-// throttled separately, and a client with no header falls back to the peer.
+// the bucket key: two clients arriving through one proxy address (with the
+// proxy's secret) are throttled separately, and a request without the
+// proof falls back to the peer.
 func TestThrottle_TrustedProxyHeader(t *testing.T) {
 	t.Parallel()
 	store := sqlitetest.Open(t)
@@ -538,7 +539,7 @@ func TestThrottle_TrustedProxyHeader(t *testing.T) {
 		Regions:     store.Regions(),
 		Now:         func() time.Time { return base },
 		Logger:      slog.New(slog.DiscardHandler),
-		ClientIP:    clientip.Header("CF-Connecting-IP"),
+		ClientIP:    clientip.Header("CF-Connecting-IP", clientip.Options{Secret: "proxy-secret"}),
 	}
 	h := httpapi.NewRouter(deps)
 	putRegion(t, store.Regions(), 1)
@@ -550,6 +551,7 @@ func TestThrottle_TrustedProxyHeader(t *testing.T) {
 		req.RemoteAddr = "10.0.0.1:443" // the proxy, same for everyone
 		if clientHeader != "" {
 			req.Header.Set("CF-Connecting-IP", clientHeader)
+			req.Header.Set(clientip.SecretHeader, "proxy-secret")
 		}
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)

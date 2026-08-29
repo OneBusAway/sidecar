@@ -33,9 +33,12 @@ type Response struct {
 
 // Gateway is the slice of Stripe a donation needs.
 type Gateway interface {
-	// FindOrCreateCustomer returns the id of the customer with this email,
-	// creating one when none exists.
-	FindOrCreateCustomer(ctx context.Context, email, name string) (string, error)
+	// CreateCustomer creates a customer for this donation and returns its
+	// id. Always a new one: the route is unauthenticated, so matching an
+	// existing customer by the caller-supplied email would hand whoever
+	// typed it that customer's id and an ephemeral key to their saved
+	// payment methods.
+	CreateCustomer(ctx context.Context, email, name string) (string, error)
 	// CreatePaymentIntent returns the client secret of a one-time intent
 	// for the customer.
 	CreatePaymentIntent(ctx context.Context, customerID string, amountCents int64, receiptEmail string) (string, error)
@@ -76,7 +79,7 @@ func (s *Service) Create(ctx context.Context, req Request) (Response, error) {
 			return Response{}, ErrTestModeUnavailable
 		}
 	}
-	customerID, err := gw.FindOrCreateCustomer(ctx, req.Email, req.Name)
+	customerID, err := gw.CreateCustomer(ctx, req.Email, req.Name)
 	if err != nil {
 		return Response{}, fmt.Errorf("donations: customer: %w", err)
 	}

@@ -145,6 +145,11 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		"proxy whose client-address header the per-IP throttles trust: off (default: the TCP peer), "+
 			"cloudflare (CF-Connecting-IP), render (True-Client-IP), or header:<Name>; "+
 			"set only when the proxy overwrites that header on every request")
+	trustedProxySecret := fs.String("trusted-proxy-secret", envOrDefault("SIDECAR_TRUSTED_PROXY_SECRET", ""),
+		"value the proxy sends in "+clientip.SecretHeader+" to prove a request came through it; "+
+			"the client-address header is ignored on requests without it (or from outside --trusted-proxy-cidrs)")
+	trustedProxyCIDRs := fs.String("trusted-proxy-cidrs", envOrDefault("SIDECAR_TRUSTED_PROXY_CIDRS", ""),
+		"comma-separated address ranges the proxy connects from; render defaults to the private ranges")
 	logFormat := fs.String("log-format", envOrDefault("SIDECAR_LOG_FORMAT", "text"),
 		"log line format: text (default) or json (one object per line, for log aggregators)")
 	sentryDSN := fs.String("sentry-dsn", envOrDefault("SIDECAR_SENTRY_DSN", ""),
@@ -171,7 +176,11 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		return parseErr
 	}
 
-	resolveClientIP, err := clientip.Parse(*trustedProxy)
+	proxyPrefixes, err := clientip.ParsePrefixes(*trustedProxyCIDRs)
+	if err != nil {
+		return fmt.Errorf("--trusted-proxy-cidrs/SIDECAR_TRUSTED_PROXY_CIDRS: %w", err)
+	}
+	resolveClientIP, err := clientip.Parse(*trustedProxy, clientip.Options{Prefixes: proxyPrefixes, Secret: *trustedProxySecret})
 	if err != nil {
 		return fmt.Errorf("--trusted-proxy/SIDECAR_TRUSTED_PROXY: %w", err)
 	}
@@ -240,8 +249,8 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// Migrate before anything touches a table: a fresh database has no
 	// regions table, so a directory sync that ran first would fail against
 	// a missing relation. Never serve on an unknown schema.
-	if err := store.Migrate(); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
+	if migrateErr := store.Migrate(); migrateErr != nil {
+		return fmt.Errorf("migrate database: %w", migrateErr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -314,7 +323,10 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
 	deps.ClientIP = resolveClientIP
-	deps.Donations = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
+	deps.Donations, err = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
+	if err != nil {
+		return err
+	}
 	if setting := strings.ToLower(strings.TrimSpace(*trustedProxy)); setting != "" && setting != "off" {
 		// In the boot log on purpose: a wrong value here mis-keys every
 		// throttle bucket.
@@ -503,30 +515,30 @@ func buildVersion() string {
 }
 
 // newDonations wires spec section 11 when a live Stripe key is present and
-// returns nil (route unregistered, apps hide the UI) otherwise. A live key
-// without a product id still serves one-time donations; recurring ones
-// then fail at Stripe and surface as 500s, so the gap is logged at boot.
-func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduct string) *donations.Service {
+// returns nil (route unregistered, apps hide the UI) otherwise. A key
+// without its recurring product id is an error: recurring requests would
+// otherwise reach Stripe with an empty product and fail as opaque 500s.
+func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduct string) (*donations.Service, error) {
 	if liveKey == "" {
 		if testKey != "" {
 			logger.Warn("SIDECAR_STRIPE_TEST_SECRET_KEY set without SIDECAR_STRIPE_SECRET_KEY; donations stay disabled")
 		}
-		return nil
+		return nil, nil
 	}
 	if liveProduct == "" {
-		logger.Warn("no --stripe-recurring-product-id/SIDECAR_STRIPE_RECURRING_PRODUCT_ID set; recurring donations will fail")
+		return nil, errors.New("--stripe-recurring-product-id/SIDECAR_STRIPE_RECURRING_PRODUCT_ID is required with a Stripe secret key")
 	}
 	svc := &donations.Service{
-		Live:  donations.NewStripeGateway(liveKey, liveProduct, logger),
+		Live:  donations.NewStripeGateway(liveKey, liveProduct),
 		NewID: uuid.NewString,
 	}
 	if testKey == "" {
 		logger.Warn("no --stripe-test-secret-key/SIDECAR_STRIPE_TEST_SECRET_KEY set; test_mode donation requests will fail")
-		return svc
+		return svc, nil
 	}
 	if testProduct == "" {
-		logger.Warn("no --stripe-test-recurring-product-id/SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID set; recurring test_mode donations will fail")
+		return nil, errors.New("--stripe-test-recurring-product-id/SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID is required with a Stripe test key")
 	}
-	svc.Test = donations.NewStripeGateway(testKey, testProduct, logger)
-	return svc
+	svc.Test = donations.NewStripeGateway(testKey, testProduct)
+	return svc, nil
 }

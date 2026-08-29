@@ -63,10 +63,13 @@ services:
         sync: false
       # Riders arrive through the Cloudflare-proxied custom domain, which
       # sets CF-Connecting-IP. The *.onrender.com hostname stays reachable
-      # and does not; a request there can forge the header, but the key is
-      # peer-qualified so a forgery only subdivides that sender's own bucket.
+      # and does not, so the header is honoured only on requests carrying
+      # the secret a Cloudflare Transform Rule adds (README, Deployment);
+      # everything else keys on the peer, as before.
       - key: SIDECAR_TRUSTED_PROXY
         value: cloudflare
+      - key: SIDECAR_TRUSTED_PROXY_SECRET
+        sync: false
       - key: SIDECAR_LOG_FORMAT
         value: json
       - key: SIDECAR_SENTRY_DSN

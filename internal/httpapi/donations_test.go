@@ -22,7 +22,7 @@ type donationGateway struct {
 	fail bool
 }
 
-func (g *donationGateway) FindOrCreateCustomer(_ context.Context, email, name string) (string, error) {
+func (g *donationGateway) CreateCustomer(_ context.Context, email, name string) (string, error) {
 	g.last.Email, g.last.Name = email, name
 	if g.fail {
 		return "", errors.New("stripe down")

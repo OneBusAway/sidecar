@@ -556,9 +556,13 @@ and the app's `test_mode: "1"` routes the request to
 `SIDECAR_STRIPE_TEST_SECRET_KEY`, so TestFlight builds exercise the flow
 against production. Recurring donations create a monthly price under
 `SIDECAR_STRIPE_RECURRING_PRODUCT_ID` (and the test-mode
-`SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID`); the OBACloud deployment used
-`prod_OqlLl6mR66dLVQ` and `prod_P1xUtsgjEfkGgu` respectively. Customers are
-found or created by email. A Stripe failure is a `500` with an empty
+`SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID`; each is required with its key,
+checked at boot); the OBACloud deployment used
+`prod_OqlLl6mR66dLVQ` and `prod_P1xUtsgjEfkGgu` respectively. A new Stripe
+customer is created per donation -- deliberately not matched by email,
+since the route is unauthenticated and a recurring response hands the
+caller that customer's id and an ephemeral key to its saved payment
+methods. A Stripe failure is a `500` with an empty
 body, which is what the shipped apps expect; a malformed request is a
 `400`. The endpoint is throttled at 10/minute per client address.
 
@@ -763,13 +767,19 @@ L4 proxy), or be one that *overwrites* a client-address header of its own on
 every request, in which case set `SIDECAR_TRUSTED_PROXY` (`--trusted-proxy`)
 to name it: `cloudflare` reads `CF-Connecting-IP`, `render` reads
 `True-Client-IP`, and `header:<Name>` covers any other proxy with the same
-guarantee. Requests without the header, or with a value that is not an IP
-address, fall back to the peer. The key is the header address qualified
-by the peer address, so a request that reaches the origin without passing
-through the proxy (Render's `*.onrender.com` hostname stays reachable
-beside a proxied custom domain) can forge the header but only subdivides
-its own peer's bucket, never anyone else's. There is deliberately no
-`X-Forwarded-For` mode: its first entry is whatever the client sent. Leaving the setting off
+guarantee. The header is honoured only on requests proven to have come
+through that proxy: either the peer address is inside
+`SIDECAR_TRUSTED_PROXY_CIDRS` (`render` defaults to the private ranges,
+which is all that reaches a Render service), or the request carries
+`X-Sidecar-Proxy-Secret` equal to `SIDECAR_TRUSTED_PROXY_SECRET` -- for
+Cloudflare, add a Transform Rule (Modify Request Header) on the proxied
+hostname that sets it. Every other request -- including one that reaches
+Render's `*.onrender.com` hostname directly, where anyone could set
+`CF-Connecting-IP` to a fresh value per request and mint unlimited
+buckets -- keys on the peer, as with the setting off. Requests with the
+proof but no header, or a value that is not an IP address, also fall back
+to the peer. There is deliberately no `X-Forwarded-For` mode: its first
+entry is whatever the client sent. Leaving the setting off
 behind a proxy that terminates and re-originates TCP means every request
 throttles against the proxy's own address -- one shared bucket for all
 clients, which at any real traffic level is a 429 for nearly everyone.
@@ -850,7 +860,9 @@ missing, as on a fresh or replaced disk -- restores the latest replica
 before starting. Leave the variable empty and the entrypoint execs the
 server directly, as before. The other settings: `SIDECAR_BACKUP_ENDPOINT`
 (required for anything but AWS; for Cloudflare R2,
-`https://<account id>.r2.cloudflarestorage.com`), `SIDECAR_BACKUP_REGION`
+`https://<account id>.r2.cloudflarestorage.com`; must be `https://` unless
+`SIDECAR_BACKUP_ALLOW_INSECURE=1` says a local test store is in use),
+`SIDECAR_BACKUP_REGION`
 (default `auto`, which R2 wants), `SIDECAR_BACKUP_ACCESS_KEY_ID` /
 `SIDECAR_BACKUP_SECRET_ACCESS_KEY`, `SIDECAR_BACKUP_PATH` (key prefix,
 default `sidecar`; give staging and production different prefixes or
@@ -977,9 +989,11 @@ private network is plain HTTP.
 
 Because the disk pins the service to one instance, deploys restart rather
 than roll. Render's proxy re-originates TCP, so set
-`SIDECAR_TRUSTED_PROXY=render` on the service (or `cloudflare` when the
-custom domain is proxied through Cloudflare, which is then the hop that
-sets the header); without it every per-IP throttle shares one bucket.
+`SIDECAR_TRUSTED_PROXY=render` on the service (or `cloudflare` plus
+`SIDECAR_TRUSTED_PROXY_SECRET` and the matching Cloudflare Transform Rule
+when the custom domain is proxied through Cloudflare, which is then the
+hop that sets the header); without it every per-IP throttle shares one
+bucket.
 
 ### Development
 

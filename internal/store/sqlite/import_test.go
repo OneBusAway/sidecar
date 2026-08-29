@@ -90,9 +90,41 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if sum != want {
 		t.Fatalf("summary %+v, want %+v", sum, want)
 	}
+	assertImportedAlert(t, store)
+	assertImportedSurvey(t, store)
+	assertImportedRiderState(t, store)
 
-	// Ids survive: the feed entity id Alert_4242 is what riders dismissed.
+	// A second import of a superset is a delta: everything existing is
+	// skipped, the new rows land, nothing is duplicated.
+	doc := importDoc()
+	doc.PushRegistrations = append(doc.PushRegistrations, export.PushRegistration{Token: "tok-new", OperatingSystem: "ios", LastSeenAt: importBase})
+	// A translation added to an already-migrated alert must land on the
+	// delta run; that is the case the delta exists for.
+	doc.Alerts[0].Translations = append(doc.Alerts[0].Translations, export.AlertTranslation{Language: "fr", HeaderText: "Ligne 44", DescriptionText: "Prenez la 43e."})
+	sum, err = store.Import(ctx, doc, importBase.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped := export.Counts{Skipped: 1}
+	wantDelta := export.Summary{Alerts: skipped, Translations: export.Counts{Added: 2, Skipped: 2}, Studies: skipped, Surveys: skipped, Questions: export.Counts{Skipped: 2}, SurveyResponses: skipped, PushRegistrations: export.Counts{Added: 1, Skipped: 2}, GhostBusReports: skipped}
+	if sum != wantDelta {
+		t.Fatalf("delta summary %+v, want %+v", sum, wantDelta)
+	}
+	count, countErr := store.PushRegs().CountAudience(ctx, 1, false)
+	if countErr != nil || count.Total != 3 {
+		t.Fatalf("audience %+v %v", count, countErr)
+	}
 	alert, err := store.Alerts().Get(ctx, 4242)
+	if err != nil || len(alert.Translations) != 4 {
+		t.Fatalf("fr translation not imported on the delta run: %v %+v", err, alert.Translations)
+	}
+}
+
+// assertImportedAlert: ids survive (the feed entity id Alert_4242 is what
+// riders dismissed) and translation staleness follows the source text.
+func assertImportedAlert(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	alert, err := store.Alerts().Get(context.Background(), 4242)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +147,11 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if !sawHeader || !sawDescription {
 		t.Fatalf("translations %+v", alert.Translations)
 	}
+}
 
+func assertImportedSurvey(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	ctx := context.Background()
 	survey, err := store.Surveys().GetSurvey(ctx, 70)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +169,11 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if resp.SurveyID != 70 || len(resp.Answers) != 1 || resp.Answers[0].QuestionID != 700 || resp.StopLatitude == nil {
 		t.Fatalf("response %+v", resp)
 	}
+}
 
+func assertImportedRiderState(t *testing.T, store *sqlite.Store) {
+	t.Helper()
+	ctx := context.Background()
 	reg, err := store.PushRegs().Get(ctx, 1, "tok-ios")
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +184,6 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	if _, androidErr := store.PushRegs().Get(ctx, 1, "tok-android"); androidErr != nil {
 		t.Fatal(androidErr)
 	}
-
 	report, err := store.GhostBus().GetByPublicID(ctx, 1, "gb-1")
 	if err != nil {
 		t.Fatal(err)
@@ -155,31 +194,6 @@ func TestImport_RoundTripAndDelta(t *testing.T) {
 	pending, pendErr := store.GhostBus().ListPendingSnapshots(ctx, 10)
 	if pendErr != nil || len(pending) != 0 {
 		t.Fatalf("captured report re-queued for enrichment: %v %v", pending, pendErr)
-	}
-
-	// A second import of a superset is a delta: everything existing is
-	// skipped, the new row lands, nothing is duplicated.
-	doc := importDoc()
-	doc.PushRegistrations = append(doc.PushRegistrations, export.PushRegistration{Token: "tok-new", OperatingSystem: "ios", LastSeenAt: importBase})
-	// A translation added to an already-migrated alert must land on the
-	// delta run; that is the case the delta exists for.
-	doc.Alerts[0].Translations = append(doc.Alerts[0].Translations, export.AlertTranslation{Language: "fr", HeaderText: "Ligne 44", DescriptionText: "Prenez la 43e."})
-	sum, err = store.Import(ctx, doc, importBase.Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	skipped := export.Counts{Skipped: 1}
-	wantDelta := export.Summary{Alerts: skipped, Translations: export.Counts{Added: 2, Skipped: 2}, Studies: skipped, Surveys: skipped, Questions: export.Counts{Skipped: 2}, SurveyResponses: skipped, PushRegistrations: export.Counts{Added: 1, Skipped: 2}, GhostBusReports: skipped}
-	if sum != wantDelta {
-		t.Fatalf("delta summary %+v, want %+v", sum, wantDelta)
-	}
-	count, countErr := store.PushRegs().CountAudience(ctx, 1, false)
-	if countErr != nil || count.Total != 3 {
-		t.Fatalf("audience %+v %v", count, countErr)
-	}
-	alert, err = store.Alerts().Get(ctx, 4242)
-	if err != nil || len(alert.Translations) != 4 {
-		t.Fatalf("fr translation not imported on the delta run: %v %+v", err, alert.Translations)
 	}
 }
 
@@ -273,6 +287,12 @@ func TestImport_SecondaryRows(t *testing.T) {
 		"malformed answers": func(d *export.Document) { d.SurveyResponses[0].Answers = json.RawMessage(`[{"question_id":"x"}]`) },
 		"duplicate question id": func(d *export.Document) {
 			d.Studies[0].Surveys[0].Questions[1].ID = d.Studies[0].Surveys[0].Questions[0].ID
+		},
+		"duplicate alert id":  func(d *export.Document) { d.Alerts = append(d.Alerts, d.Alerts[0]) },
+		"duplicate token":     func(d *export.Document) { d.PushRegistrations = append(d.PushRegistrations, d.PushRegistrations[0]) },
+		"duplicate public id": func(d *export.Document) { d.GhostBusReports = append(d.GhostBusReports, d.GhostBusReports[0]) },
+		"duplicate translation": func(d *export.Document) {
+			d.Alerts[0].Translations = append(d.Alerts[0].Translations, d.Alerts[0].Translations[0])
 		},
 	}
 	for name, mutate := range rejected {

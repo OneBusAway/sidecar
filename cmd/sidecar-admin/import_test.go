@@ -62,6 +62,12 @@ func TestImportCommand(t *testing.T) {
 	}
 
 	cliErrContains(t, dbPath, "requires --file", "import")
+	two := writeExportDoc(t, doc)
+	b, _ := os.ReadFile(two)
+	if err := os.WriteFile(two, append(b, []byte("\n{}")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cliErrContains(t, dbPath, "after the document", "import", "--file", two)
 	bad := doc
 	bad.RegionID = 999
 	cliErrContains(t, dbPath, "region not found", "import", "--file", writeExportDoc(t, bad))
