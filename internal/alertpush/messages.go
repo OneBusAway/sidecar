@@ -1,6 +1,9 @@
 package alertpush
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -98,4 +101,37 @@ func Clamp(s string, limit int) string {
 	}
 	runes := []rune(s)
 	return string(runes[:limit-1]) + "…"
+}
+
+// ErrInvalidMessages marks caller-supplied push copy that ValidateMessages
+// refused. The HTTP layer maps it to 400: it is a fact about the request
+// body, not the alert.
+var ErrInvalidMessages = errors.New("invalid push messages")
+
+// ValidateMessages checks copy a caller supplies in place of BuildMessages'
+// derivation (migration design spec section 2.3). The rules are the ones
+// the derivation's output already satisfies: English present, every key a
+// normalized language tag, a non-blank body (an empty-bodied notification
+// is invisible; an empty title is fine, it is what promoteHeader produces),
+// and TitleLimit/BodyLimit in runes. Nothing is clamped or rewritten --
+// the caller asked for this exact text, so it either fits or is refused.
+func ValidateMessages(m Messages) error {
+	if _, ok := m[EnglishKey]; !ok {
+		return fmt.Errorf("%w: messages must include %q", ErrInvalidMessages, EnglishKey)
+	}
+	for lang, msg := range m {
+		if lang == "" || alerts.NormalizeLanguage(lang) != lang {
+			return fmt.Errorf("%w: language %q must be a trimmed, lowercase tag", ErrInvalidMessages, lang)
+		}
+		if strings.TrimSpace(msg.Body) == "" {
+			return fmt.Errorf("%w: messages[%s].body must not be blank", ErrInvalidMessages, lang)
+		}
+		if n := utf8.RuneCountInString(msg.Title); n > TitleLimit {
+			return fmt.Errorf("%w: messages[%s].title is %d runes, max %d", ErrInvalidMessages, lang, n, TitleLimit)
+		}
+		if n := utf8.RuneCountInString(msg.Body); n > BodyLimit {
+			return fmt.Errorf("%w: messages[%s].body is %d runes, max %d", ErrInvalidMessages, lang, n, BodyLimit)
+		}
+	}
+	return nil
 }

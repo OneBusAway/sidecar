@@ -64,9 +64,14 @@ type audienceJSON struct {
 }
 
 // createPushRequest is the POST /alerts/{id}/pushes body. An absent audience
-// means "all", so an empty body is a complete request.
+// means "all", so an empty body is a complete request. Messages, when
+// present, replaces the mechanical copy derivation with the caller's own
+// per-language {title, body} snapshot (migration design spec §2.3); it is
+// the same shape pushJSON emits. Absent (nil) derives as before; present
+// but empty is a 400, since it can only mean the caller forgot the text.
 type createPushRequest struct {
-	Audience string `json:"audience"`
+	Audience string             `json:"audience"`
+	Messages alertpush.Messages `json:"messages"`
 }
 
 // adminPushesHandler serves the alert push routes (design spec §2.9). It is
@@ -110,7 +115,7 @@ func (h *adminPushesHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := h.enqueuer().Enqueue(r.Context(), alert.ID, audience, h.deps.Now())
+	p, err := h.enqueuer().Enqueue(r.Context(), alert.ID, audience, req.Messages, h.deps.Now())
 	if err != nil {
 		h.enqueueError(w, err)
 		return
@@ -212,8 +217,15 @@ func (h *adminPushesHandler) audience(w http.ResponseWriter, r *http.Request) {
 
 // enqueueError maps the Enqueuer's refusals onto the §2.2 status codes.
 // Every one of them is a fact about the alert or the region, not about the
-// request body, so they are 404/409 rather than 400.
+// request body, so they are 404/409 rather than 400 -- except
+// ErrInvalidMessages, which is the body.
 func (h *adminPushesHandler) enqueueError(w http.ResponseWriter, err error) {
+	if errors.Is(err, alertpush.ErrInvalidMessages) {
+		// The body, not the alert, is at fault -- and the wrapped text names
+		// which field, without any store framing (design spec §5).
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, alerts.ErrNotFound) {
 		writeJSONError(w, h.deps.Logger, http.StatusNotFound, "alert not found")
 		return

@@ -115,7 +115,7 @@ func TestDispatcherGroupsByPlatformLocaleAndSandbox(t *testing.T) {
 	// Registration writes apns_sandbox for every platform, so an Android row
 	// can carry true; it must not split the FCM batch (design spec §2.6).
 	f.registerFull(t, "android-de-sandbox", pushreg.OSAndroid, "de", true, false)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestDispatcherResumesFromCursorAfterTransportError(t *testing.T) {
 	for i := 0; i < alertpush.BatchSize+3; i++ {
 		f.registerFull(t, "tok-"+strconv.Itoa(i), pushreg.OSAndroid, "", false, false)
 	}
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestDispatcherMarksFailedAfterMaxAttempts(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	now := base
 	d := newDispatcher(f, &alwaysFail{}, &now)
 	for i := 0; i < alertpush.MaxAttempts; i++ {
@@ -244,7 +244,7 @@ func TestDispatcherCountsInlineRejections(t *testing.T) {
 	a := f.alert(t, true, false)
 	f.register(t, "good", false)
 	f.register(t, "bad", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	now := base
 	d := newDispatcher(f, &fakeSender{rejectTokens: map[string]string{"bad": "BadDeviceToken"}}, &now)
 	d.RunOnce(context.Background())
@@ -261,7 +261,7 @@ func TestDispatcherCanceledPushIsNotSent(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err := f.store.AlertPushes().Cancel(context.Background(), p.ID, base); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestDispatcherCancelMidSendYieldsWithoutCommittingPage(t *testing.T) {
 	for i := 0; i < alertpush.BatchSize+3; i++ {
 		f.registerFull(t, "tok-"+strconv.Itoa(i), pushreg.OSAndroid, "", false, false)
 	}
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestDispatcherTestAudienceReachesOnlyTestDevices(t *testing.T) {
 	a := f.alert(t, true, false)
 	f.register(t, "qa", true)
 	f.register(t, "rider", false)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceTest, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceTest, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestDispatcherUnpublishedAlertCancelsPush(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err := f.store.Alerts().SetPublished(context.Background(), a.ID, false, base); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestDispatcherNoSenderFailsPush(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	now := base
 	newDispatcher(f, nil, &now).RunOnce(context.Background())
 	final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
@@ -402,7 +402,7 @@ func TestDispatcherFirstCycleAdoptsOrphanedSends(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestDispatcherCursorWriteFailureCountsAsAttempt(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatal(err)
 	}

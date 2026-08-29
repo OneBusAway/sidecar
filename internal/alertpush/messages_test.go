@@ -1,6 +1,7 @@
 package alertpush_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -74,5 +75,39 @@ func TestBuildMessagesClamps(t *testing.T) {
 		if s := alertpush.Clamp("short", limit); s != "" {
 			t.Errorf("Clamp(short, %d) = %q, want the empty string", limit, s)
 		}
+	}
+}
+
+func TestValidateMessages(t *testing.T) {
+	t.Parallel()
+	ok := alertpush.Message{Title: "Route 40", Body: "Detour until Friday"}
+	for _, tc := range []struct {
+		name string
+		in   alertpush.Messages
+		want bool
+	}{
+		{"english only", alertpush.Messages{"en": ok}, true},
+		{"english plus a translation", alertpush.Messages{"en": ok, "es": {Title: "Ruta 40", Body: "Desvio"}}, true},
+		{"empty title is fine (header promoted to body)", alertpush.Messages{"en": {Body: "Detour"}}, true},
+		{"title at the cap", alertpush.Messages{"en": {Title: strings.Repeat("t", alertpush.TitleLimit), Body: "b"}}, true},
+		{"body at the cap", alertpush.Messages{"en": {Body: strings.Repeat("b", alertpush.BodyLimit)}}, true},
+		{"empty set", alertpush.Messages{}, false},
+		{"no english", alertpush.Messages{"es": ok}, false},
+		{"blank body", alertpush.Messages{"en": {Title: "t", Body: "   "}}, false},
+		{"title over the cap", alertpush.Messages{"en": {Title: strings.Repeat("t", alertpush.TitleLimit+1), Body: "b"}}, false},
+		{"body over the cap", alertpush.Messages{"en": {Body: strings.Repeat("b", alertpush.BodyLimit+1)}}, false},
+		{"multi-byte body at the cap counts runes", alertpush.Messages{"en": {Body: strings.Repeat("中", alertpush.BodyLimit)}}, true},
+		{"un-normalized language", alertpush.Messages{"en": ok, "ES": ok}, false},
+		{"blank language", alertpush.Messages{"en": ok, "": ok}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := alertpush.ValidateMessages(tc.in)
+			if (err == nil) != tc.want {
+				t.Fatalf("err = %v, want ok=%v", err, tc.want)
+			}
+			if err != nil && !errors.Is(err, alertpush.ErrInvalidMessages) {
+				t.Errorf("err = %v, want ErrInvalidMessages", err)
+			}
+		})
 	}
 }

@@ -834,7 +834,7 @@ func alertPush(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	}
 
 	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
-	p, err := enq.Enqueue(ctx, id, audience, now)
+	p, err := enq.Enqueue(ctx, id, audience, nil, now)
 	if err != nil {
 		return wrapAlertErr(alertPushCmd, id, err)
 	}

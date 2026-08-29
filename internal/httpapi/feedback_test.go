@@ -603,7 +603,7 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 	}
 
 	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
-	p, err := enq.Enqueue(ctx, alertID, alertpush.AudienceAll, base)
+	p, err := enq.Enqueue(ctx, alertID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
