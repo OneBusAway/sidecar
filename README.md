@@ -1002,8 +1002,13 @@ and push. The alarm checker also does not re-check every alarm every
 minute: after a lookup that says the fire window is still far off, the
 alarm is deferred (`alarms.check_after`) halfway to that window -- three
 hours out becomes 90 minutes, then 45, 22, ... -- and returns to the
-once-a-minute cadence once under two minutes of slack remain, so an
-alarm set hours ahead costs a handful of lookups rather than hundreds.
+once-a-minute cadence once under four minutes of slack remain (a
+deferral is never shorter than two minutes nor longer than an hour), so
+an alarm set hours ahead
+costs a handful of lookups rather than hundreds. A clean shutdown hands
+each loop to the replacement at its next poll, within a minute. An admin
+"send now" that reaches a process not holding the `alert-pushes` lease
+is covered by the holder's next 15-second tick.
 
 Because the disk pins the service to one instance, deploys restart rather
 than roll. Render's proxy re-originates TCP, so set

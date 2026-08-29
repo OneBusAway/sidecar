@@ -5,8 +5,9 @@
 // but "safe" is not "free": two processes sweeping the same alarms table
 // would double every OBA lookup and race on every push. A named, expiring
 // lease in the shared database makes one process the loop's owner at a
-// time, with ownership passing to a survivor one TTL after the owner dies
-// and immediately on a clean shutdown.
+// time, with ownership passing to a survivor within one TTL plus a poll
+// after the owner dies, and at the survivor's next poll after a clean
+// shutdown.
 package lease
 
 import (
@@ -21,7 +22,9 @@ type Repository interface {
 	// at now, or is already holder's own -- in which case the expiry is
 	// pushed out to now+ttl (this is how a live holder renews). It reports
 	// whether holder holds the lease afterwards. Expiry is inclusive: a
-	// lease whose expiry equals now is free.
+	// lease whose expiry equals now is free. ttl must be positive. now is
+	// compared against the instants other processes wrote, so the
+	// coordination is only as good as the participants' clock agreement.
 	Acquire(ctx context.Context, name, holder string, now time.Time, ttl time.Duration) (bool, error)
 	// Release drops the named lease if holder holds it, and does nothing
 	// otherwise (including for a name nobody holds).

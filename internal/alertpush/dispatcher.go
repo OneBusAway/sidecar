@@ -71,9 +71,10 @@ func (d *Dispatcher) WakeC() <-chan struct{} {
 // left its in-flight rows sending with a fresh updated_at, so waiting out
 // the stuck clock would stall the send for 15 minutes. Only a crash leaves a
 // stale updated_at, which the later cycles' now-StuckAfter window is for.
-// Adoption is safe because the lease.Runner makes this process the only one
-// running the dispatcher: a first cycle that finds sending rows found the
-// previous holder's, not a live peer's.
+// Adoption is safe enough because the lease.Runner keeps at most one live
+// holder per loop: sending rows seen on a first cycle are almost certainly
+// the previous holder's. The residual case -- a peer's cycle outliving the
+// lease TTL -- is the at-least-once duplicate spec §12 accepts.
 func (d *Dispatcher) RunOnce(ctx context.Context) {
 	now := d.Now()
 	stuckBefore := now.Add(-StuckAfter)

@@ -2,6 +2,9 @@ package storetest
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +29,7 @@ func RunLeaseRepository(t *testing.T, newStore newLeaseStoreFunc) {
 	t.Run("ReleaseFreesTheLease", func(t *testing.T) { testReleaseFreesTheLease(t, newStore) })
 	t.Run("ReleaseByNonHolderIsNoop", func(t *testing.T) { testReleaseByNonHolderIsNoop(t, newStore) })
 	t.Run("NamesAreIndependent", func(t *testing.T) { testLeaseNamesAreIndependent(t, newStore) })
+	t.Run("AcquireIsAtomicUnderContention", func(t *testing.T) { testAcquireIsAtomicUnderContention(t, newStore) })
 }
 
 const leaseTTL = time.Minute
@@ -87,6 +91,44 @@ func testReleaseByNonHolderIsNoop(t *testing.T, newStore newLeaseStoreFunc) {
 	// Releasing a name nobody holds is equally harmless.
 	if err := repo.Release(context.Background(), "nothing", "b"); err != nil {
 		t.Fatalf("Release(unknown name): %v", err)
+	}
+}
+
+// testAcquireIsAtomicUnderContention is the contract a SELECT-then-UPDATE
+// implementation would fail: many holders racing for one free name must
+// see exactly one true.
+func testAcquireIsAtomicUnderContention(t *testing.T, newStore newLeaseStoreFunc) {
+	repo := newStore(t)
+	const holders = 16
+	var (
+		startGate = make(chan struct{})
+		wg        sync.WaitGroup
+		wins      atomic.Int64
+		errs      = make(chan error, holders)
+	)
+	for i := range holders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-startGate
+			ok, err := repo.Acquire(context.Background(), "alarms", fmt.Sprintf("h%d", i), base, leaseTTL)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	close(startGate)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("Acquire: %v", err)
+	}
+	if n := wins.Load(); n != 1 {
+		t.Fatalf("%d holders acquired the same free lease, want exactly 1", n)
 	}
 }
 

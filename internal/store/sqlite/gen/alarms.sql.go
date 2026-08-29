@@ -303,8 +303,9 @@ SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_s
 `
 
 // ListDueAlarms is deliberately unordered and unindexed: the sweep fans
-// out concurrently, most rows match (every fresh alarm is due), and the
-// 3-strike reaper bounds the table, so a plain scan is the cheap path.
+// out concurrently, and fire-then-delete plus the 3-strike reaper keep
+// the table small, so a scan per minute is cheaper than maintaining an
+// index on a column every deferral rewrites.
 func (q *Queries) ListDueAlarms(ctx context.Context, now int64) ([]Alarm, error) {
 	rows, err := q.db.QueryContext(ctx, listDueAlarms, now)
 	if err != nil {

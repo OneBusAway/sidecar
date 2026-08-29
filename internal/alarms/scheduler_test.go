@@ -26,8 +26,9 @@ var base = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 // fakeAlarmRepo is an in-memory alarms.Repository. Scheduler cycles run
 // alarm checks concurrently (errgroup, SetLimit(8)), so every method locks.
 type fakeAlarmRepo struct {
-	mu     sync.Mutex
-	alarms map[int64]alarms.Alarm
+	mu       sync.Mutex
+	alarms   map[int64]alarms.Alarm
+	deferErr error // returned by every Defer when set
 }
 
 func newFakeAlarmRepo(as ...alarms.Alarm) *fakeAlarmRepo {
@@ -83,6 +84,9 @@ func (r *fakeAlarmRepo) ListDue(_ context.Context, now time.Time) ([]alarms.Alar
 func (r *fakeAlarmRepo) Defer(_ context.Context, id int64, until time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.deferErr != nil {
+		return r.deferErr
+	}
 	a, ok := r.alarms[id]
 	if !ok {
 		return nil
@@ -380,7 +384,7 @@ func TestSweepSkipsDeferredAlarms(t *testing.T) {
 	}
 }
 
-// TestFarWaitDefersNextCheck: a departure hours out is re-checked halfway
+// TestFarWaitDefersNextCheck: a departure well out is re-checked halfway
 // to its fire window, not every minute. Halving is deliberate -- each
 // re-check halves the remaining slack again, so a bus that starts running
 // early is still caught with plenty of margin, and once the slack is small
@@ -390,8 +394,8 @@ func TestFarWaitDefersNextCheck(t *testing.T) {
 	alarm := testAlarm(1, 600)
 	repo := newFakeAlarmRepo(alarm)
 	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
-		// Departure in 3h, fire window opens at 3h-10m: slack is 10200s.
-		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(3 * 3600)}, nil
+		// Departure in 90m, fire window opens at 90m-10m: slack is 4800s.
+		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(90 * 60)}, nil
 	}}
 	s := newScheduler(repo, oba, &fakeSender{})
 
@@ -401,33 +405,90 @@ func TestFarWaitDefersNextCheck(t *testing.T) {
 	if !ok {
 		t.Fatal("alarm deleted; want it to survive a Wait")
 	}
-	want := base.Add(10200 / 2 * time.Second)
+	want := base.Add(4800 / 2 * time.Second)
 	if !got.CheckAfter.Equal(want) {
 		t.Errorf("CheckAfter = %v; want %v (now + half the slack)", got.CheckAfter, want)
 	}
 }
 
-// TestNearWaitKeepsMinuteCadence: with only a couple of minutes of slack,
-// deferring would save nothing and risk missing an early bus, so the
-// alarm stays due every cycle.
-func TestNearWaitKeepsMinuteCadence(t *testing.T) {
+// TestMinDeferralBoundary: a halving shorter than MinDeferral is skipped
+// (the alarm stays due every cycle -- deferring would save nothing and
+// risk missing an early bus); one of exactly MinDeferral is taken.
+func TestMinDeferralBoundary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		slack     int64 // seconds until the fire window opens
+		wantDefer time.Duration
+	}{
+		{"just under", 2*int64(alarms.MinDeferral/time.Second) - 1, 0},
+		{"exactly", 2 * int64(alarms.MinDeferral/time.Second), alarms.MinDeferral},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alarm := testAlarm(1, 600)
+			repo := newFakeAlarmRepo(alarm)
+			oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+				return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(600 + tc.slack)}, nil
+			}}
+			s := newScheduler(repo, oba, &fakeSender{})
+
+			s.CheckAll(context.Background())
+
+			got, ok := repo.get(1)
+			if !ok {
+				t.Fatal("alarm deleted; want it to survive a Wait")
+			}
+			var want time.Time
+			if tc.wantDefer > 0 {
+				want = base.Add(tc.wantDefer)
+			}
+			if !got.CheckAfter.Equal(want) {
+				t.Errorf("CheckAfter = %v; want %v", got.CheckAfter, want)
+			}
+		})
+	}
+}
+
+// TestDeferralIsCapped: a day-ahead alarm is not left unchecked for half a
+// day; MaxDeferral bounds how long a trip can move earlier unnoticed.
+func TestDeferralIsCapped(t *testing.T) {
 	t.Parallel()
 	alarm := testAlarm(1, 600)
 	repo := newFakeAlarmRepo(alarm)
 	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
-		// Fire window opens in 3m59s: half of that is under MinDeferral.
-		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(600 + 239)}, nil
+		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(24 * 3600)}, nil
 	}}
 	s := newScheduler(repo, oba, &fakeSender{})
 
 	s.CheckAll(context.Background())
 
-	got, ok := repo.get(1)
-	if !ok {
-		t.Fatal("alarm deleted; want it to survive a Wait")
+	got, _ := repo.get(1)
+	if want := base.Add(alarms.MaxDeferral); !got.CheckAfter.Equal(want) {
+		t.Errorf("CheckAfter = %v; want %v (capped)", got.CheckAfter, want)
 	}
-	if !got.CheckAfter.IsZero() {
-		t.Errorf("CheckAfter = %v; want zero (still due every cycle)", got.CheckAfter)
+}
+
+// TestDeferFailureIsNonFatal: a Defer the store refuses just means one more
+// minute-cadence check -- the alarm survives and nothing is pushed.
+func TestDeferFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	alarm := testAlarm(1, 600)
+	repo := newFakeAlarmRepo(alarm)
+	repo.deferErr = errors.New("locked")
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(3 * 3600)}, nil
+	}}
+	sender := &fakeSender{}
+	s := newScheduler(repo, oba, sender)
+
+	s.CheckAll(context.Background())
+
+	if _, ok := repo.get(1); !ok {
+		t.Fatal("alarm deleted; want it kept for the next cycle")
+	}
+	if sender.count() != 0 {
+		t.Errorf("sent = %d; want 0", sender.count())
 	}
 }
 

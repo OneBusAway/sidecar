@@ -25,8 +25,9 @@ DELETE FROM alarms WHERE id = @id;
 SELECT * FROM alarms ORDER BY id;
 
 -- ListDueAlarms is deliberately unordered and unindexed: the sweep fans
--- out concurrently, most rows match (every fresh alarm is due), and the
--- 3-strike reaper bounds the table, so a plain scan is the cheap path.
+-- out concurrently, and fire-then-delete plus the 3-strike reaper keep
+-- the table small, so a scan per minute is cheaper than maintaining an
+-- index on a column every deferral rewrites.
 
 -- name: ListDueAlarms :many
 SELECT * FROM alarms WHERE check_after <= @now;

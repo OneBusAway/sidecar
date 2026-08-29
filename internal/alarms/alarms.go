@@ -29,7 +29,7 @@ const DefaultSecondsBefore = 600
 
 // Alarm is one server-owned scheduled push, as stored: the fields a client
 // submitted at creation plus the scheduler bookkeeping (FailureCount,
-// CreatedAt) that decides when and whether it still fires.
+// CheckAfter, CreatedAt) that decides when and whether it still fires.
 type Alarm struct {
 	ID              int64
 	RegionID        int64
@@ -102,8 +102,8 @@ type Repository interface {
 	Defer(ctx context.Context, id int64, until time.Time) error
 	RecordFailure(ctx context.Context, id int64) (int64, error) // ++failure_count, returns streak
 	ResetFailures(ctx context.Context, id int64) error
-	// ListByRegion returns one region's alarms, oldest first. The admin API
-	// reads it; the scheduler still uses List, which sweeps every region.
+	// ListByRegion returns one region's alarms, oldest first, for the admin
+	// API. The scheduler sweeps ListDue instead.
 	ListByRegion(ctx context.Context, regionID int64) ([]Alarm, error)
 	// GetInRegion takes the region as a query condition rather than
 	// comparing it afterwards, so an alarm addressed through the wrong

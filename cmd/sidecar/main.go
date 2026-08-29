@@ -197,9 +197,9 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 
 	// --refresh=0 is a natural way to try to disable directory sync, and
 	// --refresh=nonsense is already rejected by fs.Parse above; a
-	// non-positive value that parses cleanly must be rejected the same
-	// explicit way rather than silently run at the lease runner's fallback
-	// cadence.
+	// non-positive value that parses cleanly must be rejected here at boot
+	// rather than logged and replaced by the lease runner's fallback
+	// cadence with the process still running.
 	if *refresh <= 0 {
 		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}
@@ -259,11 +259,12 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// Every background loop runs under a lease (spec §12): with a shared
 	// database, one process at a time owns each loop, ownership passes to
 	// a survivor within a few minutes of the holder dying, and a clean
-	// shutdown releases every lease so a replacement takes over at once.
+	// shutdown releases every lease so a replacement takes over at its
+	// next poll.
 	// Each loop is its own goroutine so boot never blocks on any of them:
 	// the server starts serving from whatever rows already exist while,
 	// for example, the first directory fetch is still in flight.
-	loops := &lease.Runner{Repo: store.Leases(), Holder: leaseHolder(), Now: time.Now, Logger: logger}
+	loops := &lease.Runner{Repo: store.Leases(), Holder: leaseHolder(logger), Now: time.Now, Logger: logger}
 	// Registered after store.Close's defer, so it runs first: every loop
 	// must have released its lease before the store it releases through
 	// is closed. stop() is what ends the loops; on a signal the context
@@ -394,9 +395,10 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 // for an operator reading the row, plus random bytes so a pid reused across
 // a restart (containers start at low pids) can never be mistaken for the
 // previous holder and inherit its leases mid-TTL.
-func leaseHolder() string {
+func leaseHolder(logger *slog.Logger) string {
 	host, err := os.Hostname()
 	if err != nil {
+		logger.Warn("sidecar: hostname unavailable for lease holder id", "err", err)
 		host = "unknown"
 	}
 	return fmt.Sprintf("%s:%d:%s", host, os.Getpid(), uuid.NewString()[:8])

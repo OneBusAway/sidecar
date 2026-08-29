@@ -75,8 +75,8 @@ func TestRun_ArgHandling(t *testing.T) {
 		},
 		{
 			// --refresh=0 is a natural way to try to disable directory
-			// sync; it must be rejected explicitly rather than silently
-			// run at the lease runner's fallback cadence.
+			// sync; it must be rejected at boot rather than logged and
+			// replaced by the lease runner's fallback cadence.
 			name:          "non-positive refresh (zero) returns an error and writes nothing to stdout",
 			args:          []string{"--refresh=0"},
 			wantErr:       true,
