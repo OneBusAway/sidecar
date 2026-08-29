@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/OneBusAway/sidecar/internal/apikey"
 )
 
 // TestAPIKeys_MintReturnsTheRawKeyOnce pins the whole 201 contract. The raw
@@ -22,7 +25,7 @@ func TestAPIKeys_MintReturnsTheRawKeyOnce(t *testing.T) {
 
 	rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/api_keys", `{"name":"obacloud prod"}`)
 	got := object(t, rec, http.StatusCreated)
-	assertKeys(t, "api key", got, []string{"id", "name", "key", "created_by", "created_at"})
+	assertKeys(t, "api key", got, []string{"id", "name", "key", "scopes", "created_by", "created_at"})
 
 	raw, _ := got["key"].(string)
 	if !strings.HasPrefix(raw, "obask_1_") {
@@ -122,7 +125,7 @@ func TestAPIKeys_ListNeverEchoesTheKey(t *testing.T) {
 		t.Fatalf("got %d keys, want 1", len(list))
 	}
 	assertKeys(t, "api key", list[0],
-		[]string{"id", "name", "created_by", "created_at", "last_used_at", "revoked_at", "revoked_by"})
+		[]string{"id", "name", "scopes", "created_by", "created_at", "last_used_at", "revoked_at", "revoked_by"})
 	if strings.Contains(bodyText(f.do(http.MethodGet, "/api/admin/v1/regions/1/api_keys", "")), raw) {
 		t.Error("the list echoed the raw key")
 	}
@@ -240,5 +243,81 @@ func TestRouteTable_KeyAdminScopeIsExactlyTheAPIKeyFamily(t *testing.T) {
 		if rt.allowed.has(principalService) && rt.scope != scopeKeyAdmin {
 			t.Errorf("route %q allows a service principal outside scopeKeyAdmin", rt.pattern)
 		}
+	}
+}
+
+// TestAPIKeys_ScopesTakeEffect is the "field actually took effect" test
+// the migration design spec section 2.2 demands: decodeJSON is lenient, so
+// a misspelled or ignored scopes field would mint a key without push and
+// fail later at send time. The assertion chain is request -> 201 body ->
+// stored row -> list body -> the key can reach the push route.
+func TestAPIKeys_ScopesTakeEffect(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/api_keys", `{"name":"obacloud","scopes":["push"]}`)
+	got := object(t, rec, http.StatusCreated)
+	assertKeys(t, "api key", got, []string{"id", "name", "key", "scopes", "created_by", "created_at"})
+	if scopes, _ := got["scopes"].([]any); len(scopes) != 1 || scopes[0] != "push" {
+		t.Fatalf("minted scopes = %v, want [push]", got["scopes"])
+	}
+	raw, _ := got["key"].(string)
+
+	keys, err := f.store.APIKeys().ListRegionKeys(context.Background(), regionPuget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || !keys[0].Scopes.Has(apikey.ScopePush) {
+		t.Fatalf("stored scopes = %+v, want push", keys)
+	}
+
+	list := array(t, f.do(http.MethodGet, "/api/admin/v1/regions/1/api_keys", ""), http.StatusOK)
+	assertKeys(t, "api key", list[0],
+		[]string{"id", "name", "scopes", "created_by", "created_at", "last_used_at", "revoked_at", "revoked_by"})
+	if scopes, _ := list[0]["scopes"].([]any); len(scopes) != 1 || scopes[0] != "push" {
+		t.Errorf("listed scopes = %v, want [push]", list[0]["scopes"])
+	}
+
+	// The scope is honoured by the router, not just echoed: a push-scoped
+	// key is not refused with 403 on the push route. (404 here: alert 1
+	// does not exist in this fixture; what matters is that the allow-list
+	// let the request through to the loader.)
+	if rec := sendBearer(f.handler, http.MethodPost, "/api/admin/v1/regions/1/alerts/1/pushes", `{}`, "Bearer "+raw); rec.Code == http.StatusForbidden {
+		t.Errorf("push-scoped key was refused on POST pushes: %s", rec.Body.String())
+	}
+}
+
+// TestAPIKeys_ScopesValidation: unknown names are 400, and an absent or
+// empty scopes field mints an unscoped key whose scopes marshal as [].
+func TestAPIKeys_ScopesValidation(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"unknown scope", `{"name":"a","scopes":["admin"]}`, http.StatusBadRequest},
+		{"blank scope", `{"name":"a","scopes":[""]}`, http.StatusBadRequest},
+		{"wrong type", `{"name":"a","scopes":"push"}`, http.StatusBadRequest},
+		{"absent", `{"name":"a"}`, http.StatusCreated},
+		{"empty", `{"name":"a","scopes":[]}`, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/api_keys", tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusCreated {
+				got := object(t, rec, http.StatusCreated)
+				if scopes, ok := got["scopes"].([]any); !ok || len(scopes) != 0 {
+					t.Errorf("scopes = %v (%T), want []", got["scopes"], got["scopes"])
+				}
+			}
+		})
+	}
+	if rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/api_keys", `{"name":"a","scopes":["admin"]}`); bodyText(rec) != `{"error":"unknown scope \"admin\""}` {
+		t.Errorf("400 body = %s", bodyText(rec))
 	}
 }
