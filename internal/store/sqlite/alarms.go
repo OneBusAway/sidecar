@@ -55,8 +55,19 @@ func alarmFromRow(a gen.Alarm) alarms.Alarm {
 		SecondsBefore:   a.SecondsBefore,
 		Message:         a.Message,
 		FailureCount:    a.FailureCount,
+		CheckAfter:      checkAfterToTime(a.CheckAfter),
 		CreatedAt:       unixToTime(a.CreatedAt),
 	}
+}
+
+// checkAfterToTime maps the column's 0 ("due now") to the zero time.Time
+// the domain uses for the same meaning; unixToTime would render it as the
+// Unix epoch, which is a real instant.
+func checkAfterToTime(n int64) time.Time {
+	if n == 0 {
+		return time.Time{}
+	}
+	return unixToTime(n)
 }
 
 // Create maps the alarms_v1_dedupe_idx unique-constraint violation to
@@ -146,6 +157,28 @@ func (r *alarmRepo) List(ctx context.Context) ([]alarms.Alarm, error) {
 		out[i] = alarmFromRow(row)
 	}
 	return out, nil
+}
+
+func (r *alarmRepo) ListDue(ctx context.Context, now time.Time) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListDueAlarms(ctx, now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list due alarms: %w", err)
+	}
+	out := make([]alarms.Alarm, len(rows))
+	for i, row := range rows {
+		out[i] = alarmFromRow(row)
+	}
+	return out, nil
+}
+
+// Defer treats a missing row as success, like DeleteByID: the sweep may
+// race the rider's own cancel, and a deferral for a row that is gone has
+// nothing left to do.
+func (r *alarmRepo) Defer(ctx context.Context, id int64, until time.Time) error {
+	if err := r.q.DeferAlarm(ctx, gen.DeferAlarmParams{CheckAfter: until.Unix(), ID: id}); err != nil {
+		return fmt.Errorf("sqlite: defer alarm %d: %w", id, err)
+	}
+	return nil
 }
 
 // RecordFailure returns the new consecutive-failure streak via RETURNING,

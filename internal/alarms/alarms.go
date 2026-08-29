@@ -49,7 +49,12 @@ type Alarm struct {
 	SecondsBefore int64
 	Message       string // composed at creation; what eventually gets pushed
 	FailureCount  int64  // consecutive failed OBA lookups (spec §5.3)
-	CreatedAt     time.Time
+	// CheckAfter is the instant before which the scheduler's sweep skips
+	// this alarm; the zero instant means due now. Set by Defer after a
+	// Wait whose departure is far enough off that re-checking every minute
+	// would be waste (see Scheduler).
+	CheckAfter time.Time
+	CreatedAt  time.Time
 }
 
 // NewAlarm is the input to Repository.Create: an Alarm before the store
@@ -87,7 +92,14 @@ type Repository interface {
 	FindV1(ctx context.Context, key V1Key) (Alarm, error)                  // ErrNotFound
 	Delete(ctx context.Context, regionID int64, token string) error        // ErrNotFound; 204 contract
 	DeleteByID(ctx context.Context, id int64) error
-	List(ctx context.Context) ([]Alarm, error)                  // scheduler sweep, all regions
+	// List returns every alarm across all regions, due or not.
+	List(ctx context.Context) ([]Alarm, error)
+	// ListDue is the scheduler sweep: every alarm whose CheckAfter is at
+	// or before now, across all regions.
+	ListDue(ctx context.Context, now time.Time) ([]Alarm, error)
+	// Defer hides an alarm from ListDue until the given instant. A missing
+	// row is not an error: the sweep can race the rider's own cancel.
+	Defer(ctx context.Context, id int64, until time.Time) error
 	RecordFailure(ctx context.Context, id int64) (int64, error) // ++failure_count, returns streak
 	ResetFailures(ctx context.Context, id int64) error
 	// ListByRegion returns one region's alarms, oldest first. The admin API

@@ -24,6 +24,12 @@ DELETE FROM alarms WHERE id = @id;
 -- name: ListAlarms :many
 SELECT * FROM alarms ORDER BY id;
 
+-- name: ListDueAlarms :many
+SELECT * FROM alarms WHERE check_after <= @now ORDER BY id;
+
+-- name: DeferAlarm :exec
+UPDATE alarms SET check_after = @check_after WHERE id = @id;
+
 -- RecordAlarmFailure and ResetAlarmFailures use SQLite's own unixepoch(),
 -- not a bound @now, because alarms.Repository's RecordFailure/ResetFailures
 -- methods take no now time.Time parameter (Task 7's interface, fixed) -- the

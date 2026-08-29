@@ -32,6 +32,7 @@ func RunAlarmRepository(t *testing.T, newStore newAlarmStoreFunc) {
 	t.Run("RegionCascade", func(t *testing.T) { testAlarmRegionCascade(t, newStore) })
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testDeleteByIDTreatsMissingAsSuccess(t, newStore) })
 	t.Run("RegionScopedReads", func(t *testing.T) { testAlarmRegionScopedReads(t, newStore) })
+	t.Run("DeferHidesAlarmFromListDueUntilItsInstant", func(t *testing.T) { testDeferHidesAlarmFromListDue(t, newStore) })
 }
 
 // seedAlarmRegions upserts the two regions testAlarmRegionScopedReads uses.
@@ -505,5 +506,69 @@ func testAlarmRegionScopedReads(t *testing.T, newStore newAlarmStoreFunc) {
 	}
 	if _, err := repo.GetInRegion(ctx, 0, 99999); !errors.Is(err, alarms.ErrNotFound) {
 		t.Errorf("GetInRegion unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// testDeferHidesAlarmFromListDue pins the due-window contract the scheduler
+// relies on (spec section 5.3, section 12): a fresh alarm is due at once
+// (CheckAfter is the zero instant, so ListDue at any now returns it); after
+// Defer(until) it is absent from ListDue for every now before until and
+// present again for now == until and later; and List still returns it
+// throughout, because deferral is scheduler bookkeeping, not a lifecycle
+// state the admin API should hide.
+func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, fullAlarmIn("tok-defer", 2), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !created.CheckAfter.IsZero() {
+		t.Errorf("Create() CheckAfter = %v, want the zero instant (due at once)", created.CheckAfter)
+	}
+
+	due, err := repo.ListDue(ctx, base)
+	if err != nil {
+		t.Fatalf("ListDue(base): %v", err)
+	}
+	findAlarmByToken(t, due, "tok-defer")
+
+	until := base.Add(90 * time.Minute)
+	if deferErr := repo.Defer(ctx, created.ID, until); deferErr != nil {
+		t.Fatalf("Defer: %v", deferErr)
+	}
+
+	for _, now := range []time.Time{base, until.Add(-time.Second)} {
+		got, listErr := repo.ListDue(ctx, now)
+		if listErr != nil {
+			t.Fatalf("ListDue(%v): %v", now, listErr)
+		}
+		if len(got) != 0 {
+			t.Errorf("ListDue(%v) = %d alarms, want 0 (deferred until %v)", now, len(got), until)
+		}
+	}
+	for _, now := range []time.Time{until, until.Add(time.Hour)} {
+		got, listErr := repo.ListDue(ctx, now)
+		if listErr != nil {
+			t.Fatalf("ListDue(%v): %v", now, listErr)
+		}
+		a := findAlarmByToken(t, got, "tok-defer")
+		if !a.CheckAfter.Equal(until) {
+			t.Errorf("CheckAfter = %v, want %v", a.CheckAfter, until)
+		}
+	}
+
+	all, err := repo.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	findAlarmByToken(t, all, "tok-defer")
+
+	// Defer on a vanished row is not an error: the sweep can race the
+	// rider's own cancel, same as DeleteByID.
+	if deferErr := repo.Defer(ctx, created.ID+1000, until); deferErr != nil {
+		t.Errorf("Defer(missing) = %v, want nil", deferErr)
 	}
 }

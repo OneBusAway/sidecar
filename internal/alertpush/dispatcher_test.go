@@ -13,6 +13,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/lease"
 	"github.com/OneBusAway/sidecar/internal/push"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 )
@@ -371,29 +372,44 @@ func TestDispatcherWakeTriggersRunWithoutTick(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
 	sender := &fakeSender{}
 	now := base
 	d := newDispatcher(f, sender, &now)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { d.RunLoop(ctx, time.Hour); close(done) }()
-	d.Wake()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
-		if final.Status == alertpush.StatusSent {
-			break
+	runner := &lease.Runner{Repo: f.store.Leases(), Holder: "test", Now: time.Now, Logger: d.Logger}
+	go func() {
+		// Interval of an hour: after the runner's own boot-time cycle, only
+		// Wake can produce another one inside this test's deadline.
+		runner.Run(ctx, lease.Loop{Name: "alert-pushes", Interval: time.Hour, Wake: d.WakeC(), Tick: d.RunOnce})
+		close(done)
+	}()
+	waitSent := func(id int64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			final, _ := f.store.AlertPushes().Get(context.Background(), id)
+			if final.Status == alertpush.StatusSent {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("push %d not sent; status %s", id, final.Status)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("push not sent after Wake; status %s", final.Status)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
+	// Anything queued before the runner started goes out on its first cycle.
+	first, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	waitSent(first.ID)
+	// A push enqueued after that would wait an hour for the ticker; Wake is
+	// what sends it now.
+	second, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	d.Wake()
+	waitSent(second.ID)
 	cancel()
 	<-done
-	// Wake before RunLoop and repeated Wakes must never block.
+	// Wake before the runner starts and repeated Wakes must never block.
 	d2 := newDispatcher(f, sender, &now)
 	d2.Wake()
 	d2.Wake()

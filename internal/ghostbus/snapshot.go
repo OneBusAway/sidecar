@@ -133,17 +133,5 @@ func (s *SnapshotScheduler) markUnavailable(ctx context.Context, rep Report, why
 	s.Logger.Info("ghostbus: snapshot unavailable", "region_id", rep.RegionID, "reason", why)
 }
 
-// RunLoop calls CheckAll every interval until ctx is done. Mirrors
-// alarms.Scheduler.RunLoop's ticker shape.
-func (s *SnapshotScheduler) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.CheckAll(ctx)
-		}
-	}
-}
+// The SnapshotInterval cadence is cmd/sidecar's, through a lease.Runner,
+// as for alarms.Scheduler.CheckAll.

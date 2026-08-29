@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -308,46 +306,6 @@ func TestSync_NeverRemovesRegions(t *testing.T) {
 
 	if _, err := repo.Get(ctx, 2); err != nil {
 		t.Fatalf("Get(region 2) after it vanished upstream: %v, want no error (Sync must never delete)", err)
-	}
-}
-
-// TestRunSyncLoop_NonPositiveIntervalDoesNotPanic reproduces the finding
-// that RunSyncLoop passed interval straight to time.NewTicker, which panics
-// on a duration <= 0. cmd/sidecar now rejects --refresh=0 before it ever
-// reaches here, but RunSyncLoop is exported and runs on a goroutine with no
-// recover, so a bad value from any other caller (a test, a future caller)
-// must not be able to take the whole process down. This asserts both halves:
-// no panic, and the initial synchronous Sync still ran before the (guarded)
-// ticker was set up.
-func TestRunSyncLoop_NonPositiveIntervalDoesNotPanic(t *testing.T) {
-	t.Parallel()
-
-	repo := newRegionStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	body := `{"version":3,"code":200,"text":"OK","data":{"list":[
-		{"id":1,"regionName":"Region 1","obaBaseUrl":"https://example.org/","active":true}
-	]}}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(body))
-	}))
-	defer srv.Close()
-
-	client := regions.NewClient(srv.URL, testOptions())
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for _, interval := range []time.Duration{0, -time.Hour} {
-			regions.RunSyncLoop(ctx, client, repo, interval, clockAt(base), logger)
-		}
-	}()
-	<-done
-
-	if _, err := repo.Get(context.Background(), 1); err != nil {
-		t.Fatalf("Get(1) after RunSyncLoop's initial run: %v, want no error", err)
 	}
 }
 

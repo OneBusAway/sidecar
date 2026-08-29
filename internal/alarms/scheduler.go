@@ -32,6 +32,12 @@ const checkConcurrency = 8
 // forever.
 const maxLookupFailures = 3
 
+// MinDeferral is the shortest time a Wait is allowed to push an alarm's
+// next check out by. Below it, deferring saves at most a lookup or two per
+// alarm while widening the window in which an early-running bus goes
+// unnoticed, so the alarm stays on the once-a-minute cadence instead.
+const MinDeferral = 2 * time.Minute
+
 // Scheduler runs the §5.3 firing loop: once per cycle it lists every pending
 // alarm, resolves each one's departure via OBA, and either waits, fires, or
 // expires it.
@@ -47,11 +53,12 @@ type Scheduler struct {
 	Logger *slog.Logger
 }
 
-// CheckAll runs one §5.3 cycle over every pending alarm. Exported so tests
-// (and the loop wiring) drive cycles without a ticker.
+// CheckAll runs one §5.3 cycle over every alarm that is due (a Wait can
+// defer an alarm's next check; see deferCheck). Exported so tests (and the
+// loop wiring) drive cycles without a ticker.
 func (s *Scheduler) CheckAll(ctx context.Context) {
 	started := s.Now()
-	pending, err := s.Repo.List(ctx)
+	pending, err := s.Repo.ListDue(ctx, started)
 	if err != nil {
 		s.Logger.Error("alarms: list pending", "err", err)
 		return
@@ -170,6 +177,7 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 
 	switch Decide(until, alarm.SecondsBefore) {
 	case Wait:
+		s.deferCheck(ctx, alarm, until-alarm.SecondsBefore)
 		return
 	case Expire:
 		// The bus already left; waking the rider is worse than silence.
@@ -206,6 +214,24 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 	}
 }
 
+// deferCheck hides a waiting alarm from the sweep until halfway through its
+// slack -- the seconds left before the fire window opens. Halving, rather
+// than sleeping until the window, keeps an early-running bus catchable:
+// each re-check halves the remaining slack again (3h out becomes 90m, 45m,
+// 22m, ...) until it drops under MinDeferral and the alarm is back to the
+// per-minute cadence of spec section 5.3. A deferred alarm costs no OBA
+// lookup in the meantime, which is the point (spec section 12 cost
+// control). A failed Defer just means one more minute-cadence check.
+func (s *Scheduler) deferCheck(ctx context.Context, alarm Alarm, slackSeconds int64) {
+	wait := time.Duration(slackSeconds/2) * time.Second
+	if wait < MinDeferral {
+		return
+	}
+	if err := s.Repo.Defer(ctx, alarm.ID, s.Now().Add(wait)); err != nil {
+		s.Logger.Warn("alarms: defer check", "region_id", alarm.RegionID, "err", err)
+	}
+}
+
 func (s *Scheduler) countFailure(ctx context.Context, alarm Alarm) {
 	streak, err := s.Repo.RecordFailure(ctx, alarm.ID)
 	if err != nil {
@@ -221,17 +247,6 @@ func (s *Scheduler) countFailure(ctx context.Context, alarm Alarm) {
 	}
 }
 
-// RunLoop calls CheckAll every interval until ctx is done (§5.3: once per
-// minute). Mirrors regions.RunSyncLoop's ticker shape.
-func (s *Scheduler) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.CheckAll(ctx)
-		}
-	}
-}
+// The once-a-minute cadence (§5.3) is cmd/sidecar's: it drives CheckAll
+// through a lease.Runner so that, with a shared database, one process at
+// a time runs the sweep.

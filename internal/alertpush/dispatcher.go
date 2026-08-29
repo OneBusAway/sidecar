@@ -56,21 +56,10 @@ func (d *Dispatcher) Wake() {
 	}
 }
 
-// RunLoop runs a cycle on every tick and on every Wake until ctx is done.
-func (d *Dispatcher) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	wake := d.wakeCh()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			d.RunOnce(ctx)
-		case <-wake:
-			d.RunOnce(ctx)
-		}
-	}
+// WakeC is the channel Wake signals on, for the lease.Runner that drives
+// RunOnce (cmd/sidecar hands it over as the loop's Wake).
+func (d *Dispatcher) WakeC() <-chan struct{} {
+	return d.wakeCh()
 }
 
 // RunOnce claims every push that is due and sends each in turn. Exported
@@ -82,8 +71,9 @@ func (d *Dispatcher) RunLoop(ctx context.Context, interval time.Duration) {
 // left its in-flight rows sending with a fresh updated_at, so waiting out
 // the stuck clock would stall the send for 15 minutes. Only a crash leaves a
 // stale updated_at, which the later cycles' now-StuckAfter window is for.
-// Adoption is safe because the sidecar is a single process: at boot no other
-// worker owns those rows.
+// Adoption is safe because the lease.Runner makes this process the only one
+// running the dispatcher: a first cycle that finds sending rows found the
+// previous holder's, not a live peer's.
 func (d *Dispatcher) RunOnce(ctx context.Context) {
 	now := d.Now()
 	stuckBefore := now.Add(-StuckAfter)

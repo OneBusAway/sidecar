@@ -15,6 +15,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/lease"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -390,6 +391,15 @@ func TestAlarmConformance(t *testing.T) {
 	storetest.RunAlarmRepository(t, func(t *testing.T) (alarms.Repository, regions.Repository) {
 		s := sqlitetest.Open(t)
 		return s.Alarms(), s.Regions()
+	})
+}
+
+// TestLeaseConformance runs the shared lease suite against the SQLite
+// adapter; a Postgres adapter runs it unchanged.
+func TestLeaseConformance(t *testing.T) {
+	t.Parallel()
+	storetest.RunLeaseRepository(t, func(t *testing.T) lease.Repository {
+		return sqlitetest.Open(t).Leases()
 	})
 }
 
