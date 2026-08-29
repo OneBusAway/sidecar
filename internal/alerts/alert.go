@@ -68,3 +68,19 @@ func SourceHash(s string) string {
 func NormalizeLanguage(tag string) string {
 	return strings.ToLower(strings.TrimSpace(tag))
 }
+
+// TranslationStale reports whether t no longer describes the English text
+// it was translated from: the feed withholds such a translation (see the
+// Translation doc comment), and the admin API surfaces the same judgement
+// as "stale" so a review UI can show what riders will not see (migration
+// design spec §2.4). A translation of an unknown field is never fresh.
+func (a Alert) TranslationStale(t Translation) bool {
+	switch t.Field {
+	case FieldHeader:
+		return t.SourceSHA256 != SourceHash(a.HeaderText)
+	case FieldDescription:
+		return t.SourceSHA256 != SourceHash(a.DescriptionText)
+	default:
+		return true
+	}
+}

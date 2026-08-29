@@ -342,7 +342,7 @@ var (
 		"cause", "effect", "severity", "start_time", "end_time",
 		"published", "is_test", "created_at", "updated_at", "translations",
 	}
-	translationJSONFields = []string{"language", "header", "description"}
+	translationJSONFields = []string{"language", "header", "description", "stale"}
 )
 
 // translationsOf returns the translations array of a decoded alert.
@@ -1428,6 +1428,45 @@ func TestAdminAlerts_Translations(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestAdminAlerts_TranslationStaleFlag follows one translation through the
+// edit cycle the Rails review UI cares about: fresh after PUT, stale after
+// the English it came from changes, fresh again after retranslation. A
+// language with two fields is stale when either field is.
+func TestAdminAlerts_TranslationStaleFlag(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.createAlertIn(t, regionPuget, `{"header":"English header","description":"English description","start_time":"2026-08-15T14:00:00-07:00"}`)
+
+	staleOf := func(t *testing.T, lang string) bool {
+		t.Helper()
+		for _, tr := range translationsOf(t, object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK)) {
+			if str(t, tr, "language") == lang {
+				return boolean(t, tr, "stale")
+			}
+		}
+		t.Fatalf("no %s translation", lang)
+		return false
+	}
+
+	f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado","description":"Detalle"}`)
+	if staleOf(t, "es") {
+		t.Error("fresh translation reported stale")
+	}
+
+	// Only the description changes; the header translation is still fresh,
+	// but the language as a whole is not.
+	f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"description":"Edited description"}`)
+	if !staleOf(t, "es") {
+		t.Error("translation of an edited field reported fresh")
+	}
+
+	f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado","description":"Detalle editado"}`)
+	if staleOf(t, "es") {
+		t.Error("retranslated language reported stale")
+	}
 }
 
 // TestFormatInstant pins the global rule that response timestamps are RFC 3339
