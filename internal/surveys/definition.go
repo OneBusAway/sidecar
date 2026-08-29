@@ -88,12 +88,29 @@ func ContentEqual(a, b Content) bool {
 
 // QuestionsEqual reports whether a document's questions are, in order,
 // identical to the stored set -- the test for whether an edit touches a
-// frozen survey's questions (design spec §2.13).
+// frozen survey's questions (design spec §2.13). A document entry that
+// names an id must name the stored question at that position; an entry
+// without an id matches on content alone, which is how a document written
+// before ids existed still reads as "unchanged".
 func QuestionsEqual(stored []Question, want []QuestionDefinition) bool {
 	if len(stored) != len(want) {
 		return false
 	}
+	// The rule: a document that names NO ids matches on content alone; a
+	// document that names ANY id must name every stored question's id at
+	// its position (a mixed document is a change -- the id-less entry is a
+	// new question).
+	anyID := false
+	for _, q := range want {
+		if q.ID != nil {
+			anyID = true
+			break
+		}
+	}
 	for i := range stored {
+		if anyID && (want[i].ID == nil || *want[i].ID != stored[i].ID) {
+			return false
+		}
 		if stored[i].Required != want[i].Required || !ContentEqual(stored[i].Content, want[i].Content) {
 			return false
 		}

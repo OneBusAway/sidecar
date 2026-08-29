@@ -390,11 +390,11 @@ func (h *adminSurveysHandler) deleteSurvey(w http.ResponseWriter, r *http.Reques
 // rather than the ordinary tenancy 404 those loaders already answer with a
 // noun-specific body ("study not found" / "survey not found").
 //
-// ErrQuestionsFrozen and ErrHasResponses are reported with the sentinel's
-// own .Error() text, never err.Error(): the repository wraps both in the
-// failing SQL statement ("sqlite: update survey 5 with 3 responses: ..."),
-// which is exactly the internal detail design spec section 5 says a 4xx
-// body must not carry.
+// ErrQuestionsFrozen, ErrHasResponses and ErrUnknownQuestion are reported
+// with the sentinel's own .Error() text, never err.Error(): the repository
+// wraps each in the failing SQL statement ("sqlite: update survey 5 with 3
+// responses: ..."), which is exactly the internal detail design spec
+// section 5 says a 4xx body must not carry.
 func writeSurveyStoreError(w http.ResponseWriter, logger *slog.Logger, op string, err error) {
 	switch {
 	case errors.Is(err, surveys.ErrNotFound):
@@ -403,6 +403,11 @@ func writeSurveyStoreError(w http.ResponseWriter, logger *slog.Logger, op string
 		writeJSONError(w, logger, http.StatusConflict, surveys.ErrQuestionsFrozen.Error())
 	case errors.Is(err, surveys.ErrHasResponses):
 		writeJSONError(w, logger, http.StatusConflict, surveys.ErrHasResponses.Error())
+	case errors.Is(err, surveys.ErrUnknownQuestion):
+		// The document named an id that is not this survey's: a body
+		// fault, reported with the sentinel's own text (design spec
+		// section 5).
+		writeJSONError(w, logger, http.StatusUnprocessableEntity, surveys.ErrUnknownQuestion.Error())
 	default:
 		serverErrorJSON(w, logger, op, err)
 	}

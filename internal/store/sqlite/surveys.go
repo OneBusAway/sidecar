@@ -155,19 +155,64 @@ func paramsFromDefinition(def surveys.Definition) (surveyParams, error) {
 	}, nil
 }
 
-// insertQuestions writes def.Questions in document order; position is the
-// 1-based index (design spec 2.13).
+// insertQuestions writes defs in document order; position is the 1-based
+// index (design spec 2.13). An entry carrying an id is re-inserted under
+// that id -- the caller has already proven it belongs to this survey
+// (checkQuestionIDs) and deleted the old rows -- so a kept question keeps
+// the id apps have persisted; an entry without one gets a fresh
+// AUTOINCREMENT id.
 func insertQuestions(ctx context.Context, q *gen.Queries, surveyID int64, defs []surveys.QuestionDefinition, now int64) error {
 	for i, qd := range defs {
 		content, err := json.Marshal(qd.Content)
 		if err != nil {
 			return fmt.Errorf("question %d: %w", i+1, err)
 		}
-		if _, err := q.InsertQuestion(ctx, gen.InsertQuestionParams{
-			SurveyID: surveyID, Position: int64(i + 1), Required: qd.Required,
-			QuestionType: qd.Content.Type, Content: string(content), Now: now,
-		}); err != nil {
+		if qd.ID != nil {
+			_, err = q.InsertQuestionWithID(ctx, gen.InsertQuestionWithIDParams{
+				ID: *qd.ID, SurveyID: surveyID, Position: int64(i + 1), Required: qd.Required,
+				QuestionType: qd.Content.Type, Content: string(content), Now: now,
+			})
+		} else {
+			_, err = q.InsertQuestion(ctx, gen.InsertQuestionParams{
+				SurveyID: surveyID, Position: int64(i + 1), Required: qd.Required,
+				QuestionType: qd.Content.Type, Content: string(content), Now: now,
+			})
+		}
+		if err != nil {
 			return fmt.Errorf("question %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// checkQuestionIDs proves every id a document names is one of stored's and
+// is named once. Anything else is surveys.ErrUnknownQuestion, decided
+// before a single row is touched.
+func checkQuestionIDs(stored []surveys.Question, defs []surveys.QuestionDefinition) error {
+	own := make(map[int64]bool, len(stored))
+	for _, q := range stored {
+		own[q.ID] = true
+	}
+	seen := make(map[int64]bool, len(defs))
+	for i, qd := range defs {
+		if qd.ID == nil {
+			continue
+		}
+		if !own[*qd.ID] || seen[*qd.ID] {
+			return fmt.Errorf("question %d (id %d): %w", i+1, *qd.ID, surveys.ErrUnknownQuestion)
+		}
+		seen[*qd.ID] = true
+	}
+	return nil
+}
+
+// rejectQuestionIDsOnCreate refuses a create whose document names ids:
+// there is nothing to keep yet, and honouring one would collide with, or
+// steal, another survey's row.
+func rejectQuestionIDsOnCreate(defs []surveys.QuestionDefinition) error {
+	for i, qd := range defs {
+		if qd.ID != nil {
+			return fmt.Errorf("question %d (id %d): %w", i+1, *qd.ID, surveys.ErrUnknownQuestion)
 		}
 	}
 	return nil
@@ -264,6 +309,9 @@ func createSurveyTx(ctx context.Context, q *gen.Queries, studyID int64, def surv
 }
 
 func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
+	if err := rejectQuestionIDsOnCreate(def.Questions); err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: %w", err)
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: begin tx: %w", err)
@@ -295,6 +343,9 @@ func (r *surveyRepo) CreateSurvey(ctx context.Context, studyID int64, def survey
 // spec section 3.2). It shares createSurveyTx with CreateSurvey so the two
 // entry points cannot drift on question insertion or Study population.
 func (r *surveyRepo) CreateSurveyInRegion(ctx context.Context, regionID, studyID int64, def surveys.Definition, now time.Time) (surveys.Survey, error) {
+	if err := rejectQuestionIDsOnCreate(def.Questions); err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: create survey: %w", err)
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: create survey in region %d: begin tx: %w", regionID, err)
@@ -417,16 +468,20 @@ func (r *surveyRepo) UpdateSurvey(ctx context.Context, id int64, def surveys.Def
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d: count responses: %w", id, err)
 	}
-	// The question set is replaced (delete all, insert in document order)
-	// only when the document's questions differ from the stored set --
-	// never when they are identical, so a scalar-only edit (or a document
-	// that happens to reproduce the same questions) never renumbers ids.
-	// When they do differ and the survey has responses, the edit is
-	// refused: those ids are what stored answers reference and what iOS
-	// uses to dedupe locally (design spec §2.13).
+	// The question set is replaced (delete all, insert in document order --
+	// a kept question is re-inserted under the id the document names,
+	// migration design spec §2.7) only when the document's questions differ
+	// from the stored set -- never when they are identical, so a
+	// scalar-only edit (or a document that happens to reproduce the same
+	// questions) never renumbers ids. When they do differ and the survey
+	// has responses, the edit is refused: those ids are what stored answers
+	// reference and what iOS uses to dedupe locally (design spec §2.13).
 	stored, err := loadSurvey(ctx, q, current, newStudyLoader(q))
 	if err != nil {
 		return surveys.Survey{}, fmt.Errorf("sqlite: update survey: %w", err)
+	}
+	if err = checkQuestionIDs(stored.Questions, def.Questions); err != nil {
+		return surveys.Survey{}, fmt.Errorf("sqlite: update survey %d: %w", id, err)
 	}
 	replaceQuestions := false
 	if !surveys.QuestionsEqual(stored.Questions, def.Questions) {

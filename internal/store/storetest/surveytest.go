@@ -34,6 +34,9 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("EndTimeBeyond32Bit", func(t *testing.T) { testSurveyEndTimeBeyond32Bit(t, newStore) })
 	t.Run("UpdateReplacesQuestionsWhenNoResponses", func(t *testing.T) { testUpdateReplacesQuestions(t, newStore) })
 	t.Run("UpdateKeepsQuestionIDsWhenUnchanged", func(t *testing.T) { testUpdateKeepsQuestionIDsWhenUnchanged(t, newStore) })
+	t.Run("UpdatePreservesNamedQuestionIDs", func(t *testing.T) { testUpdatePreservesNamedQuestionIDs(t, newStore) })
+	t.Run("UpdateRefusesForeignQuestionID", func(t *testing.T) { testUpdateRefusesForeignQuestionID(t, newStore) })
+	t.Run("CreateRefusesQuestionIDs", func(t *testing.T) { testCreateRefusesQuestionIDs(t, newStore) })
 	t.Run("UpdateFreezesQuestionsOnceAnswered", func(t *testing.T) { testUpdateFreezesQuestions(t, newStore) })
 	t.Run("UpdateScalarsOnFrozenSurvey", func(t *testing.T) { testUpdateScalarsOnFrozen(t, newStore) })
 	t.Run("DeleteRefusesWithResponses", func(t *testing.T) { testDeleteRefusesWithResponses(t, newStore) })
@@ -389,6 +392,119 @@ func testUpdateKeepsQuestionIDsWhenUnchanged(t *testing.T, newStore newSurveySto
 		if q.ID != s.Questions[i].ID {
 			t.Errorf("question %d id = %d, want unchanged id %d", i, q.ID, s.Questions[i].ID)
 		}
+	}
+}
+
+// testUpdatePreservesNamedQuestionIDs is migration design spec section
+// 2.7: an edit that changes one question, adds another, drops a third, and
+// names the kept ids keeps them; the new question gets a fresh id; order
+// follows the document.
+func testUpdatePreservesNamedQuestionIDs(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("v1")) // two questions
+	keep, drop := s.Questions[0].ID, s.Questions[1].ID
+
+	def := surveyDef("v2")
+	edited := def.Questions[0]
+	edited.ID = &keep
+	edited.Content.Options = []string{"Good", "Bad", "Ugly"}
+	added := surveys.QuestionDefinition{Content: surveys.Content{Type: surveys.TypeText, LabelText: "Anything else?"}}
+	def.Questions = []surveys.QuestionDefinition{added, edited}
+	if err := def.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.UpdateSurvey(context.Background(), s.ID, def, base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("UpdateSurvey: %v", err)
+	}
+	if len(got.Questions) != 2 {
+		t.Fatalf("Questions = %+v, want 2", got.Questions)
+	}
+	if got.Questions[0].ID == keep || got.Questions[0].ID == drop || got.Questions[0].Position != 1 {
+		t.Errorf("new question = %+v, want a fresh id at position 1", got.Questions[0])
+	}
+	if got.Questions[1].ID != keep || got.Questions[1].Position != 2 ||
+		!reflect.DeepEqual(got.Questions[1].Content.Options, []string{"Good", "Bad", "Ugly"}) {
+		t.Errorf("kept question = %+v, want id %d at position 2 with the edited options", got.Questions[1], keep)
+	}
+	reread, err := repo.GetSurvey(context.Background(), s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reread.Questions, got.Questions) {
+		t.Errorf("GetSurvey questions = %+v, want %+v", reread.Questions, got.Questions)
+	}
+}
+
+// testUpdateRefusesForeignQuestionID pins the guard: an id that is not this
+// survey's -- another survey's, one that does not exist, or this survey's
+// own named twice -- is surveys.ErrUnknownQuestion, and nothing is written.
+func testUpdateRefusesForeignQuestionID(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	a := mustCreateSurvey(t, repo, st.ID, surveyDef("a"))
+	b := mustCreateSurvey(t, repo, st.ID, surveyDef("b"))
+
+	for _, tc := range []struct {
+		name string
+		id   int64
+	}{
+		{"another survey's question", b.Questions[0].ID},
+		{"no such question", 999999},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := surveyDef("a")
+			def.Questions[0].ID = &tc.id
+			if err := def.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			_, err := repo.UpdateSurvey(context.Background(), a.ID, def, base.Add(time.Hour))
+			if !errors.Is(err, surveys.ErrUnknownQuestion) {
+				t.Fatalf("err = %v, want ErrUnknownQuestion", err)
+			}
+		})
+	}
+	t.Run("duplicate id", func(t *testing.T) {
+		def := surveyDef("a")
+		id := a.Questions[0].ID
+		def.Questions[0].ID, def.Questions[1].ID = &id, &id
+		if err := def.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.UpdateSurvey(context.Background(), a.ID, def, base.Add(time.Hour)); !errors.Is(err, surveys.ErrUnknownQuestion) {
+			t.Fatalf("err = %v, want ErrUnknownQuestion", err)
+		}
+	})
+	got, err := repo.GetSurvey(context.Background(), a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Questions, a.Questions) {
+		t.Errorf("a refused edit changed the questions: %+v", got.Questions)
+	}
+}
+
+// testCreateRefusesQuestionIDs pins the other half: ids are server-owned,
+// so a create that names one is refused by both create entry points rather
+// than colliding with, or stealing, an existing row.
+func testCreateRefusesQuestionIDs(t *testing.T, newStore newSurveyStoreFunc) {
+	t.Parallel()
+	repo, regs := newStore(t)
+	st := seedStudy(t, repo, regs, 1)
+	def := surveyDef("c")
+	id := int64(5)
+	def.Questions[0].ID = &id
+	if err := def.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateSurvey(context.Background(), st.ID, def, base); !errors.Is(err, surveys.ErrUnknownQuestion) {
+		t.Errorf("CreateSurvey err = %v, want ErrUnknownQuestion", err)
+	}
+	if _, err := repo.CreateSurveyInRegion(context.Background(), 1, st.ID, def, base); !errors.Is(err, surveys.ErrUnknownQuestion) {
+		t.Errorf("CreateSurveyInRegion err = %v, want ErrUnknownQuestion", err)
 	}
 }
 
