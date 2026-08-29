@@ -415,3 +415,32 @@ func containsString(ss []string, s string) bool {
 func itoa(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
+
+// TestFeed_CacheControl pins the CDN contract on both feed renderings: a
+// successful feed is cacheable for a minute and servable stale through a
+// deploy restart, while a 404 is no-store so a region that appears later is
+// not shadowed by a cached miss, even behind a CDN with a default TTL.
+func TestFeed_CacheControl(t *testing.T) {
+	t.Parallel()
+	h, alertRepo, regionRepo := newTestServer(t)
+	putRegion(t, regionRepo, 1)
+	publishAlert(t, alertRepo, 1, "Route 44 detoured", false)
+
+	const want = "public, max-age=60, stale-if-error=600"
+	for _, path := range []string{"/api/v1/regions/1/alerts", "/api/v1/regions/1/alerts.pbtext"} {
+		rec := doGet(t, h, path)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("%s: Cache-Control = %q, want %q", path, got, want)
+		}
+	}
+	rec := doGet(t, h, "/api/v1/regions/999/alerts")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown region: status %d", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("404 Cache-Control = %q, want no-store; a CDN default TTL would shadow a region added later", got)
+	}
+}

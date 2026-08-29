@@ -21,6 +21,15 @@ type alertsHandler struct {
 	deps Deps
 }
 
+// feedCacheControl lets a CDN or the app's URL cache hold a successful feed
+// for a minute and keep serving it for ten more if the origin is down --
+// which it is for ~30 s on every deploy, since the SQLite disk pins the
+// service to one restarting instance (README, Deployment). Sixty seconds is
+// well inside how quickly riders expect a newly published alert to appear,
+// and the feed is the most-requested route by a wide margin. Error responses
+// are marked no-store so a CDN cannot hold a miss.
+const feedCacheControl = "public, max-age=60, stale-if-error=600"
+
 // feedBinary serves GET /api/v1/regions/{regionId}/alerts: the feed as a
 // binary protobuf.
 func (h *alertsHandler) feedBinary(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +44,7 @@ func (h *alertsHandler) feedBinary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", feedCacheControl)
 	w.WriteHeader(http.StatusOK)
 	h.writeBody(w, id, body)
 }
@@ -53,6 +63,7 @@ func (h *alertsHandler) feedText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Cache-Control", feedCacheControl)
 	w.WriteHeader(http.StatusOK)
 	h.writeBody(w, id, body)
 }
@@ -61,6 +72,11 @@ func (h *alertsHandler) feedText(w http.ResponseWriter, r *http.Request) {
 // feed rows, and renders them. It writes the response itself on failure (404
 // or 500) and returns ok=false, so callers only need to marshal on success.
 func (h *alertsHandler) buildFeed(w http.ResponseWriter, r *http.Request) (msg *gtfs.FeedMessage, regionID int64, ok bool) {
+	// A CDN with a cache rule for this path applies its own default TTL to
+	// responses that carry no directive (Cloudflare holds a 404 for minutes),
+	// which would shadow a region that appears later; say no-store up front
+	// and let the success paths overwrite it.
+	w.Header().Set("Cache-Control", "no-store")
 	region, ok := resolveRegion(w, r, h.deps)
 	if !ok {
 		return nil, 0, false

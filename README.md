@@ -543,6 +543,29 @@ Weather needs no separate coordinate configuration -- a region's centroid arrive
 automatically as part of `region sync`, computed from the regions directory's
 `bounds` rectangles for that region.
 
+## Donations
+
+`POST /api/v1/payment_intents` (spec section 11) powers the apps' in-app
+donations through Stripe's PaymentSheet. The route exists only when
+`SIDECAR_STRIPE_SECRET_KEY` is set; without it the apps get a 404 and hide
+the donations UI (note that the iOS app decides whether to *offer*
+donations per app bundle, not per region, so a deployment serving the
+OneBusAway app should set this up before taking over a region). The body
+is raw JSON -- the one endpoint that does not also accept form encoding --
+and the app's `test_mode: "1"` routes the request to
+`SIDECAR_STRIPE_TEST_SECRET_KEY`, so TestFlight builds exercise the flow
+against production. Recurring donations create a monthly price under
+`SIDECAR_STRIPE_RECURRING_PRODUCT_ID` (and the test-mode
+`SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID`; each is required with its key,
+checked at boot); the OBACloud deployment used
+`prod_OqlLl6mR66dLVQ` and `prod_P1xUtsgjEfkGgu` respectively. A new Stripe
+customer is created per donation -- deliberately not matched by email,
+since the route is unauthenticated and a recurring response hands the
+caller that customer's id and an ephemeral key to its saved payment
+methods. A Stripe failure is a `500` with an empty
+body, which is what the shipped apps expect; a malformed request is a
+`400`. The endpoint is throttled at 10/minute per client address.
+
 ## Admin UI
 
 The sidecar server also serves a small admin single-page app at `/admin` for
@@ -734,15 +757,32 @@ in front of sidecar must:
   turns ordinary log retention into credential retention -- anyone who can
   read the logs can read every live key that ever made a request.
 
-The push registration throttle (spec §2.6, 30/minute) keys on the TCP peer
-address of the request -- it does not read `X-Forwarded-For` or similar
+Every per-IP throttle (push registrations, Live Activities, surveys, ghost
+bus reports, failed bearer attempts) keys on the TCP peer address of the
+request by default -- it does not read `X-Forwarded-For` or similar
 headers, since those are trivially spoofable by the client they're meant to
-throttle. A reverse proxy in front of sidecar must be deployed in a mode
-that preserves the real client address as the TCP peer (for example, PROXY
-protocol, or a transparent/passthrough L4 proxy); terminating and
-re-originating the TCP connection instead means every request throttles
-against the proxy's own address, either merging every client into one
-shared bucket or (worse) rate-limiting all of them together.
+throttle. A reverse proxy in front of sidecar must either preserve the real
+client address as the TCP peer (PROXY protocol, or a transparent/passthrough
+L4 proxy), or be one that *overwrites* a client-address header of its own on
+every request, in which case set `SIDECAR_TRUSTED_PROXY` (`--trusted-proxy`)
+to name it: `cloudflare` reads `CF-Connecting-IP`, `render` reads
+`True-Client-IP`, and `header:<Name>` covers any other proxy with the same
+guarantee. The header is honoured only on requests proven to have come
+through that proxy: either the peer address is inside
+`SIDECAR_TRUSTED_PROXY_CIDRS` (`render` defaults to the private ranges,
+which is all that reaches a Render service), or the request carries
+`X-Sidecar-Proxy-Secret` equal to `SIDECAR_TRUSTED_PROXY_SECRET` -- for
+Cloudflare, add a Transform Rule (Modify Request Header) on the proxied
+hostname that sets it. Every other request -- including one that reaches
+Render's `*.onrender.com` hostname directly, where anyone could set
+`CF-Connecting-IP` to a fresh value per request and mint unlimited
+buckets -- keys on the peer, as with the setting off. Requests with the
+proof but no header, or a value that is not an IP address, also fall back
+to the peer. There is deliberately no `X-Forwarded-For` mode: its first
+entry is whatever the client sent. Leaving the setting off
+behind a proxy that terminates and re-originates TCP means every request
+throttles against the proxy's own address -- one shared bucket for all
+clients, which at any real traffic level is a 429 for nearly everyone.
 
 gorush's feedback webhook (spec §6.5, terminal APNs failures) should be
 pointed at `POST /webhooks/gorush` on this server. That endpoint deletes a
@@ -769,11 +809,117 @@ to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
 
+#### Staging
+
+`render.staging.yaml` is the production Blueprint with every service and
+disk renamed (`sidecar-staging`, `gorush-staging`), gorush pointed at the
+APNs sandbox, Sentry tagged `staging`, the Litestream replica under its
+own key prefix, and `SIDECAR_REGIONS_URL` left for you to set. Point it at
+a hand-maintained directory file whose regions all carry the staging host
+as `sidecarBaseUrl` -- `deploy/regions-staging.example.json` is a starting
+point (Davis plus a synthetic region) to upload to the regions bucket --
+so TestFlight and debug builds that set the app's custom regions URL land
+on staging and production devices never do. Proxy the staging custom
+domain through Cloudflare like production's so the trusted-proxy path and
+the feed cache rule are exercised there too. Rehearse the export/import
+and a Litestream restore against staging before the first region flips.
+
+#### Migrating a region from OBACloud
+
+`sidecar-admin import --file <export.json>` loads one region's content and
+rider state from an export document (`internal/export`, format
+`sidecar-export/1`): alerts with their translations, studies, surveys and
+questions, survey responses, push registrations, and ghost bus reports
+with their enrichment snapshots. OBACloud produces the document with
+`bin/rails "sidecar:export[<region id>,<path>]"`. Ids are preserved -- the
+feed's `Alert_<id>` entity ids and the survey and question ids the apps
+persist locally must not change under riders -- and every row is checked
+with the domain packages' own rules (enum names, question content, answer
+shape, time windows; not the HTTP layer's length caps) before anything is
+written, so a bad row rejects the whole document. Rows that already exist
+under this region (same id, public id, or region+token) are skipped and
+counted, which makes the migration two runs of the same command: a bulk
+import the day before the region's `sidecar_base_url` flips, and a delta
+from a fresh export right after -- translations added to an already
+migrated alert land on the delta run. An id that already belongs to
+another region's content (alerts, studies, surveys, and questions share
+one id sequence) is an error naming the row, never a silent skip.
+`--dry-run` runs the same checks, including that the region exists,
+without writing. The region
+itself must already be present (`sidecar-admin region sync`); alarms and
+Live Activities are deliberately not part of the document -- OBACloud
+keeps firing the ones it owns until they expire.
+
+#### Backups
+
+The image ships [Litestream](https://litestream.io). Set
+`SIDECAR_BACKUP_BUCKET` and the container entrypoint (`deploy/entrypoint.sh`)
+streams every committed SQLite transaction to that S3-compatible bucket
+for as long as the server runs, and -- when the local database file is
+missing, as on a fresh or replaced disk -- restores the latest replica
+before starting. Leave the variable empty and the entrypoint execs the
+server directly, as before. The other settings: `SIDECAR_BACKUP_ENDPOINT`
+(required for anything but AWS; for Cloudflare R2,
+`https://<account id>.r2.cloudflarestorage.com`; must be `https://` unless
+`SIDECAR_BACKUP_ALLOW_INSECURE=1` says a local test store is in use),
+`SIDECAR_BACKUP_REGION`
+(default `auto`, which R2 wants), `SIDECAR_BACKUP_ACCESS_KEY_ID` /
+`SIDECAR_BACKUP_SECRET_ACCESS_KEY`, `SIDECAR_BACKUP_PATH` (key prefix,
+default `sidecar`; give staging and production different prefixes or
+buckets), and `SIDECAR_BACKUP_RETENTION` (how far back a point-in-time
+restore can reach, default `168h`). The config is `deploy/litestream.yml`.
+
+To restore by hand -- to inspect a backup, or to move to a new host --
+run, with the same environment:
+
+```sh
+litestream restore -config /etc/litestream.yml -o /tmp/restored.db /data/sidecar.db
+litestream restore -config /etc/litestream.yml -timestamp 2026-08-28T12:00:00Z -o /tmp/before.db /data/sidecar.db
+```
+
+The entrypoint fills in `SIDECAR_BACKUP_PATH=sidecar`,
+`SIDECAR_BACKUP_REGION=auto`, and `SIDECAR_BACKUP_RETENTION=168h` when
+unset; export the same three before running `litestream restore` from a
+shell, since `deploy/litestream.yml` expands them.
+
+Rehearse this on staging before relying on it. Render's own daily disk
+snapshots are a second, coarser line of defence; Litestream is the one
+that loses seconds rather than a day. Known gap: once replication is
+running, a revoked key or a changed bucket policy makes every upload fail
+while `/healthz` stays green and nothing is reported -- Litestream logs it
+and carries on. Until replica lag is surfaced, check the bucket's newest
+object age from outside (a cron against the bucket, or a periodic
+`litestream restore -o` rehearsal on staging).
+
+#### Feed caching
+
+Both renderings of the alerts feed answer with
+`Cache-Control: public, max-age=60, stale-if-error=600`. A CDN in front of
+the host (Cloudflare, when the custom domain is proxied) can therefore
+serve the feed for a minute per region and keep serving the last good
+copy for ten minutes when the origin is down -- which covers the restart
+every deploy costs a single-instance service. Cloudflare honours
+`Cache-Control` for cacheable responses only when a cache rule marks the
+path eligible; add one for `/api/v1/regions/*/alerts*`. Error responses
+are `no-store`, so a cached miss cannot shadow a region added later even
+under the CDN's default TTL for 404s.
+
 #### Render
 
 `render.yaml` declares the same two services as `compose.yaml`: `sidecar` as
 a web service with a persistent disk at `/data` for SQLite, and `gorush` as
-a private service. First deploy:
+a private service. Both run prebuilt images: gorush's from Docker Hub and the
+sidecar's from GHCR, where `.github/workflows/image.yml` publishes
+`ghcr.io/onebusaway/sidecar` on every push to `main` (tags `main` and an
+immutable `sha-<short>`) and on every `vX.Y.Z` tag (`X.Y.Z`, `X.Y`,
+`latest`). The Blueprint pulls `:main`. Render re-pulls only when told to:
+set the repository secret `RENDER_DEPLOY_HOOK_URL` (Dashboard -> sidecar ->
+Settings -> Deploy Hook) and each `main` build deploys itself; leave it
+unset and deploy by hand. To roll back, set the service's image URL to the
+previous build's `sha-<short>` tag and deploy; set it back to `:main` when
+the fix lands. The package must be public (Packages -> sidecar -> Package
+settings -> Change visibility) or the service needs a registry credential.
+First deploy:
 
 1. New → Blueprint, pick this repo. Render creates both services and the
    `sidecar-shared` env group, which holds `SIDECAR_GORUSH_WEBHOOK_SECRET`.
@@ -818,15 +964,36 @@ a private service. First deploy:
    Render preserves `Host` and sets `X-Forwarded-Proto`, which its docs do
    not state explicitly.
 
+**Logs and error reporting.** The server writes one line per request to
+stderr (method, matched route pattern with its `{placeholders}`, status,
+bytes, client address, duration -- never the concrete path, the query
+string, or any header, since alarm and Live Activity tokens travel in the
+path and rider identifiers and bearer keys in the others), one summary
+line per background cycle (`alarms: cycle`, `liveactivities: cycle`, with
+row counts and elapsed time), and a `httpapi: panic` line with a stack
+when a handler panics (the client gets a 500 if nothing had been written
+yet; otherwise the connection is closed so a truncated body is not
+mistaken for a complete one). Set `SIDECAR_LOG_FORMAT=json` for log
+aggregators. Set `SIDECAR_SENTRY_DSN` to have every error-level line --
+panics, failed pushes, loop failures, the store and upstream errors
+handlers log before answering 5xx, and a failed boot -- reported to Sentry
+as well, tagged with `SIDECAR_SENTRY_ENVIRONMENT` and, for the published
+image, the git sha it was built from; Sentry's own delivery failures are
+logged as `errreport: sentry` warnings. Leave the DSN unset and nothing
+leaves the box. `/healthz` is logged at debug level only.
+
 `SIDECAR_GORUSH_URL` on the sidecar service is populated from `gorush`'s
 `hostport`, which Render supplies with no scheme; the server assumes
 `http://` for a scheme-less value, which is correct here since Render's
 private network is plain HTTP.
 
 Because the disk pins the service to one instance, deploys restart rather
-than roll. Render's proxy re-originates TCP, so every per-IP throttle in
-this server shares one bucket there; that is a known limitation, not fixed
-here.
+than roll. Render's proxy re-originates TCP, so set
+`SIDECAR_TRUSTED_PROXY=render` on the service (or `cloudflare` plus
+`SIDECAR_TRUSTED_PROXY_SECRET` and the matching Cloudflare Transform Rule
+when the custom domain is proxied through Cloudflare, which is then the
+hop that sets the header); without it every per-IP throttle shares one
+bucket.
 
 ### Development
 

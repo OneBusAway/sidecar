@@ -1,0 +1,22 @@
+# Litestream replication for the sidecar's SQLite file. Used by
+# deploy/entrypoint.sh only when SIDECAR_BACKUP_BUCKET is set; every value
+# comes from the environment (Litestream expands ${VAR} before parsing).
+#
+# Any S3-compatible store works. For Cloudflare R2 the endpoint is
+# https://<account id>.r2.cloudflarestorage.com and the region is "auto".
+dbs:
+  - path: ${SIDECAR_DB}
+    replica:
+      type: s3
+      bucket: ${SIDECAR_BACKUP_BUCKET}
+      path: ${SIDECAR_BACKUP_PATH}
+      endpoint: ${SIDECAR_BACKUP_ENDPOINT}
+      region: ${SIDECAR_BACKUP_REGION}
+      access-key-id: ${SIDECAR_BACKUP_ACCESS_KEY_ID}
+      secret-access-key: ${SIDECAR_BACKUP_SECRET_ACCESS_KEY}
+
+# How long a point-in-time restore can reach back. In Litestream 0.5 this
+# lives under `snapshot`, not on the replica (an unknown replica key is
+# silently ignored, which is how a misplaced setting would fail).
+snapshot:
+  retention: ${SIDECAR_BACKUP_RETENTION}

@@ -56,7 +56,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing command; expected region, alert, study, survey, ghostbus, migrate, user, key, or principal")
+		return errors.New("missing command; expected region, alert, study, survey, ghostbus, import, migrate, user, key, or principal")
 	}
 
 	store, err := sqlite.Open(*dbPath)
@@ -97,6 +97,8 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 		return runSurvey(ctx, stdin, stdout, store, now, cmdArgs)
 	case "ghostbus":
 		return ghostBusCmd(ctx, stdout, store, cmdArgs)
+	case "import":
+		return runImport(ctx, stdout, store, now, cmdArgs)
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
 	case "user":
@@ -106,7 +108,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	case "principal":
 		return runPrincipal(ctx, stdout, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown command %q; expected region, alert, study, survey, ghostbus, migrate, user, key, or principal", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, study, survey, ghostbus, import, migrate, user, key, or principal", cmd)
 	}
 }
 

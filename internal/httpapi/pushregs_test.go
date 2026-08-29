@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
@@ -522,5 +523,56 @@ func TestRegister_InvalidRequestCostsNoStoreRead(t *testing.T) {
 	}
 	if counting.gets != 1 {
 		t.Errorf("store Get called %d times for a valid request; want 1", counting.gets)
+	}
+}
+
+// TestThrottle_TrustedProxyHeader pins that Deps.ClientIP, not RemoteAddr, is
+// the bucket key: two clients arriving through one proxy address (with the
+// proxy's secret) are throttled separately, and a request without the
+// proof falls back to the peer.
+func TestThrottle_TrustedProxyHeader(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	deps := httpapi.Deps{
+		PushRegs:    store.PushRegs(),
+		PushLimiter: ratelimit.New(1, time.Minute),
+		Regions:     store.Regions(),
+		Now:         func() time.Time { return base },
+		Logger:      slog.New(slog.DiscardHandler),
+		ClientIP:    clientip.Header("CF-Connecting-IP", clientip.Options{Secret: "proxy-secret"}),
+	}
+	h := httpapi.NewRouter(deps)
+	putRegion(t, store.Regions(), 1)
+
+	post := func(token, clientHeader string) int {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+			"/api/v2/regions/1/push_registrations", strings.NewReader("token="+token+"&operating_system=ios"))
+		req.Header.Set("Content-Type", formCT)
+		req.RemoteAddr = "10.0.0.1:443" // the proxy, same for everyone
+		if clientHeader != "" {
+			req.Header.Set("CF-Connecting-IP", clientHeader)
+			req.Header.Set(clientip.SecretHeader, "proxy-secret")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := post("a", "203.0.113.1"); got != http.StatusNoContent {
+		t.Fatalf("first client: %d", got)
+	}
+	if got := post("b", "203.0.113.2"); got != http.StatusNoContent {
+		t.Fatalf("second client behind the same proxy must have its own bucket: %d", got)
+	}
+	if got := post("c", "203.0.113.1"); got != http.StatusTooManyRequests {
+		t.Fatalf("first client's second request: %d, want 429", got)
+	}
+	// No header: keyed on the peer alone, which is the proxy -- shared by
+	// every headerless request, but not by the header-bearing ones above.
+	if got := post("d", ""); got != http.StatusNoContent {
+		t.Fatalf("headerless request: %d", got)
+	}
+	if got := post("e", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("second headerless request: %d, want 429", got)
 	}
 }

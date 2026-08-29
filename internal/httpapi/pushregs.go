@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 
@@ -167,23 +166,11 @@ func (h *pushRegsHandler) unregister(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// clientIP is the throttle key: the connection's remote host. Behind a
-// reverse proxy every request shares the proxy's address, so deployments
-// must preserve client addresses at the proxy layer (see README); trusting
-// X-Forwarded-For here would let any client spoof its own bucket.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 // throttleByIP applies the shared path-scoped bucket (spec §2.6: DELETEs
 // share the POST bucket). Denials are an empty 429.
 func throttleByIP(l *ratelimit.Limiter, deps Deps, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !l.Allow(clientIP(r), deps.Now()) {
+		if !l.Allow(deps.clientIP(r), deps.Now()) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}

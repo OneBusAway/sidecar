@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -22,10 +23,15 @@ import (
 	// valid one on such a host.
 	_ "time/tzdata"
 
+	"github.com/google/uuid"
+
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/cache"
+	"github.com/OneBusAway/sidecar/internal/clientip"
+	"github.com/OneBusAway/sidecar/internal/donations"
 	"github.com/OneBusAway/sidecar/internal/dotenv"
+	"github.com/OneBusAway/sidecar/internal/errreport"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
@@ -108,14 +114,14 @@ func main() {
 // -h/-help, which is a request for usage, not a failure, so it is printed to
 // stdout and reported as success (nil), following the convention that
 // --help is not an error condition.
-func run(stdout, stderr io.Writer, args []string) error {
+func run(stdout, stderr io.Writer, args []string) (err error) {
 	// Before the flag definitions, not just before Parse: the envOrDefault
 	// calls below read the environment at flag-registration time, so a .env
 	// loaded any later could never reach a flag default. Real environment
 	// variables win over the file (dotenv.Load never overwrites), keeping
 	// platform-provided production configuration unaffected.
-	if err := dotenv.Load(".env"); err != nil {
-		return err
+	if loadErr := dotenv.Load(".env"); loadErr != nil {
+		return loadErr
 	}
 
 	fs := flag.NewFlagSet("sidecar", flag.ContinueOnError)
@@ -135,16 +141,48 @@ func run(stdout, stderr io.Writer, args []string) error {
 			"unset leaves the webhook open but rate limited")
 	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
 		"base URL of the gorush push gateway; without it alarms are stored but never fire")
+	trustedProxy := fs.String("trusted-proxy", envOrDefault("SIDECAR_TRUSTED_PROXY", ""),
+		"proxy whose client-address header the per-IP throttles trust: off (default: the TCP peer), "+
+			"cloudflare (CF-Connecting-IP), render (True-Client-IP), or header:<Name>; "+
+			"set only when the proxy overwrites that header on every request")
+	trustedProxySecret := fs.String("trusted-proxy-secret", envOrDefault("SIDECAR_TRUSTED_PROXY_SECRET", ""),
+		"value the proxy sends in "+clientip.SecretHeader+" to prove a request came through it; "+
+			"the client-address header is ignored on requests without it (or from outside --trusted-proxy-cidrs)")
+	trustedProxyCIDRs := fs.String("trusted-proxy-cidrs", envOrDefault("SIDECAR_TRUSTED_PROXY_CIDRS", ""),
+		"comma-separated address ranges the proxy connects from; render defaults to the private ranges")
+	logFormat := fs.String("log-format", envOrDefault("SIDECAR_LOG_FORMAT", "text"),
+		"log line format: text (default) or json (one object per line, for log aggregators)")
+	sentryDSN := fs.String("sentry-dsn", envOrDefault("SIDECAR_SENTRY_DSN", ""),
+		"Sentry DSN; when set, every error-level log line is also reported there. Unset disables reporting")
+	sentryEnv := fs.String("sentry-environment", envOrDefault("SIDECAR_SENTRY_ENVIRONMENT", ""),
+		"environment tag on Sentry events (e.g. production, staging)")
+	stripeKey := fs.String("stripe-secret-key", envOrDefault("SIDECAR_STRIPE_SECRET_KEY", ""),
+		"Stripe live secret key; enables POST /api/v1/payment_intents (donations). Unset leaves the route unregistered")
+	stripeTestKey := fs.String("stripe-test-secret-key", envOrDefault("SIDECAR_STRIPE_TEST_SECRET_KEY", ""),
+		"Stripe test secret key, used for requests with test_mode=1")
+	stripeProduct := fs.String("stripe-recurring-product-id", envOrDefault("SIDECAR_STRIPE_RECURRING_PRODUCT_ID", ""),
+		"id of the live Stripe product recurring donations bill against (prod_...)")
+	stripeTestProduct := fs.String("stripe-test-recurring-product-id", envOrDefault("SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID", ""),
+		"id of the test-mode Stripe product recurring donations bill against")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+	if parseErr := fs.Parse(args); parseErr != nil {
+		if errors.Is(parseErr, flag.ErrHelp) {
 			fs.SetOutput(stdout)
 			fs.Usage()
 			return nil
 		}
-		return err
+		return parseErr
+	}
+
+	proxyPrefixes, err := clientip.ParsePrefixes(*trustedProxyCIDRs)
+	if err != nil {
+		return fmt.Errorf("--trusted-proxy-cidrs/SIDECAR_TRUSTED_PROXY_CIDRS: %w", err)
+	}
+	resolveClientIP, err := clientip.Parse(*trustedProxy, clientip.Options{Prefixes: proxyPrefixes, Secret: *trustedProxySecret})
+	if err != nil {
+		return fmt.Errorf("--trusted-proxy/SIDECAR_TRUSTED_PROXY: %w", err)
 	}
 
 	// gorush builds its feedback header from "name:value" by splitting on
@@ -166,7 +204,36 @@ func run(stdout, stderr io.Writer, args []string) error {
 		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}
 
-	logger := slog.New(slog.NewTextHandler(stderr, nil))
+	var handler slog.Handler
+	switch strings.ToLower(*logFormat) {
+	case "text":
+		handler = slog.NewTextHandler(stderr, nil)
+	case "json":
+		handler = slog.NewJSONHandler(stderr, nil)
+	default:
+		return fmt.Errorf("--log-format/SIDECAR_LOG_FORMAT must be text or json, got %q", *logFormat)
+	}
+	if *sentryDSN != "" {
+		// Sentry's own diagnostics go to the bare handler, never through
+		// the tee, or a delivery failure would try to report itself.
+		reporter, sentryErr := errreport.NewSentry(*sentryDSN, *sentryEnv, buildVersion(), slog.New(handler))
+		if sentryErr != nil {
+			return fmt.Errorf("--sentry-dsn/SIDECAR_SENTRY_DSN: %w", sentryErr)
+		}
+		// Flushed on the way out so errors logged during shutdown -- and
+		// the fatal-error line below for a failed boot -- reach Sentry.
+		defer reporter.Flush(2 * time.Second)
+		handler = errreport.New(handler, reporter)
+	}
+	logger := slog.New(handler)
+	// Boot failures from here on (open, migrate, listen) are returned to
+	// main, which prints them; log them too so they reach Sentry and the
+	// structured log rather than only the process's stderr line.
+	defer func() {
+		if err != nil {
+			logger.Error("sidecar: fatal", "err", err)
+		}
+	}()
 
 	store, err := sqlite.Open(*dbPath)
 	if err != nil {
@@ -182,8 +249,8 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// Migrate before anything touches a table: a fresh database has no
 	// regions table, so a directory sync that ran first would fail against
 	// a missing relation. Never serve on an unknown schema.
-	if err := store.Migrate(); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
+	if migrateErr := store.Migrate(); migrateErr != nil {
+		return fmt.Errorf("migrate database: %w", migrateErr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -255,6 +322,16 @@ func run(stdout, stderr io.Writer, args []string) error {
 	// shares the same obaapi.Client that vehicle search uses, rather than
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
+	deps.ClientIP = resolveClientIP
+	deps.Donations, err = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
+	if err != nil {
+		return err
+	}
+	if setting := strings.ToLower(strings.TrimSpace(*trustedProxy)); setting != "" && setting != "off" {
+		// In the boot log on purpose: a wrong value here mis-keys every
+		// throttle bucket.
+		logger.Info("per-IP throttles key on the proxy's client-address header", "trusted_proxy", setting)
+	}
 
 	sched := &alarms.Scheduler{
 		Repo:    store.Alarms(),
@@ -412,4 +489,56 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// version is stamped by the image build (`-ldflags -X main.version=<git
+// sha>`; the Docker build has no .git to read). It tags Sentry events so a
+// report can be tied to the image that produced it.
+var version string
+
+// buildVersion is the stamped version, else the VCS revision `go build`
+// records when building inside a checkout, else empty.
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, kv := range info.Settings {
+		if kv.Key == "vcs.revision" {
+			return kv.Value
+		}
+	}
+	return ""
+}
+
+// newDonations wires spec section 11 when a live Stripe key is present and
+// returns nil (route unregistered, apps hide the UI) otherwise. A key
+// without its recurring product id is an error: recurring requests would
+// otherwise reach Stripe with an empty product and fail as opaque 500s.
+func newDonations(logger *slog.Logger, liveKey, testKey, liveProduct, testProduct string) (*donations.Service, error) {
+	if liveKey == "" {
+		if testKey != "" {
+			logger.Warn("SIDECAR_STRIPE_TEST_SECRET_KEY set without SIDECAR_STRIPE_SECRET_KEY; donations stay disabled")
+		}
+		return nil, nil
+	}
+	if liveProduct == "" {
+		return nil, errors.New("--stripe-recurring-product-id/SIDECAR_STRIPE_RECURRING_PRODUCT_ID is required with a Stripe secret key")
+	}
+	svc := &donations.Service{
+		Live:  donations.NewStripeGateway(liveKey, liveProduct),
+		NewID: uuid.NewString,
+	}
+	if testKey == "" {
+		logger.Warn("no --stripe-test-secret-key/SIDECAR_STRIPE_TEST_SECRET_KEY set; test_mode donation requests will fail")
+		return svc, nil
+	}
+	if testProduct == "" {
+		return nil, errors.New("--stripe-test-recurring-product-id/SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID is required with a Stripe test key")
+	}
+	svc.Test = donations.NewStripeGateway(testKey, testProduct)
+	return svc, nil
 }

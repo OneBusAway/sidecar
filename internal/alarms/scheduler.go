@@ -50,6 +50,7 @@ type Scheduler struct {
 // CheckAll runs one §5.3 cycle over every pending alarm. Exported so tests
 // (and the loop wiring) drive cycles without a ticker.
 func (s *Scheduler) CheckAll(ctx context.Context) {
+	started := s.Now()
 	pending, err := s.Repo.List(ctx)
 	if err != nil {
 		s.Logger.Error("alarms: list pending", "err", err)
@@ -99,6 +100,7 @@ func (s *Scheduler) CheckAll(ctx context.Context) {
 	if err := g.Wait(); err != nil {
 		s.Logger.Error("alarms: check cycle", "err", err)
 	}
+	s.Logger.Info("alarms: cycle", "alarms", len(pending), "ms", s.Now().Sub(started).Milliseconds())
 }
 
 // regionLookup is one cycle's cached resolution of a region: the region if

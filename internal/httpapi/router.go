@@ -21,6 +21,8 @@ import (
 	"github.com/OneBusAway/sidecar/internal/alerts"
 	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/clientip"
+	"github.com/OneBusAway/sidecar/internal/donations"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -54,6 +56,20 @@ type Deps struct {
 	BearerFailLimiter *ratelimit.Limiter
 	Now               func() time.Time
 	Logger            *slog.Logger
+	// ClientIP is the key every per-IP throttle, the request log's ip, and
+	// the failed-auth log lines use, read through deps.clientIP, which falls back to the TCP
+	// peer (clientip.Peer) when nil; main sets a header-reading resolver only
+	// when SIDECAR_TRUSTED_PROXY opts in (README, Deployment). Tests inject
+	// their own to pin bucket identity.
+	ClientIP clientip.Resolver
+
+	// Donations backs POST /api/v1/payment_intents (spec section 11). Nil
+	// means the route is not registered; main sets it only when a Stripe
+	// key is configured.
+	Donations *donations.Service
+	// DonationLimiter is the per-source throttle on donation requests.
+	// NewRouter defaults it (10/minute).
+	DonationLimiter *ratelimit.Limiter
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -177,6 +193,16 @@ func NewServer(cfg ServerConfig) *http.Server {
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+// clientIP resolves the throttle key through Deps.ClientIP, defaulting to
+// the TCP peer so handlers built without NewRouter (tests) behave like the
+// unconfigured server.
+func (d Deps) clientIP(r *http.Request) string {
+	if d.ClientIP == nil {
+		return clientip.Peer(r)
+	}
+	return d.ClientIP(r)
 }
 
 // NewRouter builds the sidecar's HTTP handler.
@@ -332,6 +358,16 @@ func NewRouter(deps Deps) http.Handler {
 			throttleByIP(deps.GhostBusIPLimiter, deps, gh.create))
 	}
 
+	// Donations (spec section 11) are optional: nil Donations means the route
+	// is not registered and the apps hide the UI on the resulting 404.
+	if deps.Donations != nil {
+		if deps.DonationLimiter == nil {
+			deps.DonationLimiter = ratelimit.New(donationsPerMinute, time.Minute)
+		}
+		dh := &donationsHandler{deps: deps}
+		mux.HandleFunc("POST /api/v1/payment_intents", throttleByIP(deps.DonationLimiter, deps, dh.create))
+	}
+
 	// The admin SPA is registered independently of the admin API below, and
 	// deliberately outside registerAdminRoutes / adminRoutes: it is served
 	// unauthenticated (the login page is part of it) and must never pass
@@ -376,7 +412,7 @@ func NewRouter(deps Deps) http.Handler {
 		}
 		registerAdminRoutes(mux, deps)
 	}
-	return mux
+	return requestLog(deps, mux)
 }
 
 // adminRoute is one admin API route plus the middleware it must carry.
@@ -606,6 +642,9 @@ func adminFeatures(deps Deps) []string {
 	}
 	if deps.PushRegs != nil {
 		features = append(features, "push_registrations")
+	}
+	if deps.Donations != nil {
+		features = append(features, "donations")
 	}
 	if deps.APIKeys != nil {
 		// APIKeys also backs bearer authentication, and now the

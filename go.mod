@@ -12,6 +12,8 @@ require (
 
 require (
 	github.com/OneBusAway/go-sdk v1.15.0
+	github.com/getsentry/sentry-go v0.49.0
+	github.com/stripe/stripe-go/v83 v83.2.1
 	golang.org/x/term v0.45.0
 )
 
@@ -20,11 +22,12 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/google/uuid v1.6.0
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

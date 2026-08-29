@@ -38,6 +38,36 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: -1,
 		},
 		{
+			name:          "unknown log-format returns an error and writes nothing to stdout",
+			args:          []string{"--log-format=yaml"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "unparseable sentry DSN returns an error and writes nothing to stdout",
+			args:          []string{"--sentry-dsn=not-a-dsn"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "unknown trusted-proxy value returns an error and writes nothing to stdout",
+			args:          []string{"--trusted-proxy=xff"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "header trusted-proxy without secret or cidrs returns an error",
+			args:          []string{"--trusted-proxy=cloudflare"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "malformed trusted-proxy-cidrs returns an error",
+			args:          []string{"--trusted-proxy=cloudflare", "--trusted-proxy-cidrs=10.0.0.0"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
 			name:          "unparseable refresh duration returns an error and writes nothing to stdout",
 			args:          []string{"--refresh=nonsense"},
 			wantErr:       true,
@@ -501,5 +531,39 @@ func TestDefaultListenAddr(t *testing.T) {
 	t.Setenv("SIDECAR_ADDR", "127.0.0.1:7000")
 	if got := defaultListenAddr(); got != "127.0.0.1:7000" {
 		t.Errorf("SIDECAR_ADDR wins over PORT: got %q", got)
+	}
+}
+
+func TestNewDonations(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	if svc, err := newDonations(logger, "", "sk_test", "", ""); svc != nil || err != nil {
+		t.Fatalf("no live key must leave donations nil: %v %v", svc, err)
+	}
+	if !strings.Contains(buf.String(), "donations stay disabled") {
+		t.Errorf("orphan test key not warned: %q", buf.String())
+	}
+	if _, err := newDonations(logger, "sk_live", "", "", ""); err == nil || !strings.Contains(err.Error(), "SIDECAR_STRIPE_RECURRING_PRODUCT_ID") {
+		t.Fatalf("live key without product must fail boot: %v", err)
+	}
+	if _, err := newDonations(logger, "sk_live", "sk_test", "prod_live", ""); err == nil || !strings.Contains(err.Error(), "SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID") {
+		t.Fatalf("test key without product must fail boot: %v", err)
+	}
+	buf.Reset()
+	svc, err := newDonations(logger, "sk_live", "", "prod_live", "")
+	if err != nil || svc == nil || svc.Live == nil || svc.Test != nil {
+		t.Fatalf("live only: %+v %v", svc, err)
+	}
+	if !strings.Contains(buf.String(), "test_mode donation requests will fail") {
+		t.Errorf("missing test key not warned: %q", buf.String())
+	}
+	svc, err = newDonations(logger, "sk_live", "sk_test", "prod_live", "prod_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := svc.NewID(), svc.NewID()
+	if svc.Test == nil || first == "" || first == second {
+		t.Fatalf("both keys: %+v ids=%q,%q", svc, first, second)
 	}
 }

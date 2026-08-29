@@ -1,0 +1,29 @@
+{
+  "code": 200,
+  "text": "OK",
+  "version": 3,
+  "data": {
+    "list": [
+      {
+        "id": 16,
+        "regionName": "Davis, CA (staging sidecar)",
+        "active": true,
+        "experimental": true,
+        "language": "en",
+        "obaBaseUrl": "https://api.unitrans.onebusawaycloud.com",
+        "sidecarBaseUrl": "https://staging.sidecar.onebusaway.org",
+        "bounds": [{ "lat": 38.5449, "lon": -121.7444, "latSpan": 0.12, "lonSpan": 0.16 }]
+      },
+      {
+        "id": 9001,
+        "regionName": "Sidecar Test Region",
+        "active": true,
+        "experimental": true,
+        "language": "en",
+        "obaBaseUrl": "https://api.pugetsound.onebusaway.org/",
+        "sidecarBaseUrl": "https://staging.sidecar.onebusaway.org",
+        "bounds": [{ "lat": 47.6062, "lon": -122.3321, "latSpan": 0.4, "lonSpan": 0.6 }]
+      }
+    ]
+  }
+}

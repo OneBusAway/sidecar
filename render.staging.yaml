@@ -1,12 +1,12 @@
-# Render Blueprint: the same two services compose.yaml runs locally.
-# Docs: https://render.com/docs/blueprint-spec
-#
-# Secrets marked `sync: false` are entered in the dashboard on first deploy.
+# Render Blueprint for the STAGING deployment: the production Blueprint with
+# every service and disk renamed, APNs pointed at the sandbox, and the
+# regions directory overridable. Regenerated from render.yaml -- edit that
+# file first and mirror the change here.
 # Ports are 8080 (sidecar) and 8088 (gorush) on the private network, same as
 # local; Render forbids 10000 there.
 
 envVarGroups:
-  - name: sidecar-shared
+  - name: sidecar-staging-shared
     envVars:
       # Render ignores sync: false inside an env group (Blueprint spec:
       # "You can't define an environment variable with sync: false in an
@@ -14,14 +14,14 @@ envVarGroups:
       # variable."), so this is auto-generated instead: base64, no ':' or
       # whitespace, which satisfies gorush's header split. After the first
       # deploy, copy the generated value from Dashboard -> Environment
-      # Groups -> sidecar-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
+      # Groups -> sidecar-staging-shared into gorush's GORUSH_CORE_FEEDBACK_HEADER
       # as "authorization:<value>" (see the comment block below).
       - key: SIDECAR_GORUSH_WEBHOOK_SECRET
         generateValue: true
 
 services:
   - type: web
-    name: sidecar
+    name: sidecar-staging
     # Prebuilt by .github/workflows/image.yml. `main` is a moving tag; to
     # roll back, point this at an immutable `sha-<short>` tag (Dashboard ->
     # sidecar -> Settings -> Image URL) and deploy. The GHCR package must be
@@ -33,18 +33,23 @@ services:
     region: oregon
     healthCheckPath: /healthz
     disk:
-      name: sidecar-data
+      name: sidecar-staging-data
       mountPath: /data
       sizeGB: 1
     envVars:
-      - fromGroup: sidecar-shared
+      - fromGroup: sidecar-staging-shared
       - key: PORT
         value: "8080"
       - key: SIDECAR_DB
         value: /data/sidecar.db
+      # A hand-maintained directory whose regions all point at this host, so
+      # TestFlight builds that use the custom regions URL land here and
+      # production devices never do (README, Staging).
+      - key: SIDECAR_REGIONS_URL
+        sync: false
       - key: SIDECAR_GORUSH_URL
         fromService:
-          name: gorush
+          name: gorush-staging
           type: pserv
           property: hostport
       - key: SIDECAR_APNS_TOPIC
@@ -75,11 +80,14 @@ services:
       - key: SIDECAR_SENTRY_DSN
         sync: false
       - key: SIDECAR_SENTRY_ENVIRONMENT
-        value: production
+        value: staging
       # Continuous SQLite replication to an S3-compatible bucket (README,
       # Backups). Leave SIDECAR_BACKUP_BUCKET empty to run without it.
       - key: SIDECAR_BACKUP_BUCKET
         sync: false
+      # Keep staging's replica apart from production's in a shared bucket.
+      - key: SIDECAR_BACKUP_PATH
+        value: sidecar-staging
       - key: SIDECAR_BACKUP_ENDPOINT
         sync: false
       - key: SIDECAR_BACKUP_ACCESS_KEY_ID
@@ -88,14 +96,14 @@ services:
         sync: false
 
   - type: pserv
-    name: gorush
+    name: gorush-staging
     runtime: image
     image:
       url: docker.io/appleboy/gorush:1.22.0
     plan: starter
     region: oregon
     envVars:
-      - fromGroup: sidecar-shared
+      - fromGroup: sidecar-staging-shared
       - key: GORUSH_CORE_PORT
         value: "8088"
       # gorush ignores PORT, but setting it makes Render's port detection
@@ -108,7 +116,7 @@ services:
       - key: GORUSH_IOS_KEY_TYPE
         value: p8
       - key: GORUSH_IOS_PRODUCTION
-        value: "true"
+        value: "false"
       - key: GORUSH_IOS_KEY_BASE64
         sync: false
       - key: GORUSH_IOS_KEY_ID
@@ -121,7 +129,7 @@ services:
       # GORUSH_CORE_FEEDBACK_HOOK_URL below.
       - key: GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT
         fromService:
-          name: sidecar
+          name: sidecar-staging
           type: web
           property: hostport
       # Blueprint cannot concatenate values, so the two derived settings
@@ -129,7 +137,7 @@ services:
       #   GORUSH_CORE_FEEDBACK_HOOK_URL = http://<GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT>/webhooks/gorush
       #   GORUSH_CORE_FEEDBACK_HEADER   = authorization:<value auto-generated for
       #     SIDECAR_GORUSH_WEBHOOK_SECRET -- Dashboard -> Environment Groups ->
-      #     sidecar-shared>
+      #     sidecar-staging-shared>
       - key: GORUSH_CORE_FEEDBACK_HOOK_URL
         sync: false
       - key: GORUSH_CORE_FEEDBACK_HEADER

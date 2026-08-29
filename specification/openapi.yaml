@@ -379,6 +379,8 @@ paths:
             Malformed JSON body sent with a JSON content type. (A malformed
             body sent without one reaches the handler's own parse and 500s
             in the reference.)
+        '429':
+          description: Rate limited (10/minute per client address in this implementation; the reference had no throttle here).
         '500':
           description: Stripe error. Empty body. Clients treat any non-200 as a failed donation attempt.
 
