@@ -55,8 +55,20 @@ func regionKeyFromRow(r gen.RegionApiKey) (apikey.RegionKey, error) {
 
 // encodeScopes renders a scope set for the scopes column: a JSON array of
 // names, [] for an empty or nil set.
+//
+// The set is re-validated through ParseScopes first, even though the
+// interface says callers hand over an already-normalized set: Scopes is a
+// bare slice of a bare string type, so apikey.Scopes{"admin"} compiles
+// anywhere, and writing it would leave a row that decodeScopes can never
+// read back -- taking down not just that key's own lookup but every list
+// that spans it, since regionKeysFromRows stops at the first bad row. The
+// write is refused instead, before the INSERT.
 func encodeScopes(s apikey.Scopes) (string, error) {
-	b, err := json.Marshal(s.Strings())
+	valid, err := apikey.ParseScopes(s.Strings())
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(valid.Strings())
 	if err != nil {
 		return "", err
 	}

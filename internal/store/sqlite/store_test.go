@@ -507,3 +507,54 @@ func TestAlertPushFailuresStoreOnlyHashes(t *testing.T) {
 		t.Errorf("token_sha256 = %q, want %q (hex sha256 of the token)", stored, want)
 	}
 }
+
+// TestCreateRegionKeyRefusesAnUndefinedScopeBeforeWriting pins that an
+// undefined scope is caught on the way in, not on the way back out.
+// apikey.Scopes is a bare slice of a bare string type, so apikey.Scopes{
+// "admin"} compiles at any call site; if CreateRegionKey validated only the
+// RETURNING row it would have already committed a cell no reader can decode,
+// and because the list mapper stops at the first bad row, one such key would
+// take the whole region's `key list` down with it. Hence the raw COUNT(*):
+// the write must not have happened at all.
+func TestCreateRegionKeyRefusesAnUndefinedScopeBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	path, store := sqlitetest.OpenAt(t)
+	ctx := context.Background()
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+	}}, now); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+
+	_, err := store.APIKeys().CreateRegionKey(ctx, 1, "bad", "h-bad",
+		apikey.Scopes{"admin"}, apikey.Actor{Kind: apikey.ActorCLI}, now)
+	if !errors.Is(err, apikey.ErrUnknownScope) {
+		t.Fatalf("CreateRegionKey with an undefined scope: err = %v, want ErrUnknownScope", err)
+	}
+
+	db, openErr := sql.Open("sqlite", path)
+	if openErr != nil {
+		t.Fatalf("sql.Open: %v", openErr)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM region_api_keys").Scan(&n); err != nil {
+		t.Fatalf("SELECT COUNT(*): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("region_api_keys holds %d rows after a refused create, want 0", n)
+	}
+
+	// The region's listing must still work: this is the blast radius a
+	// committed bad row would have had.
+	keys, listErr := store.APIKeys().ListRegionKeys(ctx, 1)
+	if listErr != nil {
+		t.Fatalf("ListRegionKeys after a refused create: %v", listErr)
+	}
+	if len(keys) != 0 {
+		t.Errorf("ListRegionKeys = %+v, want none", keys)
+	}
+}
