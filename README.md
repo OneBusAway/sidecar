@@ -35,9 +35,10 @@ companion CLI that writes the same database directly.
 include alerts authored with `--test`; omit it to see what riders see.
 
 A translation (`alert translate`) is served only while it still describes the English it
-was made from. Every translation in an alert's admin JSON carries `"stale": true|false`:
-true when the English it was made from has since changed, which is exactly when the feed
-withholds it -- so a review UI can show what riders will not see and offer retranslation.
+was made from. Every language in an alert's admin JSON carries `"stale": true|false`: a
+language is reported stale when any of its translated fields no longer matches the
+current English text, while the feed withholds each stale field individually -- so a
+review UI can show what riders will not see and offer retranslation.
 
 ### Authoring alerts with `sidecar-admin`
 
@@ -1096,6 +1097,157 @@ than roll. Render's proxy re-originates TCP, so set
 when the custom domain is proxied through Cloudflare, which is then the
 hop that sets the header); without it every per-IP throttle shares one
 bucket.
+
+#### Cutover runbook
+
+The once-per-deployment sequence that stands a host up and hands OBACloud
+the credentials it needs, before any region's `sidecar_base_url` flips.
+Steps 2-5 are the same on staging; run them there first. Every command
+below was run against the binaries in this tree, and the commented output
+is what they actually print.
+
+**1. Deploy.** Apply `render.yaml` as a Blueprint in the production
+workspace from the Dashboard (New -> Blueprint; the CLI has no `blueprint`
+command as of v2.5.0), which creates `sidecar`, `gorush`, and the
+`sidecar-data` disk at `/data`. Fill the `sync: false` secrets and the two
+hand-derived gorush values exactly as *Render*'s first-deploy list above
+describes; production additionally takes the Stripe keys,
+`SIDECAR_TRUSTED_PROXY_SECRET`, `SIDECAR_SENTRY_DSN`, and the Litestream
+`SIDECAR_BACKUP_*` values (*Backups*). Then add `SIDECAR_REGIONS_URL` =
+`https://regions.onebusaway.org/regions-v3.json` by hand: `render.yaml`
+does not declare it (only `render.staging.yaml` does), and although that
+URL is also the binary's compiled-in default, setting it explicitly means
+a later change to that default cannot move production. Add the custom
+domain `sidecar2.onebusaway.org` to the `sidecar` service; in Cloudflare,
+create the proxied CNAME to the `*.onrender.com` host, the Transform Rule
+that sets `X-Sidecar-Proxy-Secret` to the value of
+`SIDECAR_TRUSTED_PROXY_SECRET` (*Deployment* above --
+`SIDECAR_TRUSTED_PROXY=cloudflare` is already in the Blueprint), and the
+cache rule for `/api/v1/regions/*/alerts*` (*Feed caching*). Then:
+
+```sh
+deploy/smoke.sh https://sidecar2.onebusaway.org
+# ok   /healthz -> 200
+# ok   /admin -> 200
+# ok   /api/v1/regions/1/alerts.pbtext -> 200
+```
+
+The feed line reports `skip … -> 404 (no regions synced yet)` until the
+directory has been pulled. The server pulls it once at startup, in the
+background, so a smoke run in the first seconds after a deploy can lose
+that race; re-run the script rather than reading the skip as a failure.
+Repeat the whole step for staging with `render.staging.yaml`, its own
+custom domain (proxied through Cloudflare too, so the trusted-proxy path
+and the cache rule are exercised there), and `SIDECAR_REGIONS_URL` set to
+the hand-maintained staging directory (*Staging*).
+
+**2. Bootstrap the database on each host.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db region sync
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db region list
+# 0	Tampa Bay	active=true	agency=	tz=UTC	centroid=27.9553,-82.5231	oba-key=none (may inherit server default)
+# 1	Puget Sound	active=true	agency=	tz=UTC	centroid=47.7528,-122.4924	oba-key=none (may inherit server default)
+```
+
+`region sync` prints nothing when it succeeds -- `region list` is how you
+confirm the directory landed, and it is also the fastest way to see what
+the server's own startup sync already did. `--db` is spelled out on every
+line rather than leaning on the image's `SIDECAR_DB`, and on staging
+`region sync` needs `--regions-url <staging directory>` too: the CLI reads
+`SIDECAR_REGIONS_URL` from its own environment, and a non-interactive
+`ssh host command` is not guaranteed to inherit the service's, so a bare
+`region sync` there can quietly pull the production directory over the
+staging one.
+
+The first admin user needs a real terminal, because the password is
+prompted for twice and deliberately cannot be passed as an argument:
+
+```sh
+render ssh sidecar                                  # interactive shell
+sidecar-admin --db /data/sidecar.db user create --username <operator>
+# Password:
+# Confirm password:
+# created user <operator>
+```
+
+The one-liner form (`render ssh sidecar -- sidecar-admin … user create
+…`) fails with `stdin is not a terminal; use --password-stdin`.
+`--password-stdin` does work, but it puts the password through the local
+shell, which is what the prompt exists to avoid.
+
+**3. Mint the service principal, one per deployment.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db principal create --name obacloud-production
+# obasp_9klpGIRDdZPsCDXG59FjTN9tC6dk…
+# id: 1	name: obacloud-production
+
+render ssh sidecar-staging -- sidecar-admin --db /data/sidecar.db principal create --name obacloud-staging
+```
+
+The first line is the raw credential, stored only as a hash and never
+recoverable from the database; a lost one is re-minted, not looked up.
+Paste it into OBACloud's credentials under
+`sidecar.principals["https://sidecar2.onebusaway.org"]`, and staging's
+under its own base URL.
+
+**4. Id-sequence headroom, before the first cutover.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db sequence bump --min 1000000
+# alerts: 0 -> 1000000
+# studies: 0 -> 1000000
+# surveys: 0 -> 1000000
+# survey_questions: 0 -> 1000000
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db sequence show
+# alerts	1000000
+# studies	1000000
+# surveys	1000000
+# survey_questions	1000000
+```
+
+Record the `show` output in the cutover ticket; the cutover re-checks it.
+*Migrating a region from OBACloud* above explains why the floor is there
+and why re-running `bump` is safe.
+
+**5. Prove the OBACloud contract end to end.** With the principal from
+step 3 in `$P`, mint and revoke a push-scoped key exactly the way OBACloud
+will:
+
+```sh
+curl -s -X POST https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys \
+  -H "Authorization: Bearer $P" -H 'Content-Type: application/json' \
+  -d '{"name":"runbook check","scopes":["push"]}'
+# 201 {"id":1,"name":"runbook check","scopes":["push"],"key":"obask_1_i6iK4jtmlst4Z_SLs59uHH…",
+#      "created_by":{"kind":"principal","id":1},"created_at":"2026-08-29T08:45:36Z"}
+
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
+  https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys/1 \
+  -H "Authorization: Bearer $P"
+# 204
+```
+
+A `403` on the POST means the principal is wrong or revoked; a `400` of
+`{"error":"unknown scope \"…\""}` means the scope name was not `push`.
+The minted key is live until the DELETE, so do not skip it -- the
+`revoked_at` and `revoked_by` that appear in `GET …/api_keys` are the
+receipt.
+
+Then rehearse the export and import against staging, before any
+production cutover:
+
+```sh
+bin/rails "sidecar:export[1,export.json]"          # run in OBACloud
+cat export.json | render ssh sidecar-staging -- \
+  sidecar-admin --db /data/sidecar.db import --file - --dry-run
+# dry run: stdin is a valid sidecar-export/1 document for region 1: 1 alerts, 0 studies, 0 survey responses, 0 push registrations, 0 ghost bus reports
+```
+
+Drop `--dry-run` to apply it. If the CLI stops to prompt on that pipeline
+-- it defaults to interactive output -- pass `--confirm` and `-o text`
+before the `--`, so nothing of the CLI's own can read the document out of
+stdin.
 
 ### Development
 
