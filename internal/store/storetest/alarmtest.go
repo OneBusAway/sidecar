@@ -517,11 +517,12 @@ func testAlarmRegionScopedReads(t *testing.T, newStore newAlarmStoreFunc) {
 // throughout, because deferral is scheduler bookkeeping, not a lifecycle
 // state the admin API should hide.
 func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
+	const token = "tok-defer"
 	repo, regionRepo := newStore(t)
 	ctx := context.Background()
 	putStoretestRegion(t, regionRepo, 1)
 
-	created, err := repo.Create(ctx, fullAlarmIn("tok-defer", 2), base)
+	created, err := repo.Create(ctx, fullAlarmIn(token, 2), base)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -533,7 +534,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 	if err != nil {
 		t.Fatalf("ListDue(base): %v", err)
 	}
-	findAlarmByToken(t, due, "tok-defer")
+	findAlarmByToken(t, due, token)
 
 	until := base.Add(90 * time.Minute)
 	if deferErr := repo.Defer(ctx, created.ID, until); deferErr != nil {
@@ -554,7 +555,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 		if listErr != nil {
 			t.Fatalf("ListDue(%v): %v", now, listErr)
 		}
-		a := findAlarmByToken(t, got, "tok-defer")
+		a := findAlarmByToken(t, got, token)
 		if !a.CheckAfter.Equal(until) {
 			t.Errorf("CheckAfter = %v, want %v", a.CheckAfter, until)
 		}
@@ -564,7 +565,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	findAlarmByToken(t, all, "tok-defer")
+	findAlarmByToken(t, all, token)
 
 	// Defer on a vanished row is not an error: the sweep can race the
 	// rider's own cancel, same as DeleteByID.

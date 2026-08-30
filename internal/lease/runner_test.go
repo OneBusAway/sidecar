@@ -3,6 +3,7 @@ package lease_test
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,6 +105,7 @@ func newRunner(repo lease.Repository) *lease.Runner {
 func start(t *testing.T, r *lease.Runner, l lease.Loop) (stop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	done := make(chan struct{})
 	go func() { r.Run(ctx, l); close(done) }()
 	return func() {
@@ -274,6 +276,50 @@ func TestWakeTicksNowWhileHolding(t *testing.T) {
 	waitFor(t, "the first tick", func() bool { return c.n.Load() >= 1 })
 	wake <- struct{}{}
 	waitFor(t, "the woken tick", func() bool { return c.n.Load() >= 2 })
+}
+
+// TestClosedWakeChannelDoesNotSpin: a closed Wake is always ready to
+// receive; treated as a wake it would start a new cycle the moment the
+// previous one finished, forever. It must be disarmed instead.
+func TestClosedWakeChannelDoesNotSpin(t *testing.T) {
+	t.Parallel()
+	c := &counter{}
+	wake := make(chan struct{})
+	close(wake)
+	var logs lockedBuffer
+	r := newRunner(newFakeRepo())
+	r.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	stop := start(t, r, lease.Loop{Name: "pushes", Interval: time.Hour, Wake: wake, Tick: c.tick})
+	waitFor(t, "the first tick", func() bool { return c.n.Load() >= 1 })
+	time.Sleep(30 * time.Millisecond)
+	stop()
+	if n := c.n.Load(); n != 1 {
+		t.Fatalf("ticked %d times with a closed Wake channel, want 1 (the acquire tick)", n)
+	}
+	// Disarmed once, not re-noticed on every loop iteration: the closed
+	// channel must stop being selected at all, or Run spins.
+	if n := strings.Count(logs.String(), "wake channel closed"); n != 1 {
+		t.Fatalf("closed-wake warning logged %d times, want exactly 1 (is Run still selecting on the closed channel?)", n)
+	}
+}
+
+// lockedBuffer is a concurrency-safe log sink: Run logs from its own
+// goroutine while the test reads.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestWakeIsIgnoredWhileNotHolding(t *testing.T) {

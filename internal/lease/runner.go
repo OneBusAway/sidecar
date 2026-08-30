@@ -116,92 +116,125 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 	if poll <= 0 {
 		poll = DefaultPoll
 	}
-	ttl := ttlPolls * poll
-
-	holding := false
-	var lastRenewed time.Time
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	// A cycle runs on its own goroutine so the select below keeps renewing
-	// the lease underneath it: a holder that is busy is alive, and a cycle
-	// longer than the TTL must not hand the loop to a peer. running is
-	// non-nil while a cycle is in flight (a nil channel never selects), and
-	// an interval fire or Wake during one is skipped, not queued -- one
-	// runner never runs two cycles at once.
-	var running chan struct{}
-	var tickStarted time.Time
-	startTick := func() {
-		if running != nil {
-			return
-		}
-		running = make(chan struct{})
-		tickStarted = r.Now()
-		go func() {
-			defer close(running)
-			l.Tick(ctx)
-		}()
-	}
-	// renew acquires or renews the lease. On acquiring it, the loop ticks
-	// at once and the interval restarts from that tick -- otherwise a poll
-	// and an interval fire that coincide (both start from the same instant
-	// and 60s divides both) would tick twice in the same moment.
-	renew := func() {
-		now := r.Now()
-		ok, err := r.Repo.Acquire(ctx, l.Name, r.Holder, now, ttl)
-		switch {
-		case errors.Is(err, context.Canceled):
-			// Shutdown: the ctx.Done branch is about to run Release.
-			return
-		case err != nil:
-			// Conservative: a store we cannot reach is one we cannot renew
-			// through either, so assume the lease is lost until it answers.
-			r.Logger.Warn("lease: acquire failed; loop paused until the store answers", "loop", l.Name, "err", err)
-		case !ok && holding:
-			r.Logger.Warn("lease: lost to another process", "loop", l.Name, "held_for", now.Sub(lastRenewed))
-		}
-		was := holding
-		holding = err == nil && ok
-		if holding {
-			lastRenewed = now
-		}
-		if holding && !was {
-			r.Logger.Info("lease: acquired", "loop", l.Name, "holder", r.Holder)
-			startTick()
-			ticker.Reset(interval)
-		}
-	}
-
-	renew()
+	st := &loopState{r: r, l: l, ctx: ctx, interval: interval, ttl: ttlPolls * poll}
+	st.ticker = time.NewTicker(interval)
+	defer st.ticker.Stop()
 	poller := time.NewTicker(poll)
 	defer poller.Stop()
+
+	st.renew()
 	for {
 		select {
 		case <-ctx.Done():
-			if running != nil {
-				<-running
-			}
-			r.release(l.Name)
+			st.finish()
 			return
-		case <-running:
-			running = nil
-			if took := r.Now().Sub(tickStarted); took > interval {
-				r.Logger.Warn("lease: cycle outlived its interval; ticks were skipped", "loop", l.Name, "took", took, "interval", interval)
-			}
+		case <-st.running:
+			st.tickDone()
 		case <-poller.C:
-			renew()
-		case <-ticker.C:
-			if holding {
-				startTick()
+			st.renew()
+		case <-st.ticker.C:
+			if st.holding {
+				st.startTick()
 			}
-		case <-l.Wake:
-			if !holding {
-				r.Logger.Debug("lease: wake ignored, not the holder; its next tick covers it", "loop", l.Name)
-				continue
-			}
-			startTick()
+		case _, ok := <-st.l.Wake:
+			st.wake(ok)
 		}
 	}
+}
+
+// loopState is one Run's bookkeeping; every method runs on Run's goroutine.
+type loopState struct {
+	r        *Runner
+	l        Loop
+	ctx      context.Context
+	interval time.Duration
+	ttl      time.Duration
+	ticker   *time.Ticker
+
+	holding     bool
+	lastRenewed time.Time
+	// running is non-nil while a cycle is in flight (a nil channel never
+	// selects). A cycle runs on its own goroutine so Run keeps renewing the
+	// lease underneath it: a holder that is busy is alive, and a cycle
+	// longer than the TTL must not hand the loop to a peer. An interval
+	// fire or Wake during one is skipped, not queued -- one runner never
+	// runs two cycles at once.
+	running     chan struct{}
+	tickStarted time.Time
+}
+
+// renew acquires or renews the lease. On acquiring it, the loop ticks at
+// once and the interval restarts from that tick -- otherwise a poll and an
+// interval fire that coincide (both start from the same instant and 60s
+// divides both) would tick twice in the same moment.
+func (st *loopState) renew() {
+	now := st.r.Now()
+	ok, err := st.r.Repo.Acquire(st.ctx, st.l.Name, st.r.Holder, now, st.ttl)
+	switch {
+	case errors.Is(err, context.Canceled):
+		// Shutdown: the ctx.Done branch is about to run Release.
+		return
+	case err != nil:
+		// Conservative: a store we cannot reach is one we cannot renew
+		// through either, so assume the lease is lost until it answers.
+		st.r.Logger.Warn("lease: acquire failed; loop paused until the store answers", "loop", st.l.Name, "err", err)
+	case !ok && st.holding:
+		st.r.Logger.Warn("lease: lost to another process", "loop", st.l.Name, "held_for", now.Sub(st.lastRenewed))
+	}
+	was := st.holding
+	st.holding = err == nil && ok
+	if st.holding {
+		st.lastRenewed = now
+	}
+	if st.holding && !was {
+		st.r.Logger.Info("lease: acquired", "loop", st.l.Name, "holder", st.r.Holder)
+		st.startTick()
+		st.ticker.Reset(st.interval)
+	}
+}
+
+func (st *loopState) startTick() {
+	if st.running != nil {
+		return
+	}
+	st.running = make(chan struct{})
+	st.tickStarted = st.r.Now()
+	go func() {
+		defer close(st.running)
+		st.l.Tick(st.ctx)
+	}()
+}
+
+func (st *loopState) tickDone() {
+	st.running = nil
+	if took := st.r.Now().Sub(st.tickStarted); took > st.interval {
+		st.r.Logger.Warn("lease: cycle outlived its interval; ticks were skipped", "loop", st.l.Name, "took", took, "interval", st.interval)
+	}
+}
+
+// wake handles a receive on Loop.Wake. A closed channel is always ready,
+// which would start a new cycle the instant the previous one finished,
+// forever; it is disarmed instead (a nil channel never selects).
+func (st *loopState) wake(ok bool) {
+	if !ok {
+		st.r.Logger.Warn("lease: wake channel closed; wakes disabled for this loop", "loop", st.l.Name)
+		st.l.Wake = nil
+		return
+	}
+	if !st.holding {
+		st.r.Logger.Debug("lease: wake ignored, not the holder; its next tick covers it", "loop", st.l.Name)
+		return
+	}
+	st.startTick()
+}
+
+// finish waits for an in-flight cycle (ctx is done, so it is winding up)
+// and releases the lease.
+func (st *loopState) finish() {
+	if st.running != nil {
+		<-st.running
+	}
+	st.r.release(st.l.Name)
 }
 
 // release drops the lease at shutdown on a fresh context: the loop's own
