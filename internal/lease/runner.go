@@ -116,13 +116,13 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 	if poll <= 0 {
 		poll = DefaultPoll
 	}
-	st := &loopState{r: r, l: l, ctx: ctx, interval: interval, ttl: ttlPolls * poll}
+	st := &loopState{r: r, l: l, interval: interval, ttl: ttlPolls * poll}
 	st.ticker = time.NewTicker(interval)
 	defer st.ticker.Stop()
 	poller := time.NewTicker(poll)
 	defer poller.Stop()
 
-	st.renew()
+	st.renew(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,13 +131,13 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 		case <-st.running:
 			st.tickDone()
 		case <-poller.C:
-			st.renew()
+			st.renew(ctx)
 		case <-st.ticker.C:
 			if st.holding {
-				st.startTick()
+				st.startTick(ctx)
 			}
 		case _, ok := <-st.l.Wake:
-			st.wake(ok)
+			st.wake(ctx, ok)
 		}
 	}
 }
@@ -146,7 +146,6 @@ func (r *Runner) Run(ctx context.Context, l Loop) {
 type loopState struct {
 	r        *Runner
 	l        Loop
-	ctx      context.Context
 	interval time.Duration
 	ttl      time.Duration
 	ticker   *time.Ticker
@@ -167,9 +166,9 @@ type loopState struct {
 // once and the interval restarts from that tick -- otherwise a poll and an
 // interval fire that coincide (both start from the same instant and 60s
 // divides both) would tick twice in the same moment.
-func (st *loopState) renew() {
+func (st *loopState) renew(ctx context.Context) {
 	now := st.r.Now()
-	ok, err := st.r.Repo.Acquire(st.ctx, st.l.Name, st.r.Holder, now, st.ttl)
+	ok, err := st.r.Repo.Acquire(ctx, st.l.Name, st.r.Holder, now, st.ttl)
 	switch {
 	case errors.Is(err, context.Canceled):
 		// Shutdown: the ctx.Done branch is about to run Release.
@@ -188,12 +187,12 @@ func (st *loopState) renew() {
 	}
 	if st.holding && !was {
 		st.r.Logger.Info("lease: acquired", "loop", st.l.Name, "holder", st.r.Holder)
-		st.startTick()
+		st.startTick(ctx)
 		st.ticker.Reset(st.interval)
 	}
 }
 
-func (st *loopState) startTick() {
+func (st *loopState) startTick(ctx context.Context) {
 	if st.running != nil {
 		return
 	}
@@ -201,7 +200,7 @@ func (st *loopState) startTick() {
 	st.tickStarted = st.r.Now()
 	go func() {
 		defer close(st.running)
-		st.l.Tick(st.ctx)
+		st.l.Tick(ctx)
 	}()
 }
 
@@ -215,7 +214,7 @@ func (st *loopState) tickDone() {
 // wake handles a receive on Loop.Wake. A closed channel is always ready,
 // which would start a new cycle the instant the previous one finished,
 // forever; it is disarmed instead (a nil channel never selects).
-func (st *loopState) wake(ok bool) {
+func (st *loopState) wake(ctx context.Context, ok bool) {
 	if !ok {
 		st.r.Logger.Warn("lease: wake channel closed; wakes disabled for this loop", "loop", st.l.Name)
 		st.l.Wake = nil
@@ -225,7 +224,7 @@ func (st *loopState) wake(ok bool) {
 		st.r.Logger.Debug("lease: wake ignored, not the holder; its next tick covers it", "loop", st.l.Name)
 		return
 	}
-	st.startTick()
+	st.startTick(ctx)
 }
 
 // finish waits for an in-flight cycle (ctx is done, so it is winding up)
