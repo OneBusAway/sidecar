@@ -1638,6 +1638,10 @@ func (failingAlarms) DeleteByID(context.Context, int64) error     { return errSt
 func (failingAlarms) List(context.Context) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
+func (failingAlarms) ListDue(context.Context, time.Time) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) Defer(context.Context, int64, time.Time) error { return errStoreBroken }
 func (failingAlarms) RecordFailure(context.Context, int64) (int64, error) {
 	return 0, errStoreBroken
 }

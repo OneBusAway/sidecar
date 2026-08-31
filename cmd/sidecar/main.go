@@ -35,6 +35,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
 	"github.com/OneBusAway/sidecar/internal/httpapi/adminui"
+	"github.com/OneBusAway/sidecar/internal/lease"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
 	"github.com/OneBusAway/sidecar/internal/push"
@@ -194,12 +195,11 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
 	}
 
-	// time.NewTicker panics on a duration <= 0. --refresh=0 is a natural way
-	// to try to disable the sync loop, and --refresh=nonsense is already
-	// rejected by fs.Parse above; a non-positive value that parses cleanly
-	// (0 or a negative duration) must be rejected the same clean way here,
-	// before the sync loop's goroutine can panic and take the whole process
-	// -- including the HTTP server, already serving by then -- down with it.
+	// --refresh=0 is a natural way to try to disable directory sync, and
+	// --refresh=nonsense is already rejected by fs.Parse above; a
+	// non-positive value that parses cleanly must be rejected here at boot
+	// rather than logged and replaced by the lease runner's fallback
+	// cadence with the process still running.
 	if *refresh <= 0 {
 		return fmt.Errorf("--refresh must be positive, got %s", refresh.String())
 	}
@@ -256,14 +256,34 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The sync loop runs in its own goroutine so boot never blocks on the
-	// first directory fetch beyond the client's own timeout: the server
-	// starts serving from whatever rows already exist while the loop keeps
-	// trying in the background.
-	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
-	go regions.RunSyncLoop(ctx, client, store.Regions(), *refresh, time.Now, logger)
+	// Every background loop runs under a lease (spec §12): with a shared
+	// database, one process at a time owns each loop, ownership passes to
+	// a survivor within a few minutes of the holder dying, and a clean
+	// shutdown releases every lease so a replacement takes over at its
+	// next poll.
+	// Each loop is its own goroutine so boot never blocks on any of them:
+	// the server starts serving from whatever rows already exist while,
+	// for example, the first directory fetch is still in flight.
+	loops := &lease.Runner{Repo: store.Leases(), Holder: leaseHolder(logger), Now: time.Now, Logger: logger}
+	// Registered after store.Close's defer, so it runs first: every loop
+	// must have released its lease before the store it releases through
+	// is closed. stop() is what ends the loops; on a signal the context
+	// is already done, on a serve error it is not.
+	defer func() {
+		stop()
+		loops.Wait()
+	}()
 
-	go pushreg.RunPruneLoop(ctx, store.PushRegs(), pushRegPruneEvery, pushRegMaxAge, time.Now, logger)
+	client := regions.NewClient(*regionsURL, regions.DefaultClientOptions())
+	loops.Go(ctx, lease.Loop{Name: "regions-sync", Interval: *refresh, Tick: func(ctx context.Context) {
+		if syncErr := regions.Sync(ctx, client, store.Regions(), time.Now); syncErr != nil {
+			logger.Error("regions: sync failed", "error", syncErr)
+		}
+	}})
+
+	loops.Go(ctx, lease.Loop{Name: "pushreg-prune", Interval: pushRegPruneEvery, Tick: func(ctx context.Context) {
+		pushreg.Prune(ctx, store.PushRegs(), pushRegMaxAge, time.Now, logger)
+	}})
 
 	// The scheduler always runs, even with no push transport: its Expire
 	// branch and 3-strike reaping are what bound the alarms table (spec
@@ -307,7 +327,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:      time.Now,
 		Logger:   logger,
 	}
-	go dispatcher.RunLoop(ctx, alertPushInterval)
+	loops.Go(ctx, lease.Loop{Name: "alert-pushes", Interval: alertPushInterval, Wake: dispatcher.WakeC(), Tick: dispatcher.RunOnce})
 
 	// The waker, unlike the dispatcher itself, is set only when a transport
 	// exists: it is what registers the admin push routes (design spec
@@ -341,13 +361,13 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:     time.Now,
 		Logger:  logger,
 	}
-	go sched.RunLoop(ctx, alarmCheckInterval)
+	loops.Go(ctx, lease.Loop{Name: "alarms", Interval: alarmCheckInterval, Tick: sched.CheckAll})
 
 	// Live Activities share the alarm cadence (spec §6.3: once per minute)
 	// and the same store-only rule: without a sender, rows still expire and
 	// reap (design spec §2.5).
 	updater := liveactivities.NewUpdater(store.LiveActivities(), store.Regions(), deps.OBA, laSender, time.Now, logger)
-	go updater.RunLoop(ctx, alarmCheckInterval)
+	loops.Go(ctx, lease.Loop{Name: "live-activities", Interval: alarmCheckInterval, Tick: updater.CheckAll})
 
 	// Always runs, mirroring the alarm scheduler above: a region that
 	// resolves no OBA key just yields per-report 'unavailable' snapshots
@@ -360,7 +380,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		Now:     time.Now,
 		Logger:  logger,
 	}
-	go snapSched.RunLoop(ctx, ghostbus.SnapshotInterval)
+	loops.Go(ctx, lease.Loop{Name: "ghostbus-snapshots", Interval: ghostbus.SnapshotInterval, Tick: snapSched.CheckAll})
 
 	server := httpapi.NewServer(httpapi.ServerConfig{
 		Addr: *addr,
@@ -369,6 +389,19 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 
 	logger.Info("sidecar: listening", "addr", *addr)
 	return serve(ctx, server, logger)
+}
+
+// leaseHolder is this process's identity in the leases table: host and pid
+// for an operator reading the row, plus random bytes so a pid reused across
+// a restart (containers start at low pids) can never be mistaken for the
+// previous holder and inherit its leases mid-TTL.
+func leaseHolder(logger *slog.Logger) string {
+	host, err := os.Hostname()
+	if err != nil {
+		logger.Warn("sidecar: hostname unavailable for lease holder id", "err", err)
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s:%d:%s", host, os.Getpid(), uuid.NewString()[:8])
 }
 
 // buildDeps assembles the httpapi.Deps the router needs. It is factored out

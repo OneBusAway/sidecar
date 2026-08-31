@@ -384,7 +384,11 @@ terminally and is pruned.)
 ### 5.3 Firing behavior (normative)
 
 A conforming implementation MUST run a scheduler equivalent to the following loop, at a
-cadence of **once per minute** per pending alarm:
+cadence of **once per minute** per pending alarm. An implementation MAY check an alarm
+less often while the departure is far outside its fire window, provided the back-off is
+bounded so that a departure moving earlier is still caught before the window opens and
+the alarm never misses its window (the reference re-checks halfway to the window, at
+most an hour out, and returns to the per-minute cadence within a few minutes of it):
 
 1. Fetch the alarm's current `arrival-and-departure-for-stop` from the region's OBA
    server (keyed by stop, trip, service date, vehicle, stop sequence).
@@ -813,13 +817,17 @@ conforming implementation runs:
 
 | Loop | Cadence | Behavior |
 |---|---|---|
-| Alarm checker | every minute, all alarms | §5.3: fetch prediction → fire/delete/skip; reap after 3 failed lookups |
+| Alarm checker | every minute, all due alarms | §5.3: fetch prediction → fire/delete/skip; reap after 3 failed lookups; far-off alarms MAY be checked less often |
 | Live Activity updater | every minute, all subscriptions | §6.3: build state → push update/keepalive; end on expiry or 3-failure streak |
 | Alert push fan-out | on alert send | §4: page audience, group by platform/locale/environment, reconcile failures |
 | Push token pruning | daily | delete registrations not seen in 180 days |
 | Feedback consumption | continuous | §6.5: terminal APNs errors delete the subscription/registration |
 
 All loops MUST be safe under at-least-once execution (a crashed worker's work re-runs).
+An implementation that runs more than one process against one database SHOULD also
+coordinate the loops so that one process at a time runs each (the reference uses a
+per-loop expiring lease in the database); at-least-once tolerance covers the residual
+overlap, not routine double execution.
 Alarm delivery is itself at-least-once: the alarm is deleted only *after* the push
 send returns (a send can't join a database transaction), so a crash in the gap between
 send and delete re-fires the alarm on the next cycle — an accepted duplicate, preferred

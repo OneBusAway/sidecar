@@ -278,18 +278,3 @@ func (u *Updater) end(ctx context.Context, la LiveActivity, reason string) {
 			"region_id", la.RegionID, "stop_id", la.StopID, "reason", reason)
 	}
 }
-
-// RunLoop calls CheckAll every interval until ctx is done (§6.3: once per
-// minute). Mirrors alarms.Scheduler.RunLoop.
-func (u *Updater) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			u.CheckAll(ctx)
-		}
-	}
-}

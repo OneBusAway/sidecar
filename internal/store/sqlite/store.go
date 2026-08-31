@@ -28,6 +28,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
+	"github.com/OneBusAway/sidecar/internal/lease"
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -196,6 +197,12 @@ func (s *Store) AlertPushes() alertpush.Repository {
 // GhostBus returns the ghostbus.Repository backed by this store (spec §8).
 func (s *Store) GhostBus() ghostbus.Repository {
 	return &ghostBusRepo{q: s.q}
+}
+
+// Leases returns the lease.Repository the background-loop runner
+// coordinates through (spec section 12).
+func (s *Store) Leases() lease.Repository {
+	return &leaseRepo{q: s.q}
 }
 
 // APIKeys returns the region API key and service principal repository.

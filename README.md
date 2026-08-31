@@ -987,6 +987,29 @@ leaves the box. `/healthz` is logged at debug level only.
 `http://` for a scheme-less value, which is correct here since Render's
 private network is plain HTTP.
 
+**Background loops and leases.** Every background loop (regions directory
+sync, push registration pruning, the alert push dispatcher, the alarm
+checker, the Live Activity updater, ghost bus snapshot enrichment) runs
+under a named lease in the `leases` table: a process ticks a loop only
+while it holds that loop's lease, renews it once a minute, and releases
+every lease on a clean shutdown. A holder that dies loses its leases three
+minutes later and the next process to poll takes them over (logged as
+`lease: acquired` / `lease: lost to another process`). On the single
+SQLite instance this is bookkeeping; it is what makes a second process --
+a rolling deploy, or a future multi-instance deployment on Postgres --
+safe to run against the same database without doubling every OBA lookup
+and push. The alarm checker also does not re-check every alarm every
+minute: after a lookup that says the fire window is still far off, the
+alarm is deferred (`alarms.check_after`) halfway to that window -- three
+hours out becomes 90 minutes, then 45, 22, ... -- and returns to the
+once-a-minute cadence once under four minutes of slack remain (a
+deferral is never shorter than two minutes nor longer than an hour), so
+an alarm set hours ahead
+costs a handful of lookups rather than hundreds. A clean shutdown hands
+each loop to the replacement at its next poll, within a minute. An admin
+"send now" that reaches a process not holding the `alert-pushes` lease
+is covered by the holder's next 15-second tick.
+
 Because the disk pins the service to one instance, deploys restart rather
 than roll. Render's proxy re-originates TCP, so set
 `SIDECAR_TRUSTED_PROXY=render` on the service (or `cloudflare` plus

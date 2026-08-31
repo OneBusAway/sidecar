@@ -3,9 +3,9 @@ package ghostbus
 // The §8 enrichment worker: a DB-as-queue polling loop. The report row is
 // the queue entry -- there is no durable job queue in this deployment, and
 // a request-time goroutine would strand reports 'pending' forever after a
-// crash between the 201 and the capture. Single-instance by construction,
-// like the alarm scheduler: one loop per process, one process per
-// database.
+// crash between the 201 and the capture. Single-instance via the
+// lease.Runner (internal/lease), like every other loop: one process holds
+// the 'ghostbus-snapshots' lease at a time.
 //
 // Enrichment is best-effort and never touches the rider path: every
 // failure direction lands on snapshot_status = 'unavailable' (definitive)
@@ -131,19 +131,4 @@ func (s *SnapshotScheduler) markUnavailable(ctx context.Context, rep Report, why
 		return
 	}
 	s.Logger.Info("ghostbus: snapshot unavailable", "region_id", rep.RegionID, "reason", why)
-}
-
-// RunLoop calls CheckAll every interval until ctx is done. Mirrors
-// alarms.Scheduler.RunLoop's ticker shape.
-func (s *SnapshotScheduler) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.CheckAll(ctx)
-		}
-	}
 }

@@ -24,6 +24,17 @@ DELETE FROM alarms WHERE id = @id;
 -- name: ListAlarms :many
 SELECT * FROM alarms ORDER BY id;
 
+-- ListDueAlarms is deliberately unordered and unindexed: the sweep fans
+-- out concurrently, and fire-then-delete plus the 3-strike reaper keep
+-- the table small, so a scan per minute is cheaper than maintaining an
+-- index on a column every deferral rewrites.
+
+-- name: ListDueAlarms :many
+SELECT * FROM alarms WHERE check_after <= @now;
+
+-- name: DeferAlarm :exec
+UPDATE alarms SET check_after = @check_after WHERE id = @id;
+
 -- RecordAlarmFailure and ResetAlarmFailures use SQLite's own unixepoch(),
 -- not a bound @now, because alarms.Repository's RecordFailure/ResetFailures
 -- methods take no now time.Time parameter (Task 7's interface, fixed) -- the

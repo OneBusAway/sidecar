@@ -20,7 +20,7 @@ INSERT INTO alarms (
   ?7, ?8, ?9, ?10, ?11,
   ?12, ?13, ?14, ?14
 )
-RETURNING id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at
+RETURNING id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after
 `
 
 type CreateAlarmParams struct {
@@ -76,8 +76,23 @@ func (q *Queries) CreateAlarm(ctx context.Context, arg CreateAlarmParams) (Alarm
 		&i.FailureCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CheckAfter,
 	)
 	return i, err
+}
+
+const deferAlarm = `-- name: DeferAlarm :exec
+UPDATE alarms SET check_after = ?1 WHERE id = ?2
+`
+
+type DeferAlarmParams struct {
+	CheckAfter int64
+	ID         int64
+}
+
+func (q *Queries) DeferAlarm(ctx context.Context, arg DeferAlarmParams) error {
+	_, err := q.db.ExecContext(ctx, deferAlarm, arg.CheckAfter, arg.ID)
+	return err
 }
 
 const deleteAlarmByID = `-- name: DeleteAlarmByID :execrows
@@ -110,7 +125,7 @@ func (q *Queries) DeleteAlarmByToken(ctx context.Context, arg DeleteAlarmByToken
 }
 
 const findV1Alarm = `-- name: FindV1Alarm :one
-SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms
 WHERE api_version = 1 AND region_id = ?1 AND user_push_id = ?2
   AND trip_id = ?3 AND stop_id = ?4 AND service_date = ?5
 `
@@ -150,12 +165,13 @@ func (q *Queries) FindV1Alarm(ctx context.Context, arg FindV1AlarmParams) (Alarm
 		&i.FailureCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CheckAfter,
 	)
 	return i, err
 }
 
 const getAlarmInRegion = `-- name: GetAlarmInRegion :one
-SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms WHERE id = ?1 AND region_id = ?2
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE id = ?1 AND region_id = ?2
 `
 
 type GetAlarmInRegionParams struct {
@@ -184,12 +200,13 @@ func (q *Queries) GetAlarmInRegion(ctx context.Context, arg GetAlarmInRegionPara
 		&i.FailureCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CheckAfter,
 	)
 	return i, err
 }
 
 const listAlarms = `-- name: ListAlarms :many
-SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms ORDER BY id
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms ORDER BY id
 `
 
 func (q *Queries) ListAlarms(ctx context.Context) ([]Alarm, error) {
@@ -219,6 +236,7 @@ func (q *Queries) ListAlarms(ctx context.Context) ([]Alarm, error) {
 			&i.FailureCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CheckAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -234,7 +252,7 @@ func (q *Queries) ListAlarms(ctx context.Context) ([]Alarm, error) {
 }
 
 const listAlarmsByRegion = `-- name: ListAlarmsByRegion :many
-SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at FROM alarms WHERE region_id = ?1 ORDER BY id
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE region_id = ?1 ORDER BY id
 `
 
 func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Alarm, error) {
@@ -264,6 +282,58 @@ func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Ala
 			&i.FailureCount,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CheckAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDueAlarms = `-- name: ListDueAlarms :many
+
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE check_after <= ?1
+`
+
+// ListDueAlarms is deliberately unordered and unindexed: the sweep fans
+// out concurrently, and fire-then-delete plus the 3-strike reaper keep
+// the table small, so a scan per minute is cheaper than maintaining an
+// index on a column every deferral rewrites.
+func (q *Queries) ListDueAlarms(ctx context.Context, now int64) ([]Alarm, error) {
+	rows, err := q.db.QueryContext(ctx, listDueAlarms, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Alarm{}
+	for rows.Next() {
+		var i Alarm
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.Token,
+			&i.ApiVersion,
+			&i.UserPushID,
+			&i.OperatingSystem,
+			&i.ApnsSandbox,
+			&i.StopID,
+			&i.TripID,
+			&i.ServiceDate,
+			&i.VehicleID,
+			&i.StopSequence,
+			&i.SecondsBefore,
+			&i.Message,
+			&i.FailureCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CheckAfter,
 		); err != nil {
 			return nil, err
 		}

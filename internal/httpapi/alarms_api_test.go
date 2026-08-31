@@ -626,6 +626,12 @@ func (erroringAlarmsRepo) DeleteByID(context.Context, int64) error {
 func (erroringAlarmsRepo) List(context.Context) ([]alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.List: unused by these tests")
 }
+func (erroringAlarmsRepo) ListDue(context.Context, time.Time) ([]alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.ListDue: unused by these tests")
+}
+func (erroringAlarmsRepo) Defer(context.Context, int64, time.Time) error {
+	panic("erroringAlarmsRepo.Defer: unused by these tests")
+}
 func (erroringAlarmsRepo) RecordFailure(context.Context, int64) (int64, error) {
 	panic("erroringAlarmsRepo.RecordFailure: unused by these tests")
 }

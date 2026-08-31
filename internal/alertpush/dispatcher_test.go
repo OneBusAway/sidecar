@@ -367,36 +367,26 @@ func TestDispatcherNoSenderFailsPush(t *testing.T) {
 	}
 }
 
-func TestDispatcherWakeTriggersRunWithoutTick(t *testing.T) {
-	f := newFixture(t)
-	a := f.alert(t, true, false)
-	f.register(t, "tok", false)
-	p, _ := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
-	sender := &fakeSender{}
-	now := base
-	d := newDispatcher(f, sender, &now)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() { d.RunLoop(ctx, time.Hour); close(done) }()
+// TestDispatcherWakeSignalsWakeC pins the dispatcher's side of the wake
+// contract: Wake makes WakeC readable, never blocks, and coalesces --
+// repeated Wakes before the runner reads yield one signal. That a signal
+// on Loop.Wake produces a RunOnce is lease.Runner's contract, pinned in
+// its own tests.
+func TestDispatcherWakeSignalsWakeC(t *testing.T) {
+	d := &alertpush.Dispatcher{}
 	d.Wake()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		final, _ := f.store.AlertPushes().Get(context.Background(), p.ID)
-		if final.Status == alertpush.StatusSent {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("push not sent after Wake; status %s", final.Status)
-		}
-		time.Sleep(10 * time.Millisecond)
+	d.Wake()
+	d.Wake()
+	select {
+	case <-d.WakeC():
+	default:
+		t.Fatal("WakeC not readable after Wake")
 	}
-	cancel()
-	<-done
-	// Wake before RunLoop and repeated Wakes must never block.
-	d2 := newDispatcher(f, sender, &now)
-	d2.Wake()
-	d2.Wake()
+	select {
+	case <-d.WakeC():
+		t.Fatal("second signal readable; want repeated Wakes coalesced into one")
+	default:
+	}
 }
 
 // failingSender always errors and counts its calls, standing in for a

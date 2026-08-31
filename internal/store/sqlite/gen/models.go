@@ -26,6 +26,7 @@ type Alarm struct {
 	FailureCount    int64
 	CreatedAt       int64
 	UpdatedAt       int64
+	CheckAfter      int64
 }
 
 type Alert struct {
@@ -110,6 +111,12 @@ type GhostBusReport struct {
 	SnapshotAttempts         int64
 	CreatedAt                int64
 	UpdatedAt                int64
+}
+
+type Lease struct {
+	Name      string
+	Holder    string
+	ExpiresAt int64
 }
 
 type LiveActivity struct {

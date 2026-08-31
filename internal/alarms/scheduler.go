@@ -32,9 +32,21 @@ const checkConcurrency = 8
 // forever.
 const maxLookupFailures = 3
 
-// Scheduler runs the §5.3 firing loop: once per cycle it lists every pending
-// alarm, resolves each one's departure via OBA, and either waits, fires, or
-// expires it.
+// MinDeferral is the shortest time a Wait is allowed to push an alarm's
+// next check out by. Below it, deferring saves at most a lookup or two per
+// alarm while widening the window in which an early-running bus goes
+// unnoticed, so the alarm stays on the once-a-minute cadence instead.
+const MinDeferral = 2 * time.Minute
+
+// MaxDeferral caps a single deferral. Halving already bounds how far a
+// departure can move earlier unnoticed to half the slack, but for an alarm
+// set a day ahead that is still twelve hours; an hour keeps the lookups
+// saved (a handful either way) and bounds the blind window.
+const MaxDeferral = time.Hour
+
+// Scheduler runs the §5.3 firing loop: once per cycle it lists every alarm
+// that is due (see ListDue and deferCheck), resolves each one's departure
+// via OBA, and either waits, fires, or expires it.
 type Scheduler struct {
 	Repo    Repository
 	Regions regions.Repository
@@ -47,11 +59,12 @@ type Scheduler struct {
 	Logger *slog.Logger
 }
 
-// CheckAll runs one §5.3 cycle over every pending alarm. Exported so tests
-// (and the loop wiring) drive cycles without a ticker.
+// CheckAll runs one §5.3 cycle over every alarm that is due (a Wait can
+// defer an alarm's next check; see deferCheck). Exported so tests (and the
+// loop wiring) drive cycles without a ticker.
 func (s *Scheduler) CheckAll(ctx context.Context) {
 	started := s.Now()
-	pending, err := s.Repo.List(ctx)
+	pending, err := s.Repo.ListDue(ctx, started)
 	if err != nil {
 		s.Logger.Error("alarms: list pending", "err", err)
 		return
@@ -170,6 +183,7 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 
 	switch Decide(until, alarm.SecondsBefore) {
 	case Wait:
+		s.deferCheck(ctx, alarm, until-alarm.SecondsBefore)
 		return
 	case Expire:
 		// The bus already left; waking the rider is worse than silence.
@@ -206,6 +220,26 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 	}
 }
 
+// deferCheck hides a waiting alarm from the sweep until halfway through its
+// slack -- the seconds left before the fire window opens. This deliberately
+// relaxes spec section 5.3's once-per-minute check for far-off alarms: the
+// saved OBA lookups are the point. Halving, rather than sleeping until the
+// window, keeps an early-running bus catchable: each re-check halves the
+// remaining slack again (3h out becomes 90m, 45m, 22m, ...) until the next
+// halving would be shorter than MinDeferral -- under 2*MinDeferral of
+// slack -- and the alarm is back on the per-minute cadence; MaxDeferral
+// caps the first steps for alarms set many hours ahead. A failed Defer
+// just means one more minute-cadence check.
+func (s *Scheduler) deferCheck(ctx context.Context, alarm Alarm, slackSeconds int64) {
+	wait := min(time.Duration(slackSeconds/2)*time.Second, MaxDeferral)
+	if wait < MinDeferral {
+		return
+	}
+	if err := s.Repo.Defer(ctx, alarm.ID, s.Now().Add(wait)); err != nil {
+		s.Logger.Warn("alarms: defer check", "region_id", alarm.RegionID, "alarm_id", alarm.ID, "err", err)
+	}
+}
+
 func (s *Scheduler) countFailure(ctx context.Context, alarm Alarm) {
 	streak, err := s.Repo.RecordFailure(ctx, alarm.ID)
 	if err != nil {
@@ -218,20 +252,5 @@ func (s *Scheduler) countFailure(ctx context.Context, alarm Alarm) {
 			return
 		}
 		s.Logger.Info("alarms: reaped unresolvable alarm", "region_id", alarm.RegionID, "failures", streak)
-	}
-}
-
-// RunLoop calls CheckAll every interval until ctx is done (§5.3: once per
-// minute). Mirrors regions.RunSyncLoop's ticker shape.
-func (s *Scheduler) RunLoop(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.CheckAll(ctx)
-		}
 	}
 }
