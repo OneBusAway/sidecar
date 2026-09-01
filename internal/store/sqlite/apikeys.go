@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,12 +27,21 @@ type apiKeyRepo struct {
 // is 0 exactly when CreatedByKind is "cli": the region_api_keys CHECK
 // constraint ((created_by_kind = 'cli') = (created_by_id IS NULL))
 // guarantees that, so no separate zero-value branch is needed here.
-func regionKeyFromRow(r gen.RegionApiKey) apikey.RegionKey {
+//
+// It returns an error for a scopes cell that does not decode or names a
+// scope this binary does not know: a key must never quietly read back with
+// fewer scopes than it was minted with (migration design spec section 2.2).
+func regionKeyFromRow(r gen.RegionApiKey) (apikey.RegionKey, error) {
+	scopes, err := decodeScopes(r.Scopes)
+	if err != nil {
+		return apikey.RegionKey{}, fmt.Errorf("sqlite: region api key %d: scopes: %w", r.ID, err)
+	}
 	out := apikey.RegionKey{
 		ID:         r.ID,
 		RegionID:   r.RegionID,
 		Name:       r.Name,
 		KeyHash:    r.KeyHash,
+		Scopes:     scopes,
 		CreatedBy:  apikey.Actor{Kind: r.CreatedByKind, ID: r.CreatedByID.Int64},
 		CreatedAt:  unixToTime(r.CreatedAt),
 		LastUsedAt: nullUnixToTime(r.LastUsedAt),
@@ -40,7 +50,53 @@ func regionKeyFromRow(r gen.RegionApiKey) apikey.RegionKey {
 	if r.RevokedByKind.Valid {
 		out.RevokedBy = &apikey.Actor{Kind: r.RevokedByKind.String, ID: r.RevokedByID.Int64}
 	}
-	return out
+	return out, nil
+}
+
+// encodeScopes renders a scope set for the scopes column: a JSON array of
+// names, [] for an empty or nil set.
+//
+// The set is re-validated through ParseScopes first, even though the
+// interface says callers hand over an already-normalized set: Scopes is a
+// bare slice of a bare string type, so apikey.Scopes{"admin"} compiles
+// anywhere, and writing it would leave a row that decodeScopes can never
+// read back -- taking down not just that key's own lookup but every list
+// that spans it, since regionKeysFromRows stops at the first bad row. The
+// write is refused instead, before the INSERT.
+func encodeScopes(s apikey.Scopes) (string, error) {
+	valid, err := apikey.ParseScopes(s.Strings())
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(valid.Strings())
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// decodeScopes is the inverse of encodeScopes, re-validated through
+// ParseScopes so a hand-edited or downgraded row cannot carry a name the
+// running binary does not enforce.
+func decodeScopes(cell string) (apikey.Scopes, error) {
+	var names []string
+	if err := json.Unmarshal([]byte(cell), &names); err != nil {
+		return nil, err
+	}
+	return apikey.ParseScopes(names)
+}
+
+// regionKeysFromRows maps a list, stopping at the first undecodable row.
+func regionKeysFromRows(rows []gen.RegionApiKey) ([]apikey.RegionKey, error) {
+	out := make([]apikey.RegionKey, len(rows))
+	for i, row := range rows {
+		k, err := regionKeyFromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = k
+	}
+	return out, nil
 }
 
 // principalFromRow maps a generated row onto the domain type.
@@ -65,16 +121,20 @@ func actorToColumns(a apikey.Actor) (kind string, id sql.NullInt64) {
 	return a.Kind, sql.NullInt64{Int64: a.ID, Valid: true}
 }
 
-func (r *apiKeyRepo) CreateRegionKey(ctx context.Context, regionID int64, name, keyHash string, by apikey.Actor, now time.Time) (apikey.RegionKey, error) {
+func (r *apiKeyRepo) CreateRegionKey(ctx context.Context, regionID int64, name, keyHash string, scopes apikey.Scopes, by apikey.Actor, now time.Time) (apikey.RegionKey, error) {
 	kind, id := actorToColumns(by)
+	encoded, err := encodeScopes(scopes)
+	if err != nil {
+		return apikey.RegionKey{}, fmt.Errorf("sqlite: create region api key for region %d: encode scopes: %w", regionID, err)
+	}
 	row, err := r.q.CreateRegionAPIKey(ctx, gen.CreateRegionAPIKeyParams{
-		RegionID: regionID, Name: name, KeyHash: keyHash,
+		RegionID: regionID, Name: name, KeyHash: keyHash, Scopes: encoded,
 		CreatedByKind: kind, CreatedByID: id, CreatedAt: now.Unix(),
 	})
 	if err != nil {
 		return apikey.RegionKey{}, fmt.Errorf("sqlite: create region api key for region %d: %w", regionID, err)
 	}
-	return regionKeyFromRow(row), nil
+	return regionKeyFromRow(row)
 }
 
 func (r *apiKeyRepo) GetRegionKeyByHash(ctx context.Context, keyHash string) (apikey.RegionKey, error) {
@@ -85,7 +145,10 @@ func (r *apiKeyRepo) GetRegionKeyByHash(ctx context.Context, keyHash string) (ap
 		}
 		return apikey.RegionKey{}, fmt.Errorf("sqlite: get region api key by hash: %w", err)
 	}
-	key := regionKeyFromRow(row)
+	key, err := regionKeyFromRow(row)
+	if err != nil {
+		return apikey.RegionKey{}, err
+	}
 	if key.RevokedAt != nil {
 		// The row is still returned: the middleware logs a replay of a
 		// revoked key with the key's id, which ErrNotFound alone could not
@@ -100,11 +163,7 @@ func (r *apiKeyRepo) ListRegionKeys(ctx context.Context, regionID int64) ([]apik
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list region api keys for region %d: %w", regionID, err)
 	}
-	out := make([]apikey.RegionKey, len(rows))
-	for i, row := range rows {
-		out[i] = regionKeyFromRow(row)
-	}
-	return out, nil
+	return regionKeysFromRows(rows)
 }
 
 func (r *apiKeyRepo) ListRegionKeysByCreator(ctx context.Context, by apikey.Actor) ([]apikey.RegionKey, error) {
@@ -124,11 +183,7 @@ func (r *apiKeyRepo) ListRegionKeysByCreator(ctx context.Context, by apikey.Acto
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list region api keys by creator: %w", err)
 	}
-	out := make([]apikey.RegionKey, len(rows))
-	for i, row := range rows {
-		out[i] = regionKeyFromRow(row)
-	}
-	return out, nil
+	return regionKeysFromRows(rows)
 }
 
 // RevokeRegionKey reads the row and writes the revocation in one immediate

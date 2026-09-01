@@ -42,7 +42,7 @@ func DefinitionFromDocument(doc Document, parse InstantParser) (Definition, erro
 		def.EndTime = &t
 	}
 	for _, q := range doc.Questions {
-		def.Questions = append(def.Questions, QuestionDefinition{Required: q.Required, Content: q.Content})
+		def.Questions = append(def.Questions, QuestionDefinition{ID: q.ID, Required: q.Required, Content: q.Content})
 	}
 	if err := def.Validate(); err != nil {
 		return Definition{}, err

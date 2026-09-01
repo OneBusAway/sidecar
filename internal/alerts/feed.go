@@ -105,7 +105,7 @@ func buildAlert(a Alert, dur time.Duration, opts FeedOptions) *gtfs.Alert {
 		Cause:          &cause,
 		Effect:         &effect,
 		SeverityLevel:  &severity,
-		HeaderText:     translated(a.HeaderText, a.Translations, FieldHeader),
+		HeaderText:     a.translated(a.HeaderText, FieldHeader),
 	}
 	if a.DescriptionText != "" {
 		// description_text is optional in the CLI and NOT NULL DEFAULT ''
@@ -114,36 +114,40 @@ func buildAlert(a Alert, dur time.Duration, opts FeedOptions) *gtfs.Alert {
 		// TranslatedString here would make a consumer that branches on
 		// presence see a description that exists but is blank, rather than
 		// correctly seeing none.
-		out.DescriptionText = translated(a.DescriptionText, a.Translations, FieldDescription)
+		out.DescriptionText = a.translated(a.DescriptionText, FieldDescription)
 	}
 	if a.URL != "" {
-		// url is English-only per the feed contract.
-		out.Url = translated(a.URL, nil, FieldHeader)
+		// url is English-only per the feed contract, so it goes out with no
+		// translation candidates at all rather than through translated().
+		out.Url = englishOnly(a.URL)
 	}
 	return out
 }
 
-// translated builds a TranslatedString with English first, followed by any
-// non-stale translations sorted by language tag.
-//
-// Sorting matters: ranging a map would vary the wire output between runs.
-// Staleness is per-field — a translation made from an older English source is
-// withheld so riders fall back to accurate English.
-func translated(english string, all []Translation, field Field) *gtfs.TranslatedString {
+// englishOnly builds a TranslatedString carrying just the English text, for a
+// field the feed never translates.
+func englishOnly(english string) *gtfs.TranslatedString {
 	lang := englishTag
 	text := english
-	out := &gtfs.TranslatedString{
+	return &gtfs.TranslatedString{
 		Translation: []*gtfs.TranslatedString_Translation{{Language: &lang, Text: &text}},
 	}
+}
 
-	if len(all) == 0 {
-		return out
-	}
+// translated builds a TranslatedString with English first, followed by any
+// non-stale translation of field, sorted by language tag. english must be the
+// alert's own text for field.
+//
+// Sorting matters: ranging a map would vary the wire output between runs.
+// Whether a translation is fresh is TranslationStale's judgement and only its
+// judgement: what the feed withholds and what the admin API reports as "stale"
+// are one rule, so they cannot drift apart.
+func (a Alert) translated(english string, field Field) *gtfs.TranslatedString {
+	out := englishOnly(english)
 
-	want := SourceHash(english)
-	fresh := make([]Translation, 0, len(all))
-	for _, t := range all {
-		if t.Field == field && t.SourceSHA256 == want {
+	fresh := make([]Translation, 0, len(a.Translations))
+	for _, t := range a.Translations {
+		if t.Field == field && !a.TranslationStale(t) {
 			fresh = append(fresh, t)
 		}
 	}

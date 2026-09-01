@@ -484,14 +484,17 @@ func adminRoutes(deps Deps) []adminRoute {
 	// middleware.
 	if alertPushRoutesEnabled(deps) {
 		pushesAdmin := &adminPushesHandler{deps: deps}
-		// Sending and cancelling a push are operator-only: they reach every
-		// rider's device, which is the one blast radius a leaked region key
-		// must not have (design spec §4.5). Reading what was sent, and
-		// counting the audience beforehand, stay open to a region key.
+		// Sending and cancelling a push reach every rider's device, which
+		// is the one blast radius an ordinary region key must not have
+		// (design spec §4.5) -- so they take an operator or a region key
+		// minted with the push scope, which OBACloud holds so it can drive
+		// sends from its own wizard (migration design spec §2.2). Reading
+		// what was sent, and counting the audience beforehand, stay open
+		// to any region key.
 		routes = append(routes,
-			adminRoute{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.create, operatorOnly, scopeRegion},
+			adminRoute{"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.create, operatorOrPushKey, scopeRegion},
 			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/pushes", pushesAdmin.list, operatorOrKey, scopeRegion},
-			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOnly, scopeRegion},
+			adminRoute{"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}", pushesAdmin.cancel, operatorOrPushKey, scopeRegion},
 			adminRoute{"GET /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience", pushesAdmin.audience, operatorOrKey, scopeRegion},
 		)
 	}

@@ -27,9 +27,18 @@ type AudienceReport struct {
 }
 
 // Enqueue validates and inserts a queued push for alertID. Errors:
-// alerts.ErrNotFound, ErrNotPublished, ErrInFlight, ErrEmptyAudience. A
-// test alert is always sent to the test audience regardless of audience.
-func (e *Enqueuer) Enqueue(ctx context.Context, alertID int64, audience Audience, now time.Time) (Push, error) {
+// alerts.ErrNotFound, ErrNotPublished, ErrInFlight, ErrEmptyAudience,
+// ErrInvalidMessages. A test alert is always sent to the test audience
+// regardless of audience. A nil messages derives the copy snapshot from the
+// alert (BuildMessages); a non-nil one is the caller's own copy, validated
+// by ValidateMessages and stored verbatim -- OBACloud's copywriter output
+// (migration design spec section 2.3).
+func (e *Enqueuer) Enqueue(ctx context.Context, alertID int64, audience Audience, messages Messages, now time.Time) (Push, error) {
+	if messages != nil {
+		if err := ValidateMessages(messages); err != nil {
+			return Push{}, err
+		}
+	}
 	a, err := e.Alerts.Get(ctx, alertID)
 	if err != nil {
 		return Push{}, err
@@ -57,8 +66,11 @@ func (e *Enqueuer) Enqueue(ctx context.Context, alertID int64, audience Audience
 	if count.Total == 0 {
 		return Push{}, ErrEmptyAudience
 	}
+	if messages == nil {
+		messages = BuildMessages(a)
+	}
 	return e.Repo.Create(ctx, NewPush{
-		AlertID: a.ID, RegionID: a.RegionID, Audience: audience, Messages: BuildMessages(a),
+		AlertID: a.ID, RegionID: a.RegionID, Audience: audience, Messages: messages,
 	}, now)
 }
 

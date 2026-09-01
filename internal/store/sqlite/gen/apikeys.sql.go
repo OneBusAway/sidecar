@@ -13,18 +13,19 @@ import (
 const createRegionAPIKey = `-- name: CreateRegionAPIKey :one
 
 INSERT INTO region_api_keys (
-  region_id, name, key_hash, created_by_kind, created_by_id, created_at
+  region_id, name, key_hash, scopes, created_by_kind, created_by_id, created_at
 ) VALUES (
-  ?1, ?2, ?3,
-  ?4, ?5, ?6
+  ?1, ?2, ?3, ?4,
+  ?5, ?6, ?7
 )
-RETURNING id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id
+RETURNING id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes
 `
 
 type CreateRegionAPIKeyParams struct {
 	RegionID      int64
 	Name          string
 	KeyHash       string
+	Scopes        string
 	CreatedByKind string
 	CreatedByID   sql.NullInt64
 	CreatedAt     int64
@@ -39,6 +40,7 @@ func (q *Queries) CreateRegionAPIKey(ctx context.Context, arg CreateRegionAPIKey
 		arg.RegionID,
 		arg.Name,
 		arg.KeyHash,
+		arg.Scopes,
 		arg.CreatedByKind,
 		arg.CreatedByID,
 		arg.CreatedAt,
@@ -56,6 +58,7 @@ func (q *Queries) CreateRegionAPIKey(ctx context.Context, arg CreateRegionAPIKey
 		&i.RevokedAt,
 		&i.RevokedByKind,
 		&i.RevokedByID,
+		&i.Scopes,
 	)
 	return i, err
 }
@@ -87,7 +90,7 @@ func (q *Queries) CreateServicePrincipal(ctx context.Context, arg CreateServiceP
 }
 
 const getRegionAPIKey = `-- name: GetRegionAPIKey :one
-SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id FROM region_api_keys
+SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes FROM region_api_keys
 WHERE id = ?1 AND region_id = ?2
 `
 
@@ -111,12 +114,13 @@ func (q *Queries) GetRegionAPIKey(ctx context.Context, arg GetRegionAPIKeyParams
 		&i.RevokedAt,
 		&i.RevokedByKind,
 		&i.RevokedByID,
+		&i.Scopes,
 	)
 	return i, err
 }
 
 const getRegionAPIKeyByHash = `-- name: GetRegionAPIKeyByHash :one
-SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id FROM region_api_keys WHERE key_hash = ?1
+SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes FROM region_api_keys WHERE key_hash = ?1
 `
 
 func (q *Queries) GetRegionAPIKeyByHash(ctx context.Context, keyHash string) (RegionApiKey, error) {
@@ -134,6 +138,7 @@ func (q *Queries) GetRegionAPIKeyByHash(ctx context.Context, keyHash string) (Re
 		&i.RevokedAt,
 		&i.RevokedByKind,
 		&i.RevokedByID,
+		&i.Scopes,
 	)
 	return i, err
 }
@@ -175,7 +180,7 @@ func (q *Queries) GetServicePrincipalByHash(ctx context.Context, keyHash string)
 }
 
 const listRegionAPIKeys = `-- name: ListRegionAPIKeys :many
-SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id FROM region_api_keys
+SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes FROM region_api_keys
 WHERE region_id = ?1
 ORDER BY id DESC
 `
@@ -201,6 +206,7 @@ func (q *Queries) ListRegionAPIKeys(ctx context.Context, regionID int64) ([]Regi
 			&i.RevokedAt,
 			&i.RevokedByKind,
 			&i.RevokedByID,
+			&i.Scopes,
 		); err != nil {
 			return nil, err
 		}
@@ -216,7 +222,7 @@ func (q *Queries) ListRegionAPIKeys(ctx context.Context, regionID int64) ([]Regi
 }
 
 const listRegionAPIKeysByCLI = `-- name: ListRegionAPIKeysByCLI :many
-SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id FROM region_api_keys
+SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes FROM region_api_keys
 WHERE created_by_kind = 'cli' AND created_by_id IS NULL
 ORDER BY id DESC
 `
@@ -242,6 +248,7 @@ func (q *Queries) ListRegionAPIKeysByCLI(ctx context.Context) ([]RegionApiKey, e
 			&i.RevokedAt,
 			&i.RevokedByKind,
 			&i.RevokedByID,
+			&i.Scopes,
 		); err != nil {
 			return nil, err
 		}
@@ -257,7 +264,7 @@ func (q *Queries) ListRegionAPIKeysByCLI(ctx context.Context) ([]RegionApiKey, e
 }
 
 const listRegionAPIKeysByCreator = `-- name: ListRegionAPIKeysByCreator :many
-SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id FROM region_api_keys
+SELECT id, region_id, name, key_hash, created_by_kind, created_by_id, created_at, last_used_at, revoked_at, revoked_by_kind, revoked_by_id, scopes FROM region_api_keys
 WHERE created_by_kind = ?1
   AND created_by_id = ?2
 ORDER BY id DESC
@@ -293,6 +300,7 @@ func (q *Queries) ListRegionAPIKeysByCreator(ctx context.Context, arg ListRegion
 			&i.RevokedAt,
 			&i.RevokedByKind,
 			&i.RevokedByID,
+			&i.Scopes,
 		); err != nil {
 			return nil, err
 		}

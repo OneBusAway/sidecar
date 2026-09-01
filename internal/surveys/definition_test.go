@@ -211,3 +211,23 @@ func TestNormalizeList(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestQuestionsEqual_IDs(t *testing.T) {
+	t.Parallel()
+	content := surveys.Content{Type: surveys.TypeText, LabelText: "Q"}
+	stored := []surveys.Question{{ID: 10, Position: 1, Content: content}, {ID: 11, Position: 2, Content: content}}
+	id := func(n int64) *int64 { return &n }
+
+	if !surveys.QuestionsEqual(stored, []surveys.QuestionDefinition{{Content: content}, {Content: content}}) {
+		t.Error("no ids: same content must be equal")
+	}
+	if !surveys.QuestionsEqual(stored, []surveys.QuestionDefinition{{ID: id(10), Content: content}, {ID: id(11), Content: content}}) {
+		t.Error("matching ids in order must be equal")
+	}
+	if surveys.QuestionsEqual(stored, []surveys.QuestionDefinition{{ID: id(11), Content: content}, {ID: id(10), Content: content}}) {
+		t.Error("reordered ids are a change even with identical content")
+	}
+	if surveys.QuestionsEqual(stored, []surveys.QuestionDefinition{{ID: id(10), Content: content}, {Content: content}}) {
+		t.Error("an id-less question in place of a stored one is a change")
+	}
+}

@@ -16,17 +16,24 @@ import (
 	"github.com/OneBusAway/sidecar/internal/ratelimit"
 )
 
-// mintRegionKey creates a live region key in the fixture's store and returns
-// its raw form. The raw key exists only here and in the Authorization header
-// the test sends -- exactly as in production.
+// mintRegionKey creates a live, unscoped region key in the fixture's store
+// and returns its raw form. The raw key exists only here and in the
+// Authorization header the test sends -- exactly as in production.
 func (f *adminFixture) mintRegionKey(t *testing.T, regionID int64) string {
+	t.Helper()
+	return f.mintRegionKeyWithScopes(t, regionID, nil)
+}
+
+// mintRegionKeyWithScopes is mintRegionKey with a scope set, for the push
+// routes' allow-list tests.
+func (f *adminFixture) mintRegionKeyWithScopes(t *testing.T, regionID int64, scopes apikey.Scopes) string {
 	t.Helper()
 	raw, hash, err := apikey.NewRegionKey(regionID)
 	if err != nil {
 		t.Fatalf("NewRegionKey: %v", err)
 	}
 	_, err = f.store.APIKeys().CreateRegionKey(context.Background(), regionID, "test",
-		hash, apikey.Actor{Kind: apikey.ActorCLI}, testNow)
+		hash, scopes, apikey.Actor{Kind: apikey.ActorCLI}, testNow)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -334,7 +341,7 @@ func TestBearer_PrefixRowMismatchIs401(t *testing.T) {
 		t.Fatalf("NewRegionKey: %v", err)
 	}
 	if _, err := f.store.APIKeys().CreateRegionKey(context.Background(), regionTampa, "mismatched",
-		hash, apikey.Actor{Kind: apikey.ActorCLI}, testNow); err != nil {
+		hash, nil, apikey.Actor{Kind: apikey.ActorCLI}, testNow); err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 
@@ -520,6 +527,8 @@ func TestPrincipalSets(t *testing.T) {
 		{"operatorOrService admits an operator", operatorOrService, principalOperator, true},
 		{"operatorOrService admits a service principal", operatorOrService, principalService, true},
 		{"operatorOrService refuses a region key", operatorOrService, principalRegionKey, false},
+		{"operatorOrPushKey admits a push marker", operatorOrPushKey, principalPushKey, true},
+		{"operatorOrPushKey refuses a plain region key", operatorOrPushKey, principalRegionKey, false},
 		// The zero value is not a kind: a principal that never went through
 		// requirePrincipal must not satisfy any allow-list.
 		{"operatorOnly refuses the zero kind", operatorOnly, principalKind(0), false},

@@ -34,6 +34,12 @@ companion CLI that writes the same database directly.
 `0` is a real region (Tampa Bay), not "unset". Pass `?test=1` (any non-blank value) to
 include alerts authored with `--test`; omit it to see what riders see.
 
+A translation (`alert translate`) is served only while it still describes the English it
+was made from. Every language in an alert's admin JSON carries `"stale": true|false`: a
+language is reported stale when any of its translated fields no longer matches the
+current English text, while the feed withholds each stale field individually -- so a
+review UI can show what riders will not see and offer retranslation.
+
 ### Authoring alerts with `sidecar-admin`
 
 `sidecar-admin` is the CLI for creating and publishing alerts. It never talks to the
@@ -101,7 +107,7 @@ sidecar-admin survey  create --study N --file <path|->
                        delete ID
                        responses ID        # long-format CSV, one row per answer
 sidecar-admin ghostbus export --region N [--since RFC3339]   # CSV, one row per report
-sidecar-admin key     create --region N --name S              # prints the raw key once
+sidecar-admin key     create --region N --name S [--scope push]  # prints the raw key once
                        list   --region N | --minted-by-principal N
                        revoke --region N --id N
 sidecar-admin principal create --name S                        # prints the raw key once
@@ -111,6 +117,8 @@ sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
                        delete --username NAME [--force]
+sidecar-admin import  --file <path|-> [--dry-run]   # an OBACloud region export
+sidecar-admin sequence show | bump --min N          # id headroom before a migration
 sidecar-admin migrate  up | status
 ```
 
@@ -148,7 +156,7 @@ against the languages in the snapshot; anything that does not match gets English
 #### Admin API
 
 ```text
-POST   /api/admin/v1/regions/{regionId}/alerts/{id}/pushes            {"audience":"all"|"test"}
+POST   /api/admin/v1/regions/{regionId}/alerts/{id}/pushes            {"audience":"all"|"test","messages":{...}?}
 GET    /api/admin/v1/regions/{regionId}/alerts/{id}/pushes
 DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}
 GET    /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience
@@ -156,19 +164,26 @@ GET    /api/admin/v1/regions/{regionId}/alerts/{id}/push_audience
 
 Authenticated like the rest of `/api/admin/v1` -- a session cookie or a bearer
 credential (see *Region API keys and service principals* below) -- except that
-`POST` and `DELETE` are **operator-only**: a leaked region key must not be able
-to deliver attacker-controlled text as a push to every device in the region, so
-sending and canceling stay off limits to it even though it can read everything
-else about the region's alerts. `POST` answers `202` with the queued push and
-wakes the dispatcher immediately; `GET …/pushes` answers `200` with that
-alert's pushes, newest first; `DELETE` cancels one and answers `204`; `GET
-…/push_audience` answers `200` with the `all` and `test` device counts (split
-by platform) and a `forced_test` flag for a test alert. Errors are
-`{"error": "..."}`: `400` for a malformed body or an audience that is neither
-`all` nor `test`, `404` for an unknown alert, an unknown push, or a `pushId`
-belonging to a different alert, and `409` for each precondition (unpublished
-alert, a push already in flight, empty audience) and for canceling a push that
-has already finished.
+`POST` and `DELETE` take an operator **or a region key minted with the `push`
+scope**: an ordinary region key must not be able to deliver attacker-controlled
+text as a push to every device in the region, so sending and canceling answer
+it with `403` even though it can read everything else about the region's
+alerts, while OBACloud's key for a migrated region carries the scope on purpose.
+`POST` answers `202` with the queued push and wakes the dispatcher immediately;
+`GET …/pushes` answers `200` with that alert's pushes, newest first; `DELETE`
+cancels one and answers `204`; `GET …/push_audience` answers `200` with the
+`all` and `test` device counts (split by platform) and a `forced_test` flag for
+a test alert. `POST` may carry `messages` in the same per-language
+`{"en": {"title","body"}, …}` shape the response emits; when present it is
+stored as the push's copy snapshot verbatim instead of being derived from the
+alert, and it must include `en`, use trimmed lowercase language tags, have a
+non-blank body in every language, and respect the same 48-rune title and
+120-rune body caps the derivation applies. Errors are `{"error": "..."}`:
+`400` for a malformed body, an audience that is neither `all` nor `test`, or
+`messages` that break one of those rules, `404` for an unknown alert, an
+unknown push, or a `pushId` belonging to a different alert, and `409` for each
+precondition (unpublished alert, a push already in flight, empty audience) and
+for canceling a push that has already finished.
 
 **These four routes are registered only when `SIDECAR_GORUSH_URL` is set.**
 Without a transport the admin UI reports that push notifications are not
@@ -190,7 +205,7 @@ GET    /api/admin/v1/regions/{regionId}/surveys/{id}/responses      survey respo
 GET    /api/admin/v1/regions/{regionId}/ghost_bus_reports           ghost bus reports, JSON (also .../ghost_bus_reports.csv, .../{publicId})
 GET    /api/admin/v1/regions/{regionId}/alarms                      alarms, read-only: also GET .../{id}
 GET    /api/admin/v1/regions/{regionId}/push_registrations/count    push registration audience counts, aggregate only
-GET    /api/admin/v1/regions/{regionId}/api_keys                    region API keys: list (also POST to mint, DELETE .../{keyId} to revoke)
+GET    /api/admin/v1/regions/{regionId}/api_keys                    region API keys: list with scopes (also POST {name, scopes?} to mint, DELETE .../{keyId} to revoke)
 ```
 
 Studies and surveys are the CRUD family behind `sidecar-admin study`/`survey`
@@ -329,6 +344,15 @@ targeting list means "everywhere".
 so `survey show 3 | sidecar-admin --db ./sidecar.db survey edit 3 --file -` is
 a round trip. Once a survey has responses its questions are frozen — edit only
 the name, dates, flags, and targeting — and it cannot be deleted.
+
+An edit — `survey edit`, or `PUT /api/admin/v1/regions/{regionId}/surveys/{id}`
+— honours the `id` on each question in the document, since the apps persist
+question ids: a question that names one keeps it, one without gets a fresh id, a
+stored question the document omits is deleted, and positions are renumbered from
+document order. An id that belongs to another survey, or is named twice, is
+refused (`422`) before any row is touched, as is any question id on a create — so
+`survey show 3 | survey create --file -` errors on the ids it carries, while
+`survey show 3 | survey edit 3 --file -` round-trips.
 
 ```text
 sidecar-admin study   create    --region N --name S [--description S]
@@ -623,20 +647,25 @@ cookies are ignored entirely once an `Authorization` header is present):
   vehicle search, alarms) to a key the holder controls. Two things stay off
   limits regardless of region: another region 404s, and the `…/api_keys`
   family is refused (`403`), since a region key is not one of the principal
-  kinds it accepts. And one thing stays off limits even *inside* its own
-  region: sending or canceling a push notification is operator-only and
-  answers a region key with `403` too -- a leaked key must not be able to
-  page every device in the region. A leaked region key therefore reaches
-  one region's tenant data and, through its OBA key, that region's own OBA
-  traffic -- but it cannot reach another tenant, send a push, or mint or
-  revoke anything. **The remedy for a leaked region key is to revoke it**
-  (below) and mint a replacement.
+  kinds it accepts. Sending or canceling a push notification is gated on a
+  **scope**: a key minted without one answers `403` there too -- a leaked
+  ordinary key must not be able to page every device in the region -- while
+  a key minted with `"scopes": ["push"]` (what OBACloud holds for each
+  migrated region) can send and cancel pushes for its own region. A leaked
+  region key therefore reaches one region's tenant data and, through its OBA
+  key, that region's own OBA traffic; a leaked **push-scoped** key can also
+  deliver notifications to every device in that region. It cannot reach
+  another tenant or mint or revoke anything. **The remedy for a leaked
+  region key, scoped or not, is to revoke it** (below) and mint a
+  replacement.
 - **A service principal** (`obasp_<43 base64url chars>`) is deployment-wide
   but single-purpose: it can only mint, list, and revoke region API keys,
   through the `…/api_keys` family, and nothing else -- every other admin
   route answers it with `403`. That is a deliberate trade. A leaked service
-  principal can mint itself a live key for any published region (and then
-  use it, with the region-key exposure above), revoke every region key in
+  principal can mint itself a live key for any published region -- including
+  a push-scoped one, so it can deliver notifications to every device in every
+  region -- and then use it, with the region-key exposure above; revoke every
+  region key in
   the deployment (a deployment-wide denial of service for whatever
   integration depends on them), and enumerate which region ids exist along
   with every key's metadata (names, creator ids, timestamps). It **cannot
@@ -667,8 +696,8 @@ mints region keys the same way OBACloud will, over HTTP:
 curl -s -X POST https://sidecar.example.org/api/admin/v1/regions/1/api_keys \
   -H "Authorization: Bearer obasp_972so11ncVZAgGSH…" \
   -H "Content-Type: application/json" \
-  -d '{"name":"obacloud rails1"}'
-# {"id":1,"name":"obacloud rails1","key":"obask_1_L_RvltB_P6G8UwZ9…", …}
+  -d '{"name":"obacloud rails1","scopes":["push"]}'
+# {"id":1,"name":"obacloud rails1","scopes":["push"],"key":"obask_1_L_RvltB_P6G8UwZ9…", …}
 ```
 
 An operator can also mint a region key directly, without a principal, for
@@ -677,11 +706,24 @@ manual testing or a deployment with no external consumer yet:
 ```sh
 ./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name "manual test key"
 # obask_1_WlDL9LeQxtC1KYww…
-# id: 2  name: manual test key
+# id: 2  name: manual test key  scopes: —
 
 ./bin/sidecar-admin --db ./sidecar.db key list --region 1
-# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —  —
-# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —
+# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —  —  —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —  push
+```
+
+A key carries **scopes**: named capabilities on top of the ordinary
+region-scoped authoring surface. `--scope push` is repeatable and is the only
+one defined; `key list` renders a key's scopes in its last column, `—` for a
+key with none. Existing keys have no scopes and so keep exactly the reach
+they had. An unknown scope name is refused before anything is written, and
+the admin API's `POST …/api_keys` answers `400` for the same reason.
+
+```sh
+./bin/sidecar-admin --db ./sidecar.db key create --region 1 --name rails --scope push
+# obask_1_9nQ2sVb7pKdT0mXe…
+# id: 3  name: rails  scopes: push
 ```
 
 A key is never scoped to more than one region, and nothing limits a region
@@ -705,15 +747,15 @@ also exactly the set `principal revoke` clears out by default:
 
 ```sh
 ./bin/sidecar-admin --db ./sidecar.db key list --minted-by-principal 1
-# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  —  —  push
 
 ./bin/sidecar-admin --db ./sidecar.db principal revoke --id 1
 # revoked keys: 1
 # revoked principal 1
 
 ./bin/sidecar-admin --db ./sidecar.db key list --region 1
-# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —              —
-# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  2026-08-28T00:39:21Z  cli
+# 2  manual test key    cli            2026-08-28T00:39:13Z  —  —              —     —
+# 1  obacloud rails1    principal:1    2026-08-28T00:39:05Z  —  2026-08-28T00:39:21Z  cli   push
 ```
 
 The manually-minted key (`2`) is untouched -- only the key the principal
@@ -728,14 +770,20 @@ are known to be fine.
 OBACloud (the Rails app behind onebusawaycloud.com) is the intended consumer
 of the bearer credentials above: it re-plumbs its own server-rendered admin
 pages to read and write the sidecar instead of its own Postgres tables,
-region by region. The Rails side holds **one service principal per sidecar
-deployment it talks to** and mints **one region API key per region** on
-demand the first time that region needs one, storing the key alongside the
-region row. That client, its provisioning triggers, its rotation and
-bulk-reprovisioning rake tasks, and its error mapping from sidecar status
-codes to Rails-side behavior are a contract this repository documents but
-does not implement -- see [the design spec, §7](docs/superpowers/specs/2026-08-26-region-api-keys-and-admin-api-design.md#7-obacloud-contract-documented-built-later)
-for the full contract the Rails integration is expected to satisfy.
+region by region, then flips each region's `sidecar_base_url` to a Go host.
+The Rails side holds **one service principal per sidecar deployment it talks
+to** and mints **one push-scoped region API key per migrated region** on
+demand, storing the key alongside the region row; it keeps its own push
+wizard, copywriter, and scheduling, and sends through `POST …/pushes` with
+its own `messages`. Un-migrated regions keep the Rails-hosted default
+`sidecar_base_url` and need no principal. That client, its provisioning
+triggers, its rotation and bulk-reprovisioning rake tasks, the cutover
+task, and its error mapping from sidecar status codes to Rails-side behavior
+are a contract this repository documents but does not implement -- see
+[the design spec, §7](docs/superpowers/specs/2026-08-26-region-api-keys-and-admin-api-design.md#7-obacloud-contract-documented-built-later)
+for the sidecar-side contract and OBACloud's own
+`docs/superpowers/specs/2026-08-28-sidecar-migration-design.md` for the
+cutover plan.
 
 ### Deployment
 
@@ -819,7 +867,15 @@ a hand-maintained directory file whose regions all carry the staging host
 as `sidecarBaseUrl` -- `deploy/regions-staging.example.json` is a starting
 point (Davis plus a synthetic region) to upload to the regions bucket --
 so TestFlight and debug builds that set the app's custom regions URL land
-on staging and production devices never do. Proxy the staging custom
+on staging and production devices never do. Production runs the same
+Blueprint (`render.yaml`) behind the custom domain
+`sidecar2.onebusaway.org`, Cloudflare-proxied, with
+`SIDECAR_TRUSTED_PROXY=cloudflare` and the Transform Rule secret so per-IP
+throttles key on `CF-Connecting-IP`, and with `SIDECAR_REGIONS_URL` pointed
+at the directory's **`regions-v3.json`** so experimental regions are
+addressable. `sidecar.onebusaway.org` keeps resolving to OBACloud's Rails
+app until the last region has migrated and drained; only then does it
+become a second custom domain here. Proxy the staging custom
 domain through Cloudflare like production's so the trusted-proxy path and
 the feed cache rule are exercised there too. Rehearse the export/import
 and a Litestream restore against staging before the first region flips.
@@ -831,24 +887,48 @@ rider state from an export document (`internal/export`, format
 `sidecar-export/1`): alerts with their translations, studies, surveys and
 questions, survey responses, push registrations, and ghost bus reports
 with their enrichment snapshots. OBACloud produces the document with
-`bin/rails "sidecar:export[<region id>,<path>]"`. Ids are preserved -- the
-feed's `Alert_<id>` entity ids and the survey and question ids the apps
-persist locally must not change under riders -- and every row is checked
-with the domain packages' own rules (enum names, question content, answer
-shape, time windows; not the HTTP layer's length caps) before anything is
-written, so a bad row rejects the whole document. Rows that already exist
-under this region (same id, public id, or region+token) are skipped and
-counted, which makes the migration two runs of the same command: a bulk
-import the day before the region's `sidecar_base_url` flips, and a delta
-from a fresh export right after -- translations added to an already
-migrated alert land on the delta run. An id that already belongs to
-another region's content (alerts, studies, surveys, and questions share
-one id sequence) is an error naming the row, never a silent skip.
-`--dry-run` runs the same checks, including that the region exists,
-without writing. The region
-itself must already be present (`sidecar-admin region sync`); alarms and
-Live Activities are deliberately not part of the document -- OBACloud
-keeps firing the ones it owns until they expire.
+`bin/rails "sidecar:export[<region id>,<path>]"`. `--file -` reads it from
+stdin, so the cutover pipes it straight over `render ssh` with no file
+transfer step:
+
+```sh
+cat export.json | render ssh sidecar -- sidecar-admin --db /data/sidecar.db import --file -
+```
+
+Ids are preserved -- the feed's `Alert_<id>` entity ids and the survey and
+question ids the apps persist locally must not change under riders -- and
+every row is checked with the domain packages' own rules (enum names,
+question content, answer shape, time windows; not the HTTP layer's length
+caps) before anything is written, so a bad row rejects the whole document.
+Rows that already exist under this region (same id, public id, or
+region+token) are skipped and counted, which makes the migration two runs
+of the same command: a bulk import the day before the region's
+`sidecar_base_url` flips, and a delta from a fresh export right after --
+translations added to an already migrated alert land on the delta run. An
+id that already belongs to another region's content (alerts, studies,
+surveys, and questions share one id sequence) is an error naming the row,
+never a silent skip. `--dry-run` runs the same checks, including that the
+region exists, without writing. The region itself must already be present
+(`sidecar-admin region sync`); alarms and Live Activities are deliberately
+not part of the document -- OBACloud keeps firing the ones it owns until
+they expire.
+
+**Id headroom.** Once the first region has migrated, this database mints
+alert, study, survey, and question ids from that region's maximum upward
+while OBACloud keeps minting for un-migrated regions from its own
+sequences, so a later region's export can collide with content authored
+here in between. Before the first cutover, run
+
+```sh
+sidecar-admin --db /data/sidecar.db sequence bump --min 1000000
+sidecar-admin --db /data/sidecar.db sequence show
+```
+
+once per deployment: `bump` raises the `alerts`, `studies`, `surveys`, and
+`survey_questions` sequences to at least the floor (re-running with the same
+or a lower floor changes nothing), and `show` prints each current value so
+the cutover runbook can verify the headroom is still there. 1,000,000 is
+comfortably above any OBACloud id and its growth during the migration.
 
 #### Backups
 
@@ -1017,6 +1097,163 @@ than roll. Render's proxy re-originates TCP, so set
 when the custom domain is proxied through Cloudflare, which is then the
 hop that sets the header); without it every per-IP throttle shares one
 bucket.
+
+#### Cutover runbook
+
+The once-per-deployment sequence that stands a host up and hands OBACloud
+the credentials it needs, before any region's `sidecar_base_url` flips.
+Steps 2-5 are the same on staging; run them there first. Every command
+below was run against the binaries in this tree, and the commented output
+is what they actually print.
+
+**1. Deploy.** Apply `render.yaml` as a Blueprint in the production
+workspace from the Dashboard (New -> Blueprint; the CLI has no `blueprint`
+command as of v2.5.0), which creates `sidecar`, `gorush`, and the
+`sidecar-data` disk at `/data`. Fill the `sync: false` secrets and the two
+hand-derived gorush values exactly as *Render*'s first-deploy list above
+describes; production additionally takes the Stripe keys,
+`SIDECAR_TRUSTED_PROXY_SECRET`, `SIDECAR_SENTRY_DSN`, and the Litestream
+`SIDECAR_BACKUP_*` values (*Backups*). Then add `SIDECAR_REGIONS_URL` =
+`https://regions.onebusaway.org/regions-v3.json` by hand: `render.yaml`
+does not declare it (only `render.staging.yaml` does), and although that
+URL is also the binary's compiled-in default, setting it explicitly means
+a later change to that default cannot move production. Add the custom
+domain `sidecar2.onebusaway.org` to the `sidecar` service; in Cloudflare,
+create the proxied CNAME to the `*.onrender.com` host, the Transform Rule
+that sets `X-Sidecar-Proxy-Secret` to the value of
+`SIDECAR_TRUSTED_PROXY_SECRET` (*Deployment* above --
+`SIDECAR_TRUSTED_PROXY=cloudflare` is already in the Blueprint), and the
+cache rule for `/api/v1/regions/*/alerts*` (*Feed caching*). Then:
+
+```sh
+deploy/smoke.sh https://sidecar2.onebusaway.org
+# ok   /healthz -> 200
+# ok   /admin -> 200
+# ok   /api/v1/regions/1/alerts.pbtext -> 200
+```
+
+The feed line reports `skip … -> 404 (no regions synced yet)` until the
+directory has been pulled. The server pulls it once at startup, in the
+background, so a smoke run in the first seconds after a deploy can lose
+that race; re-run the script rather than reading the skip as a failure.
+Repeat the whole step for staging with `render.staging.yaml`, its own
+custom domain (proxied through Cloudflare too, so the trusted-proxy path
+and the cache rule are exercised there), and `SIDECAR_REGIONS_URL` set to
+the hand-maintained staging directory (*Staging*).
+
+**2. Bootstrap the database on each host.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db region sync
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db region list
+# 0	Tampa Bay	active=true	agency=	tz=UTC	centroid=27.9553,-82.5231	oba-key=none (may inherit server default)
+# 1	Puget Sound	active=true	agency=	tz=UTC	centroid=47.7528,-122.4924	oba-key=none (may inherit server default)
+```
+
+`region sync` prints nothing when it succeeds -- `region list` is how you
+confirm the directory landed, and it is also the fastest way to see what
+the server's own startup sync already did. `--db` is spelled out on every
+line rather than leaning on the image's `SIDECAR_DB`, and on staging
+`region sync` needs `--regions-url <staging directory>` too: the CLI reads
+`SIDECAR_REGIONS_URL` from its own environment, and a non-interactive
+`ssh host command` is not guaranteed to inherit the service's, so a bare
+`region sync` there can quietly pull the production directory over the
+staging one. `--regions-url` is a flag on `sidecar-admin` itself, not on
+`region sync`, so it has to come before the subcommand:
+
+```sh
+render ssh sidecar-staging -- sidecar-admin --db /data/sidecar.db --regions-url https://<staging directory>/regions-v3.json region sync
+```
+
+The first admin user needs a real terminal, because the password is
+prompted for twice and deliberately cannot be passed as an argument:
+
+```sh
+render ssh sidecar                                  # interactive shell
+sidecar-admin --db /data/sidecar.db user create --username <operator>
+# Password:
+# Confirm password:
+# created user <operator>
+```
+
+The one-liner form (`render ssh sidecar -- sidecar-admin … user create
+…`) fails with `stdin is not a terminal; use --password-stdin`.
+`--password-stdin` does work, but it puts the password through the local
+shell, which is what the prompt exists to avoid.
+
+**3. Mint the service principal, one per deployment.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db principal create --name obacloud-production
+# obasp_9klpGIRDdZPsCDXG59FjTN9tC6dk…
+# id: 1	name: obacloud-production
+
+render ssh sidecar-staging -- sidecar-admin --db /data/sidecar.db principal create --name obacloud-staging
+```
+
+The first line is the raw credential, stored only as a hash and never
+recoverable from the database; a lost one is re-minted, not looked up.
+Paste it into OBACloud's credentials under
+`sidecar.principals["https://sidecar2.onebusaway.org"]`, and staging's
+under its own base URL.
+
+**4. Id-sequence headroom, before the first cutover.**
+
+```sh
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db sequence bump --min 1000000
+# alerts: 0 -> 1000000
+# studies: 0 -> 1000000
+# surveys: 0 -> 1000000
+# survey_questions: 0 -> 1000000
+render ssh sidecar -- sidecar-admin --db /data/sidecar.db sequence show
+# alerts	1000000
+# studies	1000000
+# surveys	1000000
+# survey_questions	1000000
+```
+
+Record the `show` output in the cutover ticket; the cutover re-checks it.
+*Migrating a region from OBACloud* above explains why the floor is there
+and why re-running `bump` is safe.
+
+**5. Prove the OBACloud contract end-to-end.** With the principal from
+step 3 in `$P`, mint and revoke a push-scoped key exactly the way OBACloud
+will:
+
+```sh
+curl -s -w '\n%{http_code}\n' -X POST https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys \
+  -H "Authorization: Bearer $P" -H 'Content-Type: application/json' \
+  -d '{"name":"runbook check","scopes":["push"]}'
+# {"id":1,"name":"runbook check","scopes":["push"],"key":"obask_1_i6iK4jtmlst4Z_SLs59uHH…",
+#  "created_by":{"kind":"principal","id":1},"created_at":"2026-08-29T08:45:36Z"}
+# 201
+
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
+  https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys/1 \
+  -H "Authorization: Bearer $P"
+# 204
+```
+
+A `403` on the POST means the principal is wrong or revoked; a `400` of
+`{"error":"unknown scope \"…\""}` means the scope name was not `push`.
+The minted key is live until the DELETE, so do not skip it -- the
+`revoked_at` and `revoked_by` that appear in `GET …/api_keys` are the
+receipt.
+
+Then rehearse the export and import against staging, before any
+production cutover:
+
+```sh
+bin/rails "sidecar:export[1,export.json]"          # run in OBACloud
+cat export.json | render ssh sidecar-staging -- \
+  sidecar-admin --db /data/sidecar.db import --file - --dry-run
+# dry run: stdin is a valid sidecar-export/1 document for region 1: 1 alerts, 0 studies, 0 survey responses, 0 push registrations, 0 ghost bus reports
+```
+
+Drop `--dry-run` to apply it. If the CLI stops to prompt on that pipeline
+-- it defaults to interactive output -- pass `--confirm` and `-o text`
+before the `--`, so nothing of the CLI's own can read the document out of
+stdin.
 
 ### Development
 

@@ -78,6 +78,13 @@ INSERT INTO survey_questions (survey_id, position, required, question_type, cont
 VALUES (@survey_id, @position, @required, @question_type, @content, @now, @now)
 RETURNING *;
 
+-- name: InsertQuestionWithID :one
+-- An edit re-inserts a kept question under its original id (migration
+-- design spec section 2.7); AUTOINCREMENT still advances past it.
+INSERT INTO survey_questions (id, survey_id, position, required, question_type, content, created_at, updated_at)
+VALUES (@id, @survey_id, @position, @required, @question_type, @content, @now, @now)
+RETURNING *;
+
 -- name: DeleteQuestionsForSurvey :exec
 DELETE FROM survey_questions WHERE survey_id = @survey_id;
 

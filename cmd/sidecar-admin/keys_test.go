@@ -152,11 +152,11 @@ func TestPrincipalRevoke_AlsoRevokesItsKeysByDefault(t *testing.T) {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
 	minted := apikey.Actor{Kind: apikey.ActorPrincipal, ID: p.ID}
-	byPrincipal, err := store.APIKeys().CreateRegionKey(ctx, 0, "a", "h-a", minted, now)
+	byPrincipal, err := store.APIKeys().CreateRegionKey(ctx, 0, "a", "h-a", nil, minted, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
-	byCLI, err := store.APIKeys().CreateRegionKey(ctx, 1, "b", "h-b", apikey.Actor{Kind: apikey.ActorCLI}, now)
+	byCLI, err := store.APIKeys().CreateRegionKey(ctx, 1, "b", "h-b", nil, apikey.Actor{Kind: apikey.ActorCLI}, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestKeyList_GuardsNamesForTheTerminal(t *testing.T) {
 
 	path, store := keyFixture(t)
 	if _, err := store.APIKeys().CreateRegionKey(context.Background(), 1,
-		"ob\x1b[2Jacloud", "h", apikey.Actor{Kind: apikey.ActorCLI}, time.Now()); err != nil {
+		"ob\x1b[2Jacloud", "h", nil, apikey.Actor{Kind: apikey.ActorCLI}, time.Now()); err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 
@@ -231,21 +231,21 @@ func TestKeyList_MintedByPrincipalCrossesRegions(t *testing.T) {
 	p2Actor := apikey.Actor{Kind: apikey.ActorPrincipal, ID: p2.ID}
 
 	// p1 mints in BOTH region 0 and region 1.
-	inRegion0, err := store.APIKeys().CreateRegionKey(ctx, 0, "p1-in-0", "h-p1-0", p1Actor, now)
+	inRegion0, err := store.APIKeys().CreateRegionKey(ctx, 0, "p1-in-0", "h-p1-0", nil, p1Actor, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey p1/region0: %v", err)
 	}
-	inRegion1, err := store.APIKeys().CreateRegionKey(ctx, 1, "p1-in-1", "h-p1-1", p1Actor, now)
+	inRegion1, err := store.APIKeys().CreateRegionKey(ctx, 1, "p1-in-1", "h-p1-1", nil, p1Actor, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey p1/region1: %v", err)
 	}
 	// A CLI-minted key and a key minted by a different principal must NOT
 	// appear in p1's listing.
-	cliKey, err := store.APIKeys().CreateRegionKey(ctx, 1, "cli-key", "h-cli", apikey.Actor{Kind: apikey.ActorCLI}, now)
+	cliKey, err := store.APIKeys().CreateRegionKey(ctx, 1, "cli-key", "h-cli", nil, apikey.Actor{Kind: apikey.ActorCLI}, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey cli: %v", err)
 	}
-	otherKey, err := store.APIKeys().CreateRegionKey(ctx, 0, "p2-key", "h-p2", p2Actor, now)
+	otherKey, err := store.APIKeys().CreateRegionKey(ctx, 0, "p2-key", "h-p2", nil, p2Actor, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey p2: %v", err)
 	}
@@ -300,11 +300,11 @@ func TestKeyList_ShowsHistoryAndCreators(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
-	if _, createErr := store.APIKeys().CreateRegionKey(ctx, 1, "live-key", "h-live",
+	if _, createErr := store.APIKeys().CreateRegionKey(ctx, 1, "live-key", "h-live", nil,
 		apikey.Actor{Kind: apikey.ActorCLI}, now); createErr != nil {
 		t.Fatalf("CreateRegionKey live: %v", createErr)
 	}
-	toRevoke, err := store.APIKeys().CreateRegionKey(ctx, 1, "revoked-key", "h-revoked",
+	toRevoke, err := store.APIKeys().CreateRegionKey(ctx, 1, "revoked-key", "h-revoked", nil,
 		apikey.Actor{Kind: apikey.ActorPrincipal, ID: p.ID}, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey toRevoke: %v", err)
@@ -348,11 +348,16 @@ func TestKeyList_ShowsHistoryAndCreators(t *testing.T) {
 		t.Fatalf("could not find the revoked-key row in output:\n%s", out)
 	}
 	fields := strings.Split(revokedLine, "\t")
-	if len(fields) != 7 {
-		t.Fatalf("revoked-key row = %q, want 7 tab-separated fields", revokedLine)
+	if len(fields) != 8 {
+		t.Fatalf("revoked-key row = %q, want 8 tab-separated fields", revokedLine)
 	}
 	if fields[6] != apikey.ActorCLI {
 		t.Errorf("revoked-key row's revoked-by field = %q, want %q", fields[6], apikey.ActorCLI)
+	}
+	// Scopes are the last column, so every column before it keeps the index
+	// it had; this key was minted without any.
+	if fields[7] != "—" {
+		t.Errorf("revoked-key row's scopes field = %q, want a dash", fields[7])
 	}
 }
 
@@ -364,7 +369,7 @@ func TestKeyRevoke_IsRegionScoped(t *testing.T) {
 	path, store := keyFixture(t)
 	ctx := context.Background()
 	now := time.Now()
-	key, err := store.APIKeys().CreateRegionKey(ctx, 1, "mine", "h-scoped", apikey.Actor{Kind: apikey.ActorCLI}, now)
+	key, err := store.APIKeys().CreateRegionKey(ctx, 1, "mine", "h-scoped", nil, apikey.Actor{Kind: apikey.ActorCLI}, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -408,7 +413,7 @@ func TestPrincipalRevoke_KeepKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePrincipal: %v", err)
 	}
-	key, err := store.APIKeys().CreateRegionKey(ctx, 0, "kept", "h-kept",
+	key, err := store.APIKeys().CreateRegionKey(ctx, 0, "kept", "h-kept", nil,
 		apikey.Actor{Kind: apikey.ActorPrincipal, ID: p.ID}, now)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
@@ -484,5 +489,52 @@ func TestKeyAndPrincipal_FlagErrors(t *testing.T) {
 	}
 	if len(principals) != 0 {
 		t.Errorf("flag-error cases left %d principals behind, want 0", len(principals))
+	}
+}
+
+// TestKeyCreate_ScopeFlag: --scope is repeatable, an unknown name is
+// refused before anything is written, and `key list` shows the scopes in
+// its last column so the existing column indexes stay put.
+func TestKeyCreate_ScopeFlag(t *testing.T) {
+	t.Parallel()
+
+	path, store := keyFixture(t)
+	var stdout bytes.Buffer
+	if err := run(strings.NewReader(""), &stdout, io.Discard,
+		[]string{"--db", path, "key", "create", "--region", "1", "--name", "rails", "--scope", "push"}); err != nil {
+		t.Fatalf("key create --scope push: %v", err)
+	}
+	findKeyInOutput(t, stdout.String())
+
+	keys, err := store.APIKeys().ListRegionKeys(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || !keys[0].Scopes.Has(apikey.ScopePush) {
+		t.Fatalf("stored keys = %+v, want one push-scoped key", keys)
+	}
+
+	var list bytes.Buffer
+	if listErr := run(strings.NewReader(""), &list, io.Discard, []string{"--db", path, "key", "list", "--region", "1"}); listErr != nil {
+		t.Fatalf("key list: %v", listErr)
+	}
+	line := strings.TrimRight(list.String(), "\n")
+	fields := strings.Split(line, "\t")
+	if got := fields[len(fields)-1]; got != "push" {
+		t.Errorf("last column = %q, want push; line = %q", got, line)
+	}
+
+	var stderr bytes.Buffer
+	err = run(strings.NewReader(""), io.Discard, &stderr,
+		[]string{"--db", path, "key", "create", "--region", "1", "--name", "bad", "--scope", "admin"})
+	if err == nil || !errors.Is(err, apikey.ErrUnknownScope) {
+		t.Fatalf("unknown scope: err = %v, want ErrUnknownScope", err)
+	}
+	keys, err = store.APIKeys().ListRegionKeys(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("a refused create wrote a key: %+v", keys)
 	}
 }

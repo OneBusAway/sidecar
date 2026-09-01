@@ -64,7 +64,7 @@ func TestEnqueueHappyPathSnapshotsCopy(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -80,14 +80,14 @@ func TestEnqueueRejectsUnpublished(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, false, false)
 	f.register(t, "tok", false)
-	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base); !errors.Is(err, alertpush.ErrNotPublished) {
+	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base); !errors.Is(err, alertpush.ErrNotPublished) {
 		t.Errorf("err = %v, want ErrNotPublished", err)
 	}
 }
 
 func TestEnqueueRejectsUnknownAlert(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.enq.Enqueue(context.Background(), 999, alertpush.AudienceAll, base); !errors.Is(err, alerts.ErrNotFound) {
+	if _, err := f.enq.Enqueue(context.Background(), 999, alertpush.AudienceAll, nil, base); !errors.Is(err, alerts.ErrNotFound) {
 		t.Errorf("err = %v, want alerts.ErrNotFound", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestEnqueueRejectsEmptyAudience(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false) // a non-test device: the test audience is empty
-	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceTest, base); !errors.Is(err, alertpush.ErrEmptyAudience) {
+	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceTest, nil, base); !errors.Is(err, alertpush.ErrEmptyAudience) {
 		t.Errorf("err = %v, want ErrEmptyAudience", err)
 	}
 }
@@ -105,7 +105,7 @@ func TestEnqueueTestAlertForcesTestAudience(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, true)
 	f.register(t, "qa", true)
-	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base)
+	p, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -122,10 +122,10 @@ func TestEnqueueRejectsInFlight(t *testing.T) {
 	f := newFixture(t)
 	a := f.alert(t, true, false)
 	f.register(t, "tok", false)
-	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base); err != nil {
+	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, base); !errors.Is(err, alertpush.ErrInFlight) {
+	if _, err := f.enq.Enqueue(context.Background(), a.ID, alertpush.AudienceAll, nil, base); !errors.Is(err, alertpush.ErrInFlight) {
 		t.Errorf("second Enqueue = %v, want ErrInFlight", err)
 	}
 }

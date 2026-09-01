@@ -32,7 +32,8 @@ const (
 // error rather than exiting so main owns the only exit path.
 //
 // stdin feeds `user create`/`user passwd`'s --password-stdin and interactive
-// prompt; every other command ignores it.
+// prompt, and the document for `survey create/edit --file -` and `import
+// --file -`; every other command ignores it.
 //
 // Every command runs against a freshly migrated schema: like cmd/sidecar,
 // this never operates against an unknown schema. `migrate up` is still
@@ -56,7 +57,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing command; expected region, alert, study, survey, ghostbus, import, migrate, user, key, or principal")
+		return errors.New("missing command; expected region, alert, study, survey, ghostbus, import, migrate, sequence, user, key, or principal")
 	}
 
 	store, err := sqlite.Open(*dbPath)
@@ -98,9 +99,11 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	case "ghostbus":
 		return ghostBusCmd(ctx, stdout, store, cmdArgs)
 	case "import":
-		return runImport(ctx, stdout, store, now, cmdArgs)
+		return runImport(ctx, stdin, stdout, store, now, cmdArgs)
 	case "migrate":
 		return runMigrate(ctx, stdout, store, cmdArgs)
+	case "sequence":
+		return runSequence(ctx, stdout, store, cmdArgs)
 	case "user":
 		return runUser(ctx, stdin, stdout, stderr, store, now, cmdArgs)
 	case "key":
@@ -108,7 +111,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 	case "principal":
 		return runPrincipal(ctx, stdout, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown command %q; expected region, alert, study, survey, ghostbus, import, migrate, user, key, or principal", cmd)
+		return fmt.Errorf("unknown command %q; expected region, alert, study, survey, ghostbus, import, migrate, sequence, user, key, or principal", cmd)
 	}
 }
 
@@ -834,7 +837,7 @@ func alertPush(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	}
 
 	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
-	p, err := enq.Enqueue(ctx, id, audience, now)
+	p, err := enq.Enqueue(ctx, id, audience, nil, now)
 	if err != nil {
 		return wrapAlertErr(alertPushCmd, id, err)
 	}

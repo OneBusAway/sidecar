@@ -33,6 +33,7 @@ func toActorJSON(a apikey.Actor) actorJSON {
 type apiKeyJSON struct {
 	ID         int64      `json:"id"`
 	Name       string     `json:"name"`
+	Scopes     []string   `json:"scopes"`
 	CreatedBy  actorJSON  `json:"created_by"`
 	CreatedAt  string     `json:"created_at"`
 	LastUsedAt *string    `json:"last_used_at"`
@@ -46,6 +47,7 @@ func toAPIKeyJSON(k apikey.RegionKey) apiKeyJSON {
 	out := apiKeyJSON{
 		ID:        k.ID,
 		Name:      k.Name,
+		Scopes:    k.Scopes.Strings(),
 		CreatedBy: toActorJSON(k.CreatedBy),
 		CreatedAt: formatInstant(k.CreatedAt),
 	}
@@ -70,14 +72,19 @@ func toAPIKeyJSON(k apikey.RegionKey) apiKeyJSON {
 type mintedKeyJSON struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
+	Scopes    []string  `json:"scopes"`
 	Key       string    `json:"key"`
 	CreatedBy actorJSON `json:"created_by"`
 	CreatedAt string    `json:"created_at"`
 }
 
-// createKeyRequest is the POST .../api_keys body.
+// createKeyRequest is the POST .../api_keys body. Scopes is optional and
+// validated strictly: the decoder is lenient about unknown FIELDS, but an
+// unknown scope NAME is a 400, because a silently dropped scope would mint
+// a key that fails at send time (migration design spec section 2.2).
 type createKeyRequest struct {
-	Name string `json:"name"`
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
 }
 
 // adminAPIKeysHandler serves the region API key family (design spec §5.6):
@@ -108,6 +115,11 @@ func (h *adminAPIKeysHandler) create(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("name must be 1-%d bytes after trimming", maxKeyNameBytes))
 		return
 	}
+	scopes, err := apikey.ParseScopes(req.Scopes)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
 	p, _ := principalFrom(r.Context()) // guaranteed by requirePrincipal
 
 	raw, hash, err := apikey.NewRegionKey(region.ID)
@@ -115,7 +127,7 @@ func (h *adminAPIKeysHandler) create(w http.ResponseWriter, r *http.Request) {
 		serverErrorJSON(w, h.deps.Logger, "mint region api key", err)
 		return
 	}
-	created, err := h.deps.APIKeys.CreateRegionKey(r.Context(), region.ID, name, hash, p.actor(), h.deps.Now())
+	created, err := h.deps.APIKeys.CreateRegionKey(r.Context(), region.ID, name, hash, scopes, p.actor(), h.deps.Now())
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "create region api key", err)
 		return
@@ -127,6 +139,7 @@ func (h *adminAPIKeysHandler) create(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, h.deps.Logger, http.StatusCreated, mintedKeyJSON{
 		ID: created.ID, Name: created.Name, Key: raw,
+		Scopes:    created.Scopes.Strings(),
 		CreatedBy: toActorJSON(created.CreatedBy),
 		CreatedAt: formatInstant(created.CreatedAt),
 	})

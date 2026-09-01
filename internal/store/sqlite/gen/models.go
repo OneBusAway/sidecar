@@ -185,6 +185,7 @@ type RegionApiKey struct {
 	RevokedAt     sql.NullInt64
 	RevokedByKind sql.NullString
 	RevokedByID   sql.NullInt64
+	Scopes        string
 }
 
 type ServicePrincipal struct {

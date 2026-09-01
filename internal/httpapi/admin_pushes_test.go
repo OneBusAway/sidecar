@@ -10,6 +10,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
+	"github.com/OneBusAway/sidecar/internal/apikey"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
@@ -599,5 +600,106 @@ func TestAdminPushes_AlertPushStoreFailuresAre500(t *testing.T) {
 		if got, want := bodyText(rec), `{"error":"internal error"}`; got != want {
 			t.Errorf("%s: body = %q, want %q", tc.name, got, want)
 		}
+	}
+}
+
+// TestAdminPushes_PushScopedKeyCanSendAndCancel is the OBACloud send path
+// end to end: a push-scoped region key queues and cancels a push for its
+// own region, an unscoped key is refused with 403 on both, and the scope
+// widens nothing else -- key management stays 403 and another region stays
+// 404.
+func TestAdminPushes_PushScopedKeyCanSendAndCancel(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+	pushKey := "Bearer " + f.mintRegionKeyWithScopes(t, regionPuget, apikey.Scopes{apikey.ScopePush})
+	plainKey := "Bearer " + f.mintRegionKey(t, regionPuget)
+
+	if rec := sendBearer(f.handler, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`, plainKey); rec.Code != http.StatusForbidden {
+		t.Errorf("unscoped key POST pushes: status = %d, want 403", rec.Code)
+	}
+	got := object(t, sendBearer(f.handler, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`, pushKey), http.StatusAccepted)
+	pushID := jsonID(t, got)
+
+	cancelPath := fmt.Sprintf("%s/%d", pushesPath(regionPuget, id), pushID)
+	if rec := sendBearer(f.handler, http.MethodDelete, cancelPath, "", plainKey); rec.Code != http.StatusForbidden {
+		t.Errorf("unscoped key DELETE push: status = %d, want 403", rec.Code)
+	}
+	if rec := sendBearer(f.handler, http.MethodDelete, cancelPath, "", pushKey); rec.Code != http.StatusNoContent {
+		t.Errorf("push-scoped key DELETE push: status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := sendBearer(f.handler, http.MethodPost, "/api/admin/v1/regions/1/api_keys", `{"name":"x"}`, pushKey); rec.Code != http.StatusForbidden {
+		t.Errorf("push-scoped key on key management: status = %d, want 403", rec.Code)
+	}
+	if rec := sendBearer(f.handler, http.MethodPost, pushesPath(regionTampa, id), `{}`, pushKey); rec.Code != http.StatusNotFound {
+		t.Errorf("push-scoped key on another region: status = %d, want 404", rec.Code)
+	}
+}
+
+// TestAdminCreatePush_CustomMessages: present messages are validated and
+// stored as the snapshot verbatim; absent messages still derive from the
+// alert (TestAdminCreatePushQueuesAndWakes covers that half).
+func TestAdminCreatePush_CustomMessages(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+
+	body := `{"audience":"all","messages":{"en":{"title":"Custom title","body":"Custom body"},"es":{"title":"Titulo","body":"Cuerpo"}}}`
+	got := object(t, f.do(http.MethodPost, pushesPath(regionPuget, id), body), http.StatusAccepted)
+	messages, _ := got["messages"].(map[string]any)
+	en, _ := messages["en"].(map[string]any)
+	es, _ := messages["es"].(map[string]any)
+	if en["title"] != "Custom title" || en["body"] != "Custom body" || es["title"] != "Titulo" || es["body"] != "Cuerpo" {
+		t.Errorf("messages = %v, want the supplied copy verbatim", got["messages"])
+	}
+
+	stored, err := f.store.AlertPushes().Get(context.Background(), jsonID(t, got))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Messages["en"] != (alertpush.Message{Title: "Custom title", Body: "Custom body"}) ||
+		stored.Messages["es"] != (alertpush.Message{Title: "Titulo", Body: "Cuerpo"}) {
+		t.Errorf("stored messages = %+v, want the supplied copy", stored.Messages)
+	}
+	if f.waker.calls != 1 {
+		t.Errorf("Wake calls = %d, want 1", f.waker.calls)
+	}
+}
+
+// TestAdminCreatePush_InvalidMessagesAre400: every ValidateMessages refusal
+// is a 400 carrying the sentinel's text, and nothing is queued.
+func TestAdminCreatePush_InvalidMessagesAre400(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+
+	for _, tc := range []struct{ name, body string }{
+		{"empty object", `{"messages":{}}`},
+		{"no english", `{"messages":{"es":{"title":"t","body":"b"}}}`},
+		{"blank body", `{"messages":{"en":{"title":"t","body":" "}}}`},
+		{"title too long", fmt.Sprintf(`{"messages":{"en":{"title":%q,"body":"b"}}}`, strings.Repeat("t", alertpush.TitleLimit+1))},
+		{"body too long", fmt.Sprintf(`{"messages":{"en":{"title":"t","body":%q}}}`, strings.Repeat("b", alertpush.BodyLimit+1))},
+		{"uppercase language", `{"messages":{"en":{"body":"b"},"ES":{"body":"c"}}}`},
+		{"wrong shape", `{"messages":["en"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.do(http.MethodPost, pushesPath(regionPuget, id), tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if pushes, err := f.store.AlertPushes().ListByAlert(context.Background(), id); err != nil || len(pushes) != 0 {
+		t.Errorf("a refused body queued a push: %v %+v", err, pushes)
+	}
+	if f.waker.calls != 0 {
+		t.Errorf("Wake calls = %d, want 0", f.waker.calls)
 	}
 }

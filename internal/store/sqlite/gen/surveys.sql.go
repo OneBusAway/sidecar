@@ -348,6 +348,48 @@ func (q *Queries) InsertQuestion(ctx context.Context, arg InsertQuestionParams) 
 	return i, err
 }
 
+const insertQuestionWithID = `-- name: InsertQuestionWithID :one
+INSERT INTO survey_questions (id, survey_id, position, required, question_type, content, created_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+RETURNING id, survey_id, position, required, question_type, content, created_at, updated_at
+`
+
+type InsertQuestionWithIDParams struct {
+	ID           int64
+	SurveyID     int64
+	Position     int64
+	Required     bool
+	QuestionType string
+	Content      string
+	Now          int64
+}
+
+// An edit re-inserts a kept question under its original id (migration
+// design spec section 2.7); AUTOINCREMENT still advances past it.
+func (q *Queries) InsertQuestionWithID(ctx context.Context, arg InsertQuestionWithIDParams) (SurveyQuestion, error) {
+	row := q.db.QueryRowContext(ctx, insertQuestionWithID,
+		arg.ID,
+		arg.SurveyID,
+		arg.Position,
+		arg.Required,
+		arg.QuestionType,
+		arg.Content,
+		arg.Now,
+	)
+	var i SurveyQuestion
+	err := row.Scan(
+		&i.ID,
+		&i.SurveyID,
+		&i.Position,
+		&i.Required,
+		&i.QuestionType,
+		&i.Content,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listActiveSurveysByRegion = `-- name: ListActiveSurveysByRegion :many
 SELECT surveys.id, surveys.study_id, surveys.name, surveys.available, surveys.start_time, surveys.end_time, surveys.show_on_map, surveys.show_on_stops, surveys.always_visible, surveys.allows_multiple_responses, surveys.visible_stop_list, surveys.visible_route_list, surveys.created_at, surveys.updated_at FROM surveys
 JOIN studies ON studies.id = surveys.study_id

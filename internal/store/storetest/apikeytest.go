@@ -21,6 +21,7 @@ func RunAPIKeyRepository(t *testing.T, newStore newAPIKeyStoreFunc) {
 	t.Helper()
 
 	t.Run("CreateGetRoundTrip", func(t *testing.T) { testAPIKeyRoundTrip(t, newStore) })
+	t.Run("ScopesRoundTrip", func(t *testing.T) { testAPIKeyScopes(t, newStore) })
 	t.Run("RevokedHashIsDistinctFromUnknown", func(t *testing.T) { testAPIKeyRevokedHash(t, newStore) })
 	t.Run("RevokeIsRegionScoped", func(t *testing.T) { testAPIKeyRevokeRegionScoped(t, newStore) })
 	t.Run("RevokeTwiceSucceeds", func(t *testing.T) { testAPIKeyRevokeIdempotent(t, newStore) })
@@ -52,7 +53,7 @@ func testAPIKeyRoundTrip(t *testing.T, newStore newAPIKeyStoreFunc) {
 	ctx := context.Background()
 
 	by := apikey.Actor{Kind: apikey.ActorOperator, ID: 9}
-	created, err := keys.CreateRegionKey(ctx, 0, "obacloud", "hash-a", by, base)
+	created, err := keys.CreateRegionKey(ctx, 0, "obacloud", "hash-a", nil, by, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -90,7 +91,7 @@ func testAPIKeyRevokedHash(t *testing.T, newStore newAPIKeyStoreFunc) {
 	seedAPIKeyRegions(t, regionRepo)
 	ctx := context.Background()
 
-	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", apikey.Actor{Kind: apikey.ActorCLI}, base)
+	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", nil, apikey.Actor{Kind: apikey.ActorCLI}, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -132,7 +133,7 @@ func testAPIKeyRevokeRegionScoped(t *testing.T, newStore newAPIKeyStoreFunc) {
 	ctx := context.Background()
 
 	cli := apikey.Actor{Kind: apikey.ActorCLI}
-	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", cli, base)
+	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", nil, cli, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -156,7 +157,7 @@ func testAPIKeyRevokeIdempotent(t *testing.T, newStore newAPIKeyStoreFunc) {
 	ctx := context.Background()
 
 	cli := apikey.Actor{Kind: apikey.ActorCLI}
-	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", cli, base)
+	k, err := keys.CreateRegionKey(ctx, 1, "k", "hash-a", nil, cli, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -200,7 +201,7 @@ func testAPIKeyListByCreator(t *testing.T, newStore newAPIKeyStoreFunc) {
 		{1, principal, "h-p4-b"},
 		{1, other, "h-p5"},
 	} {
-		if _, err := keys.CreateRegionKey(ctx, spec.region, "k", spec.hash, spec.by, base.Add(time.Duration(i)*time.Minute)); err != nil {
+		if _, err := keys.CreateRegionKey(ctx, spec.region, "k", spec.hash, nil, spec.by, base.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatalf("CreateRegionKey %s: %v", spec.hash, err)
 		}
 	}
@@ -242,15 +243,15 @@ func testAPIKeyRevokeByCreator(t *testing.T, newStore newAPIKeyStoreFunc) {
 
 	principal := apikey.Actor{Kind: apikey.ActorPrincipal, ID: 4}
 	cli := apikey.Actor{Kind: apikey.ActorCLI}
-	a, err := keys.CreateRegionKey(ctx, 0, "a", "h-a", principal, base)
+	a, err := keys.CreateRegionKey(ctx, 0, "a", "h-a", nil, principal, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
-	b, err := keys.CreateRegionKey(ctx, 1, "b", "h-b", principal, base.Add(time.Minute))
+	b, err := keys.CreateRegionKey(ctx, 1, "b", "h-b", nil, principal, base.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
-	survivor, err := keys.CreateRegionKey(ctx, 1, "c", "h-c", cli, base.Add(2*time.Minute))
+	survivor, err := keys.CreateRegionKey(ctx, 1, "c", "h-c", nil, cli, base.Add(2*time.Minute))
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -281,7 +282,7 @@ func testAPIKeyTouch(t *testing.T, newStore newAPIKeyStoreFunc) {
 	seedAPIKeyRegions(t, regionRepo)
 	ctx := context.Background()
 
-	k, err := keys.CreateRegionKey(ctx, 1, "k", "h", apikey.Actor{Kind: apikey.ActorCLI}, base)
+	k, err := keys.CreateRegionKey(ctx, 1, "k", "h", nil, apikey.Actor{Kind: apikey.ActorCLI}, base)
 	if err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
@@ -310,11 +311,11 @@ func testAPIKeyListOrder(t *testing.T, newStore newAPIKeyStoreFunc) {
 
 	cli := apikey.Actor{Kind: apikey.ActorCLI}
 	for i, hash := range []string{"h1", "h2", "h3"} {
-		if _, err := keys.CreateRegionKey(ctx, 1, hash, hash, cli, base.Add(time.Duration(i)*time.Minute)); err != nil {
+		if _, err := keys.CreateRegionKey(ctx, 1, hash, hash, nil, cli, base.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatalf("CreateRegionKey: %v", err)
 		}
 	}
-	if _, err := keys.CreateRegionKey(ctx, 0, "other", "h-other", cli, base); err != nil {
+	if _, err := keys.CreateRegionKey(ctx, 0, "other", "h-other", nil, cli, base); err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 	got, err := keys.ListRegionKeys(ctx, 1)
@@ -337,7 +338,7 @@ func testAPIKeyCascade(t *testing.T, newStore newAPIKeyStoreFunc) {
 	seedAPIKeyRegions(t, regionRepo)
 	ctx := context.Background()
 
-	if _, err := keys.CreateRegionKey(ctx, 1, "k", "h", apikey.Actor{Kind: apikey.ActorCLI}, base); err != nil {
+	if _, err := keys.CreateRegionKey(ctx, 1, "k", "h", nil, apikey.Actor{Kind: apikey.ActorCLI}, base); err != nil {
 		t.Fatalf("CreateRegionKey: %v", err)
 	}
 	// regions.Repository has no Delete -- the sidecar never removes a region
@@ -404,4 +405,75 @@ func testPrincipalLifecycle(t *testing.T, newStore newAPIKeyStoreFunc) {
 // so an adapter opts into the cascade assertion by implementing this.
 type RegionDeleter interface {
 	DeleteRegionForTest(ctx context.Context, id int64) error
+}
+
+// testAPIKeyScopes pins that scopes survive every read path -- Create's
+// return, GetByHash, ListRegionKeys, ListRegionKeysByCreator -- and that a
+// key minted with nil scopes reads back as an empty, non-nil set. A key
+// that silently lost its push scope would 403 at send time in another
+// process, which is the failure the migration design spec section 2.2
+// calls out.
+func testAPIKeyScopes(t *testing.T, newStore newAPIKeyStoreFunc) {
+	keys, regionRepo := newStore(t)
+	seedAPIKeyRegions(t, regionRepo)
+	ctx := context.Background()
+	by := apikey.Actor{Kind: apikey.ActorOperator, ID: 9}
+
+	push, err := keys.CreateRegionKey(ctx, 1, "push", "hash-push", apikey.Scopes{apikey.ScopePush}, by, base)
+	if err != nil {
+		t.Fatalf("CreateRegionKey(push): %v", err)
+	}
+	plain, err := keys.CreateRegionKey(ctx, 1, "plain", "hash-plain", nil, by, base)
+	if err != nil {
+		t.Fatalf("CreateRegionKey(plain): %v", err)
+	}
+	if !push.Scopes.Has(apikey.ScopePush) {
+		t.Errorf("created push key scopes = %v, want push", push.Scopes)
+	}
+	if plain.Scopes == nil || len(plain.Scopes) != 0 {
+		t.Errorf("created plain key scopes = %#v, want empty non-nil", plain.Scopes)
+	}
+
+	got, err := keys.GetRegionKeyByHash(ctx, "hash-push")
+	if err != nil {
+		t.Fatalf("GetRegionKeyByHash: %v", err)
+	}
+	if !got.Scopes.Has(apikey.ScopePush) {
+		t.Errorf("GetRegionKeyByHash scopes = %v, want push", got.Scopes)
+	}
+
+	list, err := keys.ListRegionKeys(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListRegionKeys: %v", err)
+	}
+	var sawPush, sawPlain bool
+	for _, k := range list {
+		switch k.ID {
+		case push.ID:
+			sawPush = k.Scopes.Has(apikey.ScopePush)
+		case plain.ID:
+			sawPlain = k.Scopes != nil && len(k.Scopes) == 0
+		}
+	}
+	if !sawPush || !sawPlain {
+		t.Errorf("ListRegionKeys lost scopes: %+v", list)
+	}
+
+	byCreator, err := keys.ListRegionKeysByCreator(ctx, by)
+	if err != nil {
+		t.Fatalf("ListRegionKeysByCreator: %v", err)
+	}
+	var creatorSawPush bool
+	for _, k := range byCreator {
+		if k.ID != push.ID {
+			continue
+		}
+		creatorSawPush = true
+		if !k.Scopes.Has(apikey.ScopePush) {
+			t.Errorf("ListRegionKeysByCreator lost the push scope: %+v", k)
+		}
+	}
+	if !creatorSawPush {
+		t.Errorf("ListRegionKeysByCreator omitted the scoped key entirely: %+v", byCreator)
+	}
 }

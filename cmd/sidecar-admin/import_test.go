@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -75,4 +76,45 @@ func TestImportCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	cliErrContains(t, dbPath, "bogus", "import", "--file", path)
+}
+
+// TestImportCommand_ReadsStdin: `--file -` is the cutover runbook's shape
+// (`cat export.json | render ssh sidecar -- sidecar-admin import --file -`),
+// so there is no file to copy onto the host first.
+func TestImportCommand_ReadsStdin(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 16)
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	doc := export.Document{
+		Format: export.Format, ExportedAt: start, RegionID: 16,
+		Alerts: []export.Alert{{ID: 77, AgencyID: "unitrans", HeaderText: "From stdin", StartTime: start, Published: true}},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := cliStdin(t, bytes.NewReader(b), dbPath, "import", "--file", "-", "--dry-run")
+	if err != nil || !strings.Contains(stdout, "dry run: stdin is a valid") {
+		t.Fatalf("dry run from stdin: %v %q", err, stdout)
+	}
+	// Without this the import below would cover for a dry run that wrote:
+	// the Get at the end passes either way.
+	if _, getErr := store.Alerts().Get(context.Background(), 77); getErr == nil {
+		t.Fatal("the stdin dry run wrote the alert")
+	}
+	stdout, _, err = cliStdin(t, bytes.NewReader(b), dbPath, "import", "--file", "-")
+	if err != nil || !strings.Contains(stdout, "imported region 16 from stdin") {
+		t.Fatalf("import from stdin: %v %q", err, stdout)
+	}
+	if _, getErr := store.Alerts().Get(context.Background(), 77); getErr != nil {
+		t.Fatalf("alert not imported: %v", getErr)
+	}
+
+	// A trailing second document on stdin is refused exactly like in a file.
+	_, _, err = cliStdin(t, bytes.NewReader(append(b, []byte("\n{}")...)), dbPath, "import", "--file", "-")
+	if err == nil || !strings.Contains(err.Error(), "after the document") {
+		t.Fatalf("trailing content on stdin: err = %v", err)
+	}
 }

@@ -49,11 +49,14 @@ type alertJSON struct {
 
 // translationJSON is one language's rendering of an alert. A nil Header or
 // Description means that field has no translation, which is different from a
-// translation whose text is empty.
+// translation whose text is empty. Stale is true when any translated field
+// no longer matches the English it was made from -- the feed withholds it,
+// and a review UI should say so (migration design spec §2.4).
 type translationJSON struct {
 	Language    string  `json:"language"`
 	Header      *string `json:"header"`
 	Description *string `json:"description"`
+	Stale       bool    `json:"stale"`
 }
 
 // createAlertRequest is the POST /regions/{regionId}/alerts body.
@@ -541,7 +544,7 @@ func toAlertJSON(a alerts.Alert) alertJSON {
 		IsTest:       a.IsTest,
 		CreatedAt:    formatInstant(a.CreatedAt),
 		UpdatedAt:    formatInstant(a.UpdatedAt),
-		Translations: groupTranslations(a.Translations),
+		Translations: groupTranslations(a),
 	}
 	if a.EndTime != nil {
 		end := formatInstant(*a.EndTime)
@@ -551,10 +554,12 @@ func toAlertJSON(a alerts.Alert) alertJSON {
 }
 
 // groupTranslations collapses per-field translation rows into one entry per
-// language, sorted by language so the response is stable.
-func groupTranslations(in []alerts.Translation) []translationJSON {
-	byLanguage := make(map[string]*translationJSON, len(in))
-	for _, t := range in {
+// language, sorted by language so the response is stable. A language is
+// reported stale when any of its fields is, because the feed withholds each
+// stale field on its own.
+func groupTranslations(a alerts.Alert) []translationJSON {
+	byLanguage := make(map[string]*translationJSON, len(a.Translations))
+	for _, t := range a.Translations {
 		entry, ok := byLanguage[t.Language]
 		if !ok {
 			entry = &translationJSON{Language: t.Language}
@@ -566,6 +571,9 @@ func groupTranslations(in []alerts.Translation) []translationJSON {
 			entry.Header = &text
 		case alerts.FieldDescription:
 			entry.Description = &text
+		}
+		if a.TranslationStale(t) {
+			entry.Stale = true
 		}
 	}
 

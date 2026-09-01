@@ -295,3 +295,53 @@ func TestAdminSurveys_ListCarriesResponseCounts(t *testing.T) {
 		t.Errorf("region 0 shows %d of region 1's surveys", len(empty))
 	}
 }
+
+// TestAdminSurveys_PutPreservesQuestionIDs is the Rails-side round trip
+// (migration design spec section 4.3): GET, strip the server-owned survey
+// keys, edit, PUT -- with question ids left in place. The edited question
+// keeps its id, the new one gets a fresh id, and a foreign id is 422.
+func TestAdminSurveys_PutPreservesQuestionIDs(t *testing.T) {
+	t.Parallel()
+
+	f := newFullAdminFixture(t)
+	studyID := jsonID(t, object(t, f.do(http.MethodPost, "/api/admin/v1/regions/1/studies", `{"name":"s"}`), http.StatusCreated))
+	create := fmt.Sprintf(`{"study_id":%d,"name":"q","questions":[{"content":{"type":"text","label_text":"one"}},{"content":{"type":"text","label_text":"two"}}]}`, studyID)
+	id := jsonID(t, object(t, f.do(http.MethodPost, "/api/admin/v1/regions/1/surveys", create), http.StatusCreated))
+	path := fmt.Sprintf("/api/admin/v1/regions/1/surveys/%d", id)
+
+	shown := object(t, f.do(http.MethodGet, path, ""), http.StatusOK)
+	questions, _ := shown["questions"].([]any)
+	first, _ := questions[0].(map[string]any)
+	second, _ := questions[1].(map[string]any)
+	firstID, secondID := int64(num(t, first, "id")), int64(num(t, second, "id"))
+
+	put := fmt.Sprintf(`{"name":"q","questions":[{"id":%d,"content":{"type":"text","label_text":"one, edited"}},{"content":{"type":"text","label_text":"three"}}]}`, firstID)
+	updated := object(t, f.do(http.MethodPut, path, put), http.StatusOK)
+	got, _ := updated["questions"].([]any)
+	if len(got) != 2 {
+		t.Fatalf("questions = %v, want 2", updated["questions"])
+	}
+	kept, _ := got[0].(map[string]any)
+	added, _ := got[1].(map[string]any)
+	if int64(num(t, kept, "id")) != firstID {
+		t.Errorf("edited question id = %v, want %d", kept["id"], firstID)
+	}
+	if aid := int64(num(t, added, "id")); aid == firstID || aid == secondID {
+		t.Errorf("added question id = %d, want a fresh id", aid)
+	}
+
+	foreign := fmt.Sprintf(`{"name":"q","questions":[{"id":%d,"content":{"type":"text","label_text":"x"}}]}`, secondID+1000)
+	rec := f.do(http.MethodPut, path, foreign)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("foreign question id: status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	}
+	if got, want := bodyText(rec), fmt.Sprintf(`{"error":%q}`, surveys.ErrUnknownQuestion.Error()); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+
+	// Create refuses ids too: they are server-owned.
+	withID := fmt.Sprintf(`{"study_id":%d,"name":"q","questions":[{"id":%d,"content":{"type":"text","label_text":"x"}}]}`, studyID, firstID)
+	if rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/surveys", withID); rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("question id on create: status = %d, want 422", rec.Code)
+	}
+}

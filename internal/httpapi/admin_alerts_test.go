@@ -342,7 +342,7 @@ var (
 		"cause", "effect", "severity", "start_time", "end_time",
 		"published", "is_test", "created_at", "updated_at", "translations",
 	}
-	translationJSONFields = []string{"language", "header", "description"}
+	translationJSONFields = []string{"language", "header", "description", "stale"}
 )
 
 // translationsOf returns the translations array of a decoded alert.
@@ -459,12 +459,20 @@ func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
 	regionKey := f.mintRegionKey(t, regionPuget)
 	servicePrincipal := f.mintPrincipal(t)
 
+	pushKey := f.mintRegionKeyWithScopes(t, regionPuget, apikey.Scopes{apikey.ScopePush})
+
 	kinds := []struct {
-		kind   principalKind
-		header string
+		name    string
+		header  string
+		allowed func(principalSet) bool
 	}{
-		{principalRegionKey, "Bearer " + regionKey},
-		{principalService, "Bearer " + servicePrincipal},
+		{"region key", "Bearer " + regionKey, func(s principalSet) bool { return s.has(principalRegionKey) }},
+		{"service principal", "Bearer " + servicePrincipal, func(s principalSet) bool { return s.has(principalService) }},
+		// A push-scoped key is still a region key: it reaches everything an
+		// unscoped key reaches, plus the routes that name principalPushKey.
+		{"push-scoped region key", "Bearer " + pushKey, func(s principalSet) bool {
+			return s.has(principalRegionKey) || s.has(principalPushKey)
+		}},
 	}
 
 	for _, rt := range adminRoutes(f.deps) {
@@ -475,53 +483,89 @@ func TestAdminRoutes_PrincipalAllowLists(t *testing.T) {
 		for _, k := range kinds {
 			rec := sendBearer(f.handler, method, target, "", k.header)
 			forbidden := rec.Code == http.StatusForbidden && bodyText(rec) == `{"error":"forbidden"}`
-			if allowed := rt.allowed.has(k.kind); allowed == forbidden {
+			if allowed := k.allowed(rt.allowed); allowed == forbidden {
 				t.Errorf("%s %s with %s: status = %d body = %s; allowed = %v",
-					method, target, k.kind, rec.Code, rec.Body.String(), allowed)
+					method, target, k.name, rec.Code, rec.Body.String(), allowed)
 			}
 		}
 	}
 }
 
-// TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys pins WHICH routes are
-// operator-only, derived from the URL pattern rather than from the allow-list
-// being checked.
+// TestRouteTable_PushScopeIsExactlyTheTwoPushWrites pins WHICH routes take
+// the push scope and which stay operator-only, derived from the URL pattern
+// rather than from the allow-list being checked (TestAdminRoutes_
+// PrincipalAllowLists compares the live table against behaviour the same
+// table drives, so it is self-consistent and cannot catch a widened
+// allow-list on its own).
 //
-// TestAdminRoutes_PrincipalAllowLists compares the live table against behavior
-// the same table drives, so it is self-consistent: mutating operatorOnly to
-// include principalRegionKey would change both sides and still pass. The three
-// routes below are the ones the design spec (section 4.5) says a leaked region
-// key must never reach -- sending a push (attacker text delivered to every
-// device in the region), cancelling one, and the cross-region region list --
-// so they get an assertion that does not depend on the value it is guarding.
-func TestRouteTable_OperatorOnlyRoutesAreClosedToRegionKeys(t *testing.T) {
+// Send and cancel admit an operator or a region key carrying the push scope
+// -- and NOT an unscoped region key, whose blast radius must stay "one
+// region's tenant data" (keys design spec section 2.1 as amended by the
+// migration design spec section 0.2). No other route may take the push
+// scope: "those two routes and only those".
+func TestRouteTable_PushScopeIsExactlyTheTwoPushWrites(t *testing.T) {
 	t.Parallel()
 
-	// Derived from the pattern, deliberately, not from principal.go.
-	operatorOnlyPatterns := map[string]bool{
+	pushScoped := map[string]bool{
 		"POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes":            true,
 		"DELETE /api/admin/v1/regions/{regionId}/alerts/{id}/pushes/{pushId}": true,
-		"GET /api/admin/v1/regions":                                           true,
+	}
+	operatorOnlyPatterns := map[string]bool{
+		"GET /api/admin/v1/regions": true,
 	}
 
 	f := newFullAdminFixture(t)
 	seen := map[string]bool{}
 	for _, rt := range adminRoutes(f.deps) {
-		if !operatorOnlyPatterns[rt.pattern] {
-			continue
-		}
-		seen[rt.pattern] = true
-		if rt.allowed.has(principalRegionKey) {
-			t.Errorf("route %q admits a region key; the spec makes it operator-only", rt.pattern)
-		}
-		if rt.allowed.has(principalService) {
-			t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
-		}
-		if !rt.allowed.has(principalOperator) {
-			t.Errorf("route %q does not admit an operator, so nobody can call it", rt.pattern)
+		switch {
+		case pushScoped[rt.pattern]:
+			seen[rt.pattern] = true
+			assertPushWriteRoute(t, rt)
+		case operatorOnlyPatterns[rt.pattern]:
+			seen[rt.pattern] = true
+			assertOperatorOnlyRoute(t, rt)
+		default:
+			if rt.allowed.has(principalPushKey) {
+				t.Errorf("route %q takes the push scope; only the two push writes may", rt.pattern)
+			}
 		}
 	}
-	for pattern := range operatorOnlyPatterns {
+	assertRoutesStillInTable(t, seen, pushScoped)
+	assertRoutesStillInTable(t, seen, operatorOnlyPatterns)
+}
+
+// assertPushWriteRoute holds one of the two push writes to its allow-list:
+// an operator or a push-scoped region key, and nobody else.
+func assertPushWriteRoute(t *testing.T, rt adminRoute) {
+	t.Helper()
+	if rt.allowed.has(principalRegionKey) {
+		t.Errorf("route %q admits an unscoped region key", rt.pattern)
+	}
+	if !rt.allowed.has(principalPushKey) {
+		t.Errorf("route %q does not admit a push-scoped key; OBACloud cannot send", rt.pattern)
+	}
+	if !rt.allowed.has(principalOperator) {
+		t.Errorf("route %q does not admit an operator", rt.pattern)
+	}
+	if rt.allowed.has(principalService) {
+		t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
+	}
+}
+
+// assertOperatorOnlyRoute holds a route the spec reserves for operators to
+// exactly that: no region key of either kind, no service principal.
+func assertOperatorOnlyRoute(t *testing.T, rt adminRoute) {
+	t.Helper()
+	if rt.allowed.has(principalRegionKey) || rt.allowed.has(principalPushKey) || rt.allowed.has(principalService) {
+		t.Errorf("route %q admits a non-operator; the spec makes it operator-only", rt.pattern)
+	}
+}
+
+// assertRoutesStillInTable fails for any pattern the sweep never walked: a
+// renamed or dropped route would otherwise silently stop being guarded.
+func assertRoutesStillInTable(t *testing.T, seen, want map[string]bool) {
+	t.Helper()
+	for pattern := range want {
 		if !seen[pattern] {
 			t.Errorf("route %q is no longer in the table; this test has stopped guarding it", pattern)
 		}
@@ -1403,6 +1447,45 @@ func TestAdminAlerts_Translations(t *testing.T) {
 	})
 }
 
+// TestAdminAlerts_TranslationStaleFlag follows one translation through the
+// edit cycle the Rails review UI cares about: fresh after PUT, stale after
+// the English it came from changes, fresh again after retranslation. A
+// language with two fields is stale when either field is.
+func TestAdminAlerts_TranslationStaleFlag(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.createAlertIn(t, regionPuget, `{"header":"English header","description":"English description","start_time":"2026-08-15T14:00:00-07:00"}`)
+
+	staleOf := func(t *testing.T, lang string) bool {
+		t.Helper()
+		for _, tr := range translationsOf(t, object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK)) {
+			if str(t, tr, "language") == lang {
+				return boolean(t, tr, "stale")
+			}
+		}
+		t.Fatalf("no %s translation", lang)
+		return false
+	}
+
+	f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado","description":"Detalle"}`)
+	if staleOf(t, "es") {
+		t.Error("fresh translation reported stale")
+	}
+
+	// Only the description changes; the header translation is still fresh,
+	// but the language as a whole is not.
+	f.do(http.MethodPatch, alertPath(regionPuget, id, ""), `{"description":"Edited description"}`)
+	if !staleOf(t, "es") {
+		t.Error("translation of an edited field reported fresh")
+	}
+
+	f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/es"), `{"header":"Encabezado","description":"Detalle editado"}`)
+	if staleOf(t, "es") {
+		t.Error("retranslated language reported stale")
+	}
+}
+
 // TestFormatInstant pins the global rule that response timestamps are RFC 3339
 // UTC. The store happens to hand back UTC times today, so nothing that goes
 // through it can catch a dropped .UTC() -- only a value carrying a real offset
@@ -1661,7 +1744,7 @@ func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, e
 // credentials.
 type failingAPIKeys struct{}
 
-func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Actor, time.Time) (apikey.RegionKey, error) {
+func (failingAPIKeys) CreateRegionKey(context.Context, int64, string, string, apikey.Scopes, apikey.Actor, time.Time) (apikey.RegionKey, error) {
 	return apikey.RegionKey{}, errStoreBroken
 }
 

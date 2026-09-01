@@ -17,6 +17,12 @@ const (
 	principalOperator  principalKind = iota + 1 // session cookie
 	principalRegionKey                          // obask_
 	principalService                            // obasp_
+	// principalPushKey is never what a request authenticates AS -- a
+	// push-scoped key authenticates as principalRegionKey. It is the
+	// allow-list marker for "a region key carrying apikey.ScopePush", so the
+	// route table can say operatorOrPushKey and a test can ask has(). See
+	// principalSet.admits.
+	principalPushKey
 )
 
 // String is for log lines and test failure messages only; it is never a wire
@@ -29,6 +35,8 @@ func (k principalKind) String() string {
 		return "region_key"
 	case principalService:
 		return "service_principal"
+	case principalPushKey:
+		return "push_scoped_region_key"
 	default:
 		return "unknown"
 	}
@@ -48,18 +56,35 @@ func (s principalSet) has(k principalKind) bool {
 	return false
 }
 
-// The three allow-lists every admin route draws from (design spec section
+// admits reports whether p may use a route guarded by s. It is has() on
+// p's kind, plus the one derived admission: a region key carrying the push
+// scope satisfies principalPushKey. Callers deciding access use this, not
+// has(), so the scope check has exactly one home.
+func (s principalSet) admits(p principal) bool {
+	if s.has(p.kind) {
+		return true
+	}
+	return p.kind == principalRegionKey && p.scopes.Has(apikey.ScopePush) && s.has(principalPushKey)
+}
+
+// The four allow-lists every admin route draws from (design spec section
 // 4.5). They are named values rather than inline literals so the route table
-// reads as policy and a fourth combination has to be introduced deliberately.
+// reads as policy and a fifth combination has to be introduced deliberately.
 var (
-	// operatorOnly is for routes a leaked region key must not reach:
-	// sending or cancelling a push, and the cross-region region list.
+	// operatorOnly is for routes no key of any kind may reach: the
+	// cross-region region list, and the session's whoami.
 	operatorOnly = principalSet{principalOperator}
 	// operatorOrKey is the ordinary region-scoped authoring surface.
 	operatorOrKey = principalSet{principalOperator, principalRegionKey}
 	// operatorOrService is the key-management family, and the only place
 	// principalService appears at all.
 	operatorOrService = principalSet{principalOperator, principalService}
+	// operatorOrPushKey is the two push writes (send, cancel): an operator,
+	// or a region key that was minted with the push scope. An unscoped
+	// region key is refused, so a leaked ordinary key still cannot page
+	// every device in its region (keys design spec section 2.1, amended by
+	// migration design spec section 0.2).
+	operatorOrPushKey = principalSet{principalOperator, principalPushKey}
 )
 
 // principal is who is making an admin request.
@@ -71,6 +96,8 @@ type principal struct {
 	regionID int64
 	// keyID is populated for region keys and service principals.
 	keyID int64
+	// scopes is populated for region keys only; see apikey.Scopes.
+	scopes apikey.Scopes
 }
 
 // canAccessRegion is the tenancy fence for every region-scoped route EXCEPT
@@ -109,6 +136,7 @@ func (p principal) LogValue() slog.Value {
 		slog.String("username", p.user.Username),
 		slog.Int64("region_id", p.regionID),
 		slog.Int64("key_id", p.keyID),
+		slog.Any("scopes", p.scopes.Strings()),
 	)
 }
 

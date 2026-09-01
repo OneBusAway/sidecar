@@ -69,9 +69,12 @@ comes from a URL slug rather than their account.
 **What a leaked region key can do** (accepted, stated once here): read and write every
 resource of its region listed in §4.5, including setting that region's OBA API key
 via `PATCH /regions/{id}` (which redirects the region's sidecar-side OBA calls — ghost
-bus snapshots, vehicle search, alarms — to a key the holder controls). It cannot send
-push notifications (push create/cancel are operator-only, §4.5), reach another region,
-or mint or revoke keys. The remedy is revocation.
+bus snapshots, vehicle search, alarms — to a key the holder controls). It cannot reach
+another region or mint or revoke keys. Whether it can send push notifications depends
+on its **scopes** (§3, §5.6): an unscoped key cannot (push create/cancel are
+`operatorOrPushKey`, §4.5); a key minted with the `push` scope — which OBACloud holds
+for every migrated region — can deliver notifications to every device in the region.
+The remedy in either case is revocation.
 
 ### 2.2 Service principals automate provisioning
 
@@ -82,13 +85,14 @@ OBACloud holds one per sidecar deployment it talks to and mints region keys on d
 
 This is a deliberate trade: a mint-capable secret partially reintroduces the blast
 radius per-region keys avoid. **What a leaked service principal can do**, stated
-plainly: mint a live key for any published region (then use it, with the region-key
-exposure above), revoke every region key in the deployment — a deployment-wide denial
-of service for the OBACloud integration — and learn which region ids exist plus the
-metadata of every key (names, creator ids, timestamps). It can read no tenant data:
-no alert, no survey response, no rider report. It is accepted because the principal is
-used only on the rare provisioning path (never the hot path where secrets get logged
-or leak into error reports) and the damage is recoverable:
+plainly: mint a live key for any published region — including a push-scoped one, so it
+can deliver notifications to every device in every region (then use it, with the
+region-key exposure above), revoke every region key in the deployment — a
+deployment-wide denial of service for the OBACloud integration — and learn which region
+ids exist plus the metadata of every key (names, creator ids, timestamps). It can read
+no tenant data: no alert, no survey response, no rider report. It is accepted because
+the principal is used only on the rare provisioning path (never the hot path where
+secrets get logged or leak into error reports) and the damage is recoverable:
 
 - every key records **who minted it and who revoked it** (§3), so after a leak
   `key list --minted-by-principal N` shows the keys to revoke and `key list` shows
@@ -166,6 +170,7 @@ CREATE TABLE region_api_keys (
     region_id       INTEGER NOT NULL REFERENCES regions(id) ON DELETE CASCADE,
     name            TEXT    NOT NULL,
     key_hash        TEXT    NOT NULL UNIQUE,
+    scopes          TEXT    NOT NULL DEFAULT '[]',  -- JSON array; the only scope is "push" (00013)
     created_by_kind TEXT    NOT NULL CHECK (created_by_kind IN ('operator', 'principal', 'cli')),
     created_by_id   INTEGER,                -- users.id or service_principals.id; NULL iff cli
     created_at      INTEGER NOT NULL,
@@ -185,6 +190,11 @@ Revoked rows are kept (not deleted) so `key list` shows history and so a revoked
 hash cannot be re-minted by accident. `regions` cascade-deletes keys (the store enables
 `foreign_keys`), matching alerts. `created_by_*`/`revoked_by_*` are not foreign keys: a
 deleted operator or a revoked principal must not orphan the audit trail.
+
+`scopes` (migration `00013_region_api_key_scopes.sql`) is a JSON array of scope names.
+The only defined scope is `push`, which admits the key to `POST …/pushes` and
+`DELETE …/pushes/{pushId}` (§4.5). Unknown names are refused at mint time, never
+stored.
 
 ### 3.1 Key format
 
@@ -224,6 +234,7 @@ type RegionKey struct {
     RegionID   int64
     Name       string
     KeyHash    string
+    Scopes     Scopes // the parsed `scopes` column; only "push" is defined
     CreatedBy  Actor
     CreatedAt  time.Time
     LastUsedAt *time.Time
@@ -241,7 +252,7 @@ type ServicePrincipal struct {
 }
 
 type Repository interface {
-    CreateRegionKey(ctx, regionID int64, name, keyHash string, by Actor, now time.Time) (RegionKey, error)
+    CreateRegionKey(ctx, regionID int64, name, keyHash string, scopes Scopes, by Actor, now time.Time) (RegionKey, error)
     // GetRegionKeyByHash returns ErrNotFound for unknown hashes and ErrRevoked for
     // a hash that matches a revoked row (so the caller can log a replay distinctly).
     GetRegionKeyByHash(ctx, keyHash string) (RegionKey, error)
@@ -430,14 +441,16 @@ assert:
 | `GET /regions` (list) | ✓ | — | — |
 | `GET /regions/{id}`, `PATCH /regions/{id}` | ✓ | ✓ (own region) | — |
 | alerts (CRUD, publish, translations), `GET …/pushes`, `GET …/push_audience` | ✓ | ✓ | — |
-| `POST …/pushes`, `DELETE …/pushes/{pushId}` | ✓ | — | — |
+| `POST …/pushes`, `DELETE …/pushes/{pushId}` | ✓ | ✓ only with the `push` scope | — |
 | studies, surveys, responses, ghost bus, alarms, push counts | ✓ | ✓ | — |
 | `…/api_keys` (mint, list, revoke) | ✓ | — | ✓ |
 
-Sending or cancelling a push is operator-only: a leaked region key must not be able to
-deliver attacker text as a notification to every device in the region, and
-OBACloud's migration plan (§7.4) never sends pushes. Push reads stay available so
-OBACloud can show status.
+Sending or cancelling a push takes an operator or a region key carrying the `push`
+scope (`operatorOrPushKey`): an ordinary leaked region key must not be able to deliver
+attacker text as a notification to every device in the region, while OBACloud — which
+keeps its push wizard and drives the sidecar's push routes at send time (migration
+design §2.2) — holds a push-scoped key per migrated region and accepts that exposure.
+Push reads stay available to every region key.
 
 `PATCH /regions/{id}` by a region key lets OBACloud set timezone and default agency.
 It can also set the region's OBA API key (write-only, never echoed, as today); the
@@ -471,9 +484,9 @@ DELETE /regions/{regionId}/alerts/{id}
 POST   /regions/{regionId}/alerts/{id}/publish | unpublish
 PUT    /regions/{regionId}/alerts/{id}/translations/{lang}
 DELETE /regions/{regionId}/alerts/{id}/translations/{lang}
-POST   /regions/{regionId}/alerts/{id}/pushes           operator-only
+POST   /regions/{regionId}/alerts/{id}/pushes           operator or push-scoped key; body {audience?, messages?}
 GET    /regions/{regionId}/alerts/{id}/pushes
-DELETE /regions/{regionId}/alerts/{id}/pushes/{pushId}  operator-only
+DELETE /regions/{regionId}/alerts/{id}/pushes/{pushId}  operator or push-scoped key
 GET    /regions/{regionId}/alerts/{id}/push_audience
 GET    /regions/{regionId}                              new; the region row plus "features": [...]
 PATCH  /regions/{regionId}                              unchanged
@@ -558,8 +571,8 @@ Two `CountAudience` calls (`testOnly` false and true). No token listing.
 ### 5.6 Region API keys
 
 ```
-POST   /regions/{regionId}/api_keys            {name} → 201 {id, name, key, created_by, created_at}; Cache-Control: no-store; no Location header
-GET    /regions/{regionId}/api_keys            [{id, name, created_by: {kind, id}, created_at, last_used_at, revoked_at, revoked_by}]
+POST   /regions/{regionId}/api_keys            {name, scopes?: ["push"]} → 201 {id, name, scopes, key, created_by, created_at}; Cache-Control: no-store; no Location header; unknown scope → 400
+GET    /regions/{regionId}/api_keys            [{id, name, scopes, created_by: {kind, id}, created_at, last_used_at, revoked_at, revoked_by}]
 DELETE /regions/{regionId}/api_keys/{keyId}    revoke; 204 (also for an already-revoked key); 404 for an unknown id or an id in another region
 ```
 
@@ -586,8 +599,8 @@ routes and bearer auth require `Deps.APIKeys`; `main` always sets it.
 ### 6.1 `sidecar-admin`
 
 ```
-sidecar-admin key create --region N --name NAME             prints the raw key once, then id/name; created_by = cli
-sidecar-admin key list --region N                           id, name, created by, created, last used, revoked, revoked by
+sidecar-admin key create --region N --name NAME [--scope push]   prints the raw key once, then id/name/scopes; created_by = cli
+sidecar-admin key list --region N                           id, name, created by, created, last used, revoked, revoked by, scopes
 sidecar-admin key list --minted-by-principal N              every key a principal minted, across regions
 sidecar-admin key revoke --region N --id N
 sidecar-admin principal create --name NAME                  prints obasp_… once
@@ -657,11 +670,12 @@ its data and its keys. Two Rails-side rules follow:
 
 - Rails credentials hold `sidecar.principals`, a map from sidecar base URL to
   `obasp_…`, one entry per sidecar deployment. `Region.sidecar_base_url` **must
-  validate as a key of that map**; an unknown base URL is a hard validation error and
-  never falls back to a default principal. (Its current default,
-  `https://dashboard.onebusawaycloud.com`, must be a real sidecar with an entry, or
-  the default must change before this ships.) Principals are created by an operator
-  with `sidecar-admin principal create`.
+  validate as a key of that map once the region is migrated** (`sidecar_migrated_at`
+  set — migration design §3.2); an un-migrated region keeps the Rails-hosted default
+  (`https://sidecar.onebusaway.org`) with no principal, and an unknown base URL on a
+  migrated region is a hard validation error that never falls back to a default
+  principal. Principals are created by an operator with `sidecar-admin principal
+  create`. Keys are minted with `scopes: ["push"]` (§5.6) so the wizard can send.
 - `Region` gains `sidecar_api_key` (an `encrypts`-ed column), `sidecar_api_key_id`, and
   `sidecar_previous_api_key_id` (held until a rotation's revoke confirms). Enforced,
   not merely intended: none of the three is ever in `region_params`; a request spec
@@ -746,7 +760,9 @@ own region scope is the fence that matters.
 Alerts first (the sidecar alert API is the most mature), then surveys and responses,
 then alarms and push counts as read-only views. Each step reads from the sidecar and
 stops reading the corresponding Postgres tables; dropping those tables is a later,
-separate change. OBACloud never sends pushes through the sidecar.
+separate change. OBACloud keeps its push wizard, copywriter, scheduling, and test
+pushes, and sends through the sidecar's push routes with a push-scoped key and its own
+`messages` (migration design §2.2–2.3).
 
 ## 8. Testing
 

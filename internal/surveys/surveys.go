@@ -25,6 +25,12 @@ var (
 	// question set once responses exist, since stored answers reference
 	// question ids (design spec §2.13).
 	ErrQuestionsFrozen = errors.New("survey questions are frozen")
+	// ErrUnknownQuestion blocks a write whose document names a question id
+	// that is not this survey's (or names one twice, or names any on
+	// create): ids are server-owned, and a wrong one would silently rebind
+	// stored answers (migration design spec section 2.7). The HTTP layer
+	// maps it to 422.
+	ErrUnknownQuestion = errors.New("question id does not belong to this survey")
 	// ErrMalformedAnswers is the reference implementation's exact message
 	// for a responses parameter that is not a JSON-array string of objects
 	// (design spec §2.5); the HTTP layer writes err.Error() to the wire.
@@ -114,8 +120,12 @@ type NewResponse struct {
 }
 
 // QuestionDefinition is one question in an authoring document; position is
-// implied by array order (design spec §2.13).
+// implied by array order (design spec §2.13). ID, when set on an edit, is
+// the stored question this entry keeps: apps persist question ids, so an
+// edit that changes one question must not renumber the rest. An entry
+// without an id is a new question.
 type QuestionDefinition struct {
+	ID       *int64  `json:"id,omitempty"`
 	Required bool    `json:"required"`
 	Content  Content `json:"content"`
 }
@@ -148,16 +158,24 @@ type Repository interface {
 	// (design spec section 3.2).
 	UpdateStudy(ctx context.Context, regionID, id int64, name, description string, now time.Time) (Study, error)
 
-	CreateSurvey(ctx context.Context, studyID int64, def Definition, now time.Time) (Survey, error) // ErrNotFound for the study
+	// CreateSurvey refuses a definition whose questions carry ids with
+	// ErrUnknownQuestion: question ids are server-owned and there is
+	// nothing to keep on a create.
+	CreateSurvey(ctx context.Context, studyID int64, def Definition, now time.Time) (Survey, error) // ErrNotFound for the study, ErrUnknownQuestion
 	// CreateSurveyInRegion is CreateSurvey with the study's region as a
 	// JOIN condition: a study_id that arrived in a request body but belongs
 	// to another region is ErrNotFound. Body-borne ids never go through a
-	// load-then-compare.
+	// load-then-compare. Question ids are refused as in CreateSurvey.
 	CreateSurveyInRegion(ctx context.Context, regionID, studyID int64, def Definition, now time.Time) (Survey, error)
-	GetSurvey(ctx context.Context, id int64) (Survey, error)                                   // ErrNotFound; with Questions and Study
-	ListSurveys(ctx context.Context, regionID int64) ([]Survey, error)                         // every survey, authoring
-	ListActiveSurveys(ctx context.Context, regionID int64, now time.Time) ([]Survey, error)    // spec §7.1 filter
-	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error) // ErrNotFound, ErrQuestionsFrozen
+	GetSurvey(ctx context.Context, id int64) (Survey, error)                                // ErrNotFound; with Questions and Study
+	ListSurveys(ctx context.Context, regionID int64) ([]Survey, error)                      // every survey, authoring
+	ListActiveSurveys(ctx context.Context, regionID int64, now time.Time) ([]Survey, error) // spec §7.1 filter
+	// UpdateSurvey replaces the question set only when it differs from the
+	// stored one. A question the document names by id keeps that id; one
+	// without an id is new; a stored question the document omits is
+	// deleted; positions follow document order. An id that is not this
+	// survey's -- or named twice -- is ErrUnknownQuestion.
+	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error) // ErrNotFound, ErrQuestionsFrozen, ErrUnknownQuestion
 	DeleteSurvey(ctx context.Context, id int64) error                                          // ErrNotFound, ErrHasResponses
 	CountResponses(ctx context.Context, surveyID int64) (int64, error)
 

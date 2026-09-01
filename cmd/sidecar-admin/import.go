@@ -18,11 +18,13 @@ import (
 // OBACloud's `rake sidecar:export`) into this database. Rows that already
 // exist are skipped, so the same command applied to a later export of the
 // same region imports only what is new -- the "final delta" step of a
-// region cutover (README, Migrating a region from OBACloud).
-func runImport(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
+// region cutover (README, Migrating a region from OBACloud). `--file -`
+// reads the document from stdin, so the cutover can pipe it over `render
+// ssh` with no file transfer step (migration design spec section 2.5).
+func runImport(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	file := fs.String("file", "", "path to the export document (required)")
+	file := fs.String("file", "", "path to the export document, or - for stdin (required)")
 	dryRun := fs.Bool("dry-run", false, "validate the document and report what would be imported, without writing")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -30,21 +32,27 @@ func runImport(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 	if *file == "" {
 		return errors.New("import requires --file")
 	}
-	f, err := os.Open(*file)
-	if err != nil {
-		return err
+	r := stdin
+	source := "stdin"
+	if *file != "-" {
+		f, err := os.Open(*file)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		r = f
+		source = *file
 	}
-	defer f.Close()
 	var doc export.Document
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if decodeErr := dec.Decode(&doc); decodeErr != nil {
-		return fmt.Errorf("import: %s: %w", *file, decodeErr)
+		return fmt.Errorf("import: %s: %w", source, decodeErr)
 	}
-	// One document per file: a second JSON value would otherwise be read
+	// One document per input: a second JSON value would otherwise be read
 	// past silently and never imported.
 	if _, trailingErr := dec.Token(); !errors.Is(trailingErr, io.EOF) {
-		return fmt.Errorf("import: %s: unexpected content after the document", *file)
+		return fmt.Errorf("import: %s: unexpected content after the document", source)
 	}
 	if *dryRun {
 		// The same pre-checks the real import runs, so a clean dry run
@@ -54,14 +62,14 @@ func runImport(ctx context.Context, stdout io.Writer, store *sqlite.Store, now t
 			return validateErr
 		}
 		fmt.Fprintf(stdout, "dry run: %s is a valid %s document for region %d: %d alerts, %d studies, %d survey responses, %d push registrations, %d ghost bus reports\n",
-			*file, doc.Format, doc.RegionID, len(doc.Alerts), len(doc.Studies), len(doc.SurveyResponses), len(doc.PushRegistrations), len(doc.GhostBusReports))
+			source, doc.Format, doc.RegionID, len(doc.Alerts), len(doc.Studies), len(doc.SurveyResponses), len(doc.PushRegistrations), len(doc.GhostBusReports))
 		return nil
 	}
 	sum, err := store.Import(ctx, &doc, now)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "imported region %d from %s\n", doc.RegionID, *file)
+	fmt.Fprintf(stdout, "imported region %d from %s\n", doc.RegionID, source)
 	for _, line := range sum.Lines() {
 		fmt.Fprintln(stdout, line)
 	}
