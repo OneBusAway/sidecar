@@ -99,6 +99,11 @@ func TestImportCommand_ReadsStdin(t *testing.T) {
 	if err != nil || !strings.Contains(stdout, "dry run: stdin is a valid") {
 		t.Fatalf("dry run from stdin: %v %q", err, stdout)
 	}
+	// Without this the import below would cover for a dry run that wrote:
+	// the Get at the end passes either way.
+	if _, getErr := store.Alerts().Get(context.Background(), 77); getErr == nil {
+		t.Fatal("the stdin dry run wrote the alert")
+	}
 	stdout, _, err = cliStdin(t, bytes.NewReader(b), dbPath, "import", "--file", "-")
 	if err != nil || !strings.Contains(stdout, "imported region 16 from stdin") {
 		t.Fatalf("import from stdin: %v %q", err, stdout)

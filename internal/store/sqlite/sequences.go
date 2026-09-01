@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // SequenceTables are the AUTOINCREMENT tables whose ids an export document
@@ -42,6 +43,13 @@ func (s *Store) Sequences(ctx context.Context) (map[string]int64, error) {
 func (s *Store) BumpSequences(ctx context.Context, min int64) (map[string]int64, error) {
 	if min <= 0 {
 		return nil, fmt.Errorf("sqlite: bump sequences: min must be positive, got %d", min)
+	}
+	// math.MaxInt64 is the largest rowid SQLite can hand out, so an
+	// AUTOINCREMENT table parked there has no id left to mint and the next
+	// insert fails with SQLITE_FULL. A floor that high would brick the
+	// region we are migrating into, which is the opposite of the point.
+	if min == math.MaxInt64 {
+		return nil, fmt.Errorf("sqlite: bump sequences: min must be below %d, the largest rowid SQLite can mint", int64(math.MaxInt64))
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

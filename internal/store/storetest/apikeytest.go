@@ -463,9 +463,17 @@ func testAPIKeyScopes(t *testing.T, newStore newAPIKeyStoreFunc) {
 	if err != nil {
 		t.Fatalf("ListRegionKeysByCreator: %v", err)
 	}
+	var creatorSawPush bool
 	for _, k := range byCreator {
-		if k.ID == push.ID && !k.Scopes.Has(apikey.ScopePush) {
+		if k.ID != push.ID {
+			continue
+		}
+		creatorSawPush = true
+		if !k.Scopes.Has(apikey.ScopePush) {
 			t.Errorf("ListRegionKeysByCreator lost the push scope: %+v", k)
 		}
+	}
+	if !creatorSawPush {
+		t.Errorf("ListRegionKeysByCreator omitted the scoped key entirely: %+v", byCreator)
 	}
 }

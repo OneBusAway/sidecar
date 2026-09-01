@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -68,5 +69,33 @@ func TestBumpSequences(t *testing.T) {
 	}
 	if got := newAlert(t); got != floor+2 {
 		t.Errorf("after a lower bump, next alert id = %d, want %d", got, floor+2)
+	}
+}
+
+// TestBumpSequencesFloorBounds: the floor has to be a value SQLite can
+// still mint above. math.MaxInt64 is the largest rowid there is, so a
+// sequence parked there leaves nothing to hand out and the next insert
+// fails with SQLITE_FULL -- BumpSequences refuses it. One below is a
+// legitimate (if absurd) floor and is accepted.
+func TestBumpSequencesFloorBounds(t *testing.T) {
+	t.Parallel()
+	store := sqlitetest.Open(t)
+	ctx := context.Background()
+
+	if _, err := store.BumpSequences(ctx, math.MaxInt64); err == nil {
+		t.Fatal("BumpSequences(math.MaxInt64) = nil error, want a refusal")
+	}
+	seqs, err := store.Sequences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range sqlite.SequenceTables {
+		if seqs[name] != 0 {
+			t.Errorf("%s = %d after a refused bump, want 0", name, seqs[name])
+		}
+	}
+
+	if _, err := store.BumpSequences(ctx, math.MaxInt64-1); err != nil {
+		t.Fatalf("BumpSequences(math.MaxInt64-1): %v", err)
 	}
 }

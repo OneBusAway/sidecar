@@ -1216,16 +1216,17 @@ Record the `show` output in the cutover ticket; the cutover re-checks it.
 *Migrating a region from OBACloud* above explains why the floor is there
 and why re-running `bump` is safe.
 
-**5. Prove the OBACloud contract end to end.** With the principal from
+**5. Prove the OBACloud contract end-to-end.** With the principal from
 step 3 in `$P`, mint and revoke a push-scoped key exactly the way OBACloud
 will:
 
 ```sh
-curl -s -X POST https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys \
+curl -s -w '\n%{http_code}\n' -X POST https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys \
   -H "Authorization: Bearer $P" -H 'Content-Type: application/json' \
   -d '{"name":"runbook check","scopes":["push"]}'
-# 201 {"id":1,"name":"runbook check","scopes":["push"],"key":"obask_1_i6iK4jtmlst4Z_SLs59uHH…",
-#      "created_by":{"kind":"principal","id":1},"created_at":"2026-08-29T08:45:36Z"}
+# {"id":1,"name":"runbook check","scopes":["push"],"key":"obask_1_i6iK4jtmlst4Z_SLs59uHH…",
+#  "created_by":{"kind":"principal","id":1},"created_at":"2026-08-29T08:45:36Z"}
+# 201
 
 curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
   https://sidecar2.onebusaway.org/api/admin/v1/regions/1/api_keys/1 \

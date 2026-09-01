@@ -29,8 +29,10 @@ func TestSequenceCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sequence bump: %v", err)
 	}
-	if !strings.Contains(out, "alerts: 0 -> 1000000") {
-		t.Errorf("bump output:\n%s", out)
+	for _, name := range sqlite.SequenceTables {
+		if !strings.Contains(out, name+": 0 -> 1000000") {
+			t.Errorf("bump output lacks %q:\n%s", name, out)
+		}
 	}
 	seqs, err := store.Sequences(context.Background())
 	if err != nil {

@@ -520,35 +520,52 @@ func TestRouteTable_PushScopeIsExactlyTheTwoPushWrites(t *testing.T) {
 		switch {
 		case pushScoped[rt.pattern]:
 			seen[rt.pattern] = true
-			if rt.allowed.has(principalRegionKey) {
-				t.Errorf("route %q admits an unscoped region key", rt.pattern)
-			}
-			if !rt.allowed.has(principalPushKey) {
-				t.Errorf("route %q does not admit a push-scoped key; OBACloud cannot send", rt.pattern)
-			}
-			if !rt.allowed.has(principalOperator) {
-				t.Errorf("route %q does not admit an operator", rt.pattern)
-			}
-			if rt.allowed.has(principalService) {
-				t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
-			}
+			assertPushWriteRoute(t, rt)
 		case operatorOnlyPatterns[rt.pattern]:
 			seen[rt.pattern] = true
-			if rt.allowed.has(principalRegionKey) || rt.allowed.has(principalPushKey) || rt.allowed.has(principalService) {
-				t.Errorf("route %q admits a non-operator; the spec makes it operator-only", rt.pattern)
-			}
+			assertOperatorOnlyRoute(t, rt)
 		default:
 			if rt.allowed.has(principalPushKey) {
 				t.Errorf("route %q takes the push scope; only the two push writes may", rt.pattern)
 			}
 		}
 	}
-	for pattern := range pushScoped {
-		if !seen[pattern] {
-			t.Errorf("route %q is no longer in the table; this test has stopped guarding it", pattern)
-		}
+	assertRoutesStillInTable(t, seen, pushScoped)
+	assertRoutesStillInTable(t, seen, operatorOnlyPatterns)
+}
+
+// assertPushWriteRoute holds one of the two push writes to its allow-list:
+// an operator or a push-scoped region key, and nobody else.
+func assertPushWriteRoute(t *testing.T, rt adminRoute) {
+	t.Helper()
+	if rt.allowed.has(principalRegionKey) {
+		t.Errorf("route %q admits an unscoped region key", rt.pattern)
 	}
-	for pattern := range operatorOnlyPatterns {
+	if !rt.allowed.has(principalPushKey) {
+		t.Errorf("route %q does not admit a push-scoped key; OBACloud cannot send", rt.pattern)
+	}
+	if !rt.allowed.has(principalOperator) {
+		t.Errorf("route %q does not admit an operator", rt.pattern)
+	}
+	if rt.allowed.has(principalService) {
+		t.Errorf("route %q admits a service principal; it reads no tenant data", rt.pattern)
+	}
+}
+
+// assertOperatorOnlyRoute holds a route the spec reserves for operators to
+// exactly that: no region key of either kind, no service principal.
+func assertOperatorOnlyRoute(t *testing.T, rt adminRoute) {
+	t.Helper()
+	if rt.allowed.has(principalRegionKey) || rt.allowed.has(principalPushKey) || rt.allowed.has(principalService) {
+		t.Errorf("route %q admits a non-operator; the spec makes it operator-only", rt.pattern)
+	}
+}
+
+// assertRoutesStillInTable fails for any pattern the sweep never walked: a
+// renamed or dropped route would otherwise silently stop being guarded.
+func assertRoutesStillInTable(t *testing.T, seen, want map[string]bool) {
+	t.Helper()
+	for pattern := range want {
 		if !seen[pattern] {
 			t.Errorf("route %q is no longer in the table; this test has stopped guarding it", pattern)
 		}
