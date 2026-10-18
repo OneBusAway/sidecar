@@ -117,7 +117,8 @@ Therefore:
   server change.
 - Per-type key emission follows the reference jbuilder exactly: `options` only for
   `radio`/`checkbox`; `url`, `survey_provider`, `embedded_data_fields`, and
-  `sdk_configuration_values` only for `external_survey`; `text`/`label` carry just
+  `sdk_configuration_values` only for `external_survey` (plus `button_label`, only when
+  it is not the default `open_survey`, added 2026-10); `text`/`label` carry just
   `type` and `label_text`. The iOS decoder tolerates extra keys, so this is fidelity,
   not necessity — but a test pins it so the wire shape does not drift.
 - `required` is forced to `false` for `label` and `external_survey` questions at
@@ -546,6 +547,7 @@ type Content struct {
     SurveyProvider         string   // external_survey
     EmbeddedDataFields     []string // external_survey
     SDKConfigurationValues json.RawMessage // external_survey; a JSON object or nil
+    ButtonLabel            string   // external_survey; open_survey (default), learn_more, share_feedback, sign_up (added 2026-10)
 }
 
 type Answer struct {

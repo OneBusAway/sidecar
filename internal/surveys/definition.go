@@ -81,7 +81,7 @@ func (d *Definition) Validate() error {
 func ContentEqual(a, b Content) bool {
 	return a.Type == b.Type && a.LabelText == b.LabelText &&
 		slices.Equal(a.Options, b.Options) && a.URL == b.URL &&
-		a.SurveyProvider == b.SurveyProvider &&
+		a.SurveyProvider == b.SurveyProvider && a.buttonLabel() == b.buttonLabel() &&
 		slices.Equal(a.EmbeddedDataFields, b.EmbeddedDataFields) &&
 		bytes.Equal(a.SDKConfigurationValues, b.SDKConfigurationValues)
 }

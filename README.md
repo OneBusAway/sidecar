@@ -335,7 +335,9 @@ EOF
 
 Question `content.type` is one of `text`, `label`, `radio`, `checkbox`,
 `external_survey` (the last takes `url`, `survey_provider`,
-`embedded_data_fields`, `sdk_configuration_values`). Questions are displayed in
+`embedded_data_fields`, `sdk_configuration_values`, and an optional
+`button_label`: `open_survey` (the default), `learn_more`, `share_feedback`
+or `sign_up`). Questions are displayed in
 document order. Dates require an explicit UTC offset. Absent booleans are
 `false`, except `available`, which defaults to `true`; an absent or empty
 targeting list means "everywhere".

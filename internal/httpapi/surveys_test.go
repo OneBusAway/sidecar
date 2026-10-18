@@ -236,6 +236,38 @@ func TestSurveyList_PerTypeContentKeys(t *testing.T) {
 	}
 }
 
+// TestSurveyList_ButtonLabel: a customized button reaches riders as
+// button_label; the default, even spelled out at authoring time, is omitted
+// so a survey that does not customize it is byte-identical to before.
+func TestSurveyList_ButtonLabel(t *testing.T) {
+	t.Parallel()
+	h, repo, regs := surveyDeps(t, nil, nil)
+	def := fullDefinition()
+	def.Questions = []surveys.QuestionDefinition{
+		{Content: surveys.Content{Type: "external_survey", LabelText: "Go", URL: "https://e.org/a", ButtonLabel: "share_feedback"}},
+		{Content: surveys.Content{Type: "external_survey", LabelText: "Go", URL: "https://e.org/b", ButtonLabel: "open_survey"}},
+	}
+	seedSurvey(t, repo, regs, 1, def)
+	rec := doGet(t, h, "/api/v1/regions/1/surveys?user_id=u1")
+	var body struct {
+		Surveys []struct {
+			Questions []struct {
+				Content map[string]json.RawMessage `json:"content"`
+			} `json:"questions"`
+		} `json:"surveys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	qs := body.Surveys[0].Questions
+	if got := string(qs[0].Content["button_label"]); got != `"share_feedback"` {
+		t.Errorf("question 1 button_label = %s, want \"share_feedback\"", got)
+	}
+	if got, ok := qs[1].Content["button_label"]; ok {
+		t.Errorf("question 2 button_label = %s, want the key omitted for the default", got)
+	}
+}
+
 func TestSurveyList_UnsetWindowAndEmptyList(t *testing.T) {
 	t.Parallel()
 	h, repo, regs := surveyDeps(t, nil, nil)

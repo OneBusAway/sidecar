@@ -345,3 +345,32 @@ func TestAdminSurveys_PutPreservesQuestionIDs(t *testing.T) {
 		t.Errorf("question id on create: status = %d, want 422", rec.Code)
 	}
 }
+
+// TestAdminSurveys_ButtonLabel: an external_survey question's button_label
+// is one of the closed authoring set; it round-trips through the admin API
+// and an unknown key is a 422 naming the field, not a silently stored value
+// the apps would render as the default.
+func TestAdminSurveys_ButtonLabel(t *testing.T) {
+	t.Parallel()
+
+	f := newFullAdminFixture(t)
+	studyID := jsonID(t, object(t, f.do(http.MethodPost, "/api/admin/v1/regions/1/studies", `{"name":"s"}`), http.StatusCreated))
+	doc := func(label string) string {
+		return fmt.Sprintf(`{"study_id":%d,"name":"q","questions":[{"content":{"type":"external_survey","label_text":"Go","url":"https://e.org/s","button_label":%q}}]}`, studyID, label)
+	}
+
+	created := object(t, f.do(http.MethodPost, "/api/admin/v1/regions/1/surveys", doc("learn_more")), http.StatusCreated)
+	shown := object(t, f.do(http.MethodGet, fmt.Sprintf("/api/admin/v1/regions/1/surveys/%d", jsonID(t, created)), ""), http.StatusOK)
+	content := shown["questions"].([]any)[0].(map[string]any)["content"].(map[string]any)
+	if content["button_label"] != "learn_more" {
+		t.Errorf("button_label = %v, want learn_more", content["button_label"])
+	}
+
+	rec := f.do(http.MethodPost, "/api/admin/v1/regions/1/surveys", doc("Click Me"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown button_label: status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(bodyText(rec), "button_label") {
+		t.Errorf("body = %q, want it to name button_label", bodyText(rec))
+	}
+}
