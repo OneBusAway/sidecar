@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -31,6 +32,8 @@ const (
 	ButtonLabelShareFeedback = "share_feedback"
 	ButtonLabelSignUp        = "sign_up"
 )
+
+var buttonLabels = []string{ButtonLabelOpenSurvey, ButtonLabelLearnMore, ButtonLabelShareFeedback, ButtonLabelSignUp}
 
 // Content is a question's type-specific body (design spec §2.12). The JSON
 // tags are the storage and authoring-document shape; MarshalJSON below
@@ -98,10 +101,8 @@ func (c Content) validateExternalSurvey() error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("external_survey url must be an absolute http(s) URL")
 	}
-	switch c.ButtonLabel {
-	case "", ButtonLabelOpenSurvey, ButtonLabelLearnMore, ButtonLabelShareFeedback, ButtonLabelSignUp:
-	default:
-		return fmt.Errorf("external_survey button_label %q is not one of open_survey, learn_more, share_feedback, sign_up", c.ButtonLabel)
+	if c.ButtonLabel != "" && !slices.Contains(buttonLabels, c.ButtonLabel) {
+		return fmt.Errorf("external_survey button_label %q is not one of %s", c.ButtonLabel, strings.Join(buttonLabels, ", "))
 	}
 	if len(c.SDKConfigurationValues) > 0 {
 		trimmed := bytes.TrimSpace(c.SDKConfigurationValues)
