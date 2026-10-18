@@ -37,6 +37,13 @@ func TestContentValidate(t *testing.T) {
 		{"external null sdk", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org",
 			SDKConfigurationValues: json.RawMessage(`null`)}, "JSON object"},
 		{"text with url", surveys.Content{Type: "text", LabelText: "x", URL: "https://e.org"}, "cannot have url"},
+		{"external learn_more", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "learn_more"}, ""},
+		{"external share_feedback", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "share_feedback"}, ""},
+		{"external sign_up", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "sign_up"}, ""},
+		{"external explicit default", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "open_survey"}, ""},
+		{"external unknown button_label", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "Click Me"}, "button_label"},
+		{"text with button_label", surveys.Content{Type: "text", LabelText: "x", ButtonLabel: "learn_more"}, "button_label"},
+		{"label with button_label", surveys.Content{Type: "label", LabelText: "x", ButtonLabel: "sign_up"}, "button_label"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -87,6 +94,13 @@ func TestContentMarshalJSONPerTypeKeys(t *testing.T) {
 			[]string{"embedded_data_fields", "label_text", "sdk_configuration_values", "survey_provider", "type", "url"}},
 		{"external without sdk", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org"},
 			[]string{"embedded_data_fields", "label_text", "survey_provider", "type", "url"}},
+		// The default label is never emitted, spelled out or not, so a
+		// survey that does not customize its button stays byte-identical.
+		{"external explicit default button", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "open_survey"},
+			[]string{"embedded_data_fields", "label_text", "survey_provider", "type", "url"}},
+		{"external custom button", surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "learn_more"},
+			[]string{"button_label", "embedded_data_fields", "label_text", "survey_provider", "type", "url"}},
+		{"text never emits button", surveys.Content{Type: "text", LabelText: "x", ButtonLabel: "learn_more"}, []string{"label_text", "type"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -117,7 +131,7 @@ func TestContentMarshalJSONEmptyListsAreArrays(t *testing.T) {
 
 func TestContentJSONRoundTrip(t *testing.T) {
 	t.Parallel()
-	in := surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org",
+	in := surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org", ButtonLabel: "sign_up",
 		SurveyProvider: "p", EmbeddedDataFields: []string{"user_id"}, SDKConfigurationValues: json.RawMessage(`{"a":1}`)}
 	b, err := json.Marshal(in)
 	if err != nil {
@@ -128,8 +142,24 @@ func TestContentJSONRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Type != in.Type || out.LabelText != in.LabelText || out.URL != in.URL ||
-		out.SurveyProvider != in.SurveyProvider || !reflect.DeepEqual(out.EmbeddedDataFields, in.EmbeddedDataFields) ||
+		out.SurveyProvider != in.SurveyProvider || out.ButtonLabel != in.ButtonLabel || !reflect.DeepEqual(out.EmbeddedDataFields, in.EmbeddedDataFields) ||
 		string(out.SDKConfigurationValues) != `{"a":1}` {
 		t.Fatalf("round trip = %+v, want %+v", out, in)
+	}
+}
+
+// Spelling out the default must not read as an edit to a frozen survey:
+// it is the same button as leaving the key out.
+func TestContentEqualTreatsDefaultButtonLabelAsAbsent(t *testing.T) {
+	t.Parallel()
+	a := surveys.Content{Type: "external_survey", LabelText: "x", URL: "https://e.org"}
+	b := a
+	b.ButtonLabel = "open_survey"
+	if !surveys.ContentEqual(a, b) {
+		t.Fatal("ContentEqual(absent, open_survey) = false, want true")
+	}
+	b.ButtonLabel = "learn_more"
+	if surveys.ContentEqual(a, b) {
+		t.Fatal("ContentEqual(absent, learn_more) = true, want false")
 	}
 }

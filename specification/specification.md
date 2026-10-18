@@ -644,7 +644,17 @@ Question `content.type` is one of:
 | `label` | — (display-only, never answered, never `required`) |
 | `radio` | `options: [string]` |
 | `checkbox` | `options: [string]` |
-| `external_survey` | `url`, `survey_provider`, `embedded_data_fields: [string]`, `sdk_configuration_values` (JSON object) — hands off to a third-party survey SDK; never `required` |
+| `external_survey` | `url`, `survey_provider`, `embedded_data_fields: [string]`, `sdk_configuration_values` (JSON object), optional `button_label` — hands off to a third-party survey SDK; never `required` |
+
+`button_label` names the title of the button that opens an `external_survey`. It is a
+key, not display text: each client maps it to its own localized string. The keys are
+`open_survey` ("Open Survey", the default), `learn_more` ("Learn More"),
+`share_feedback` ("Share Feedback") and `sign_up` ("Sign Up"). A server rejects any other
+value at authoring time, and omits the key from the wire when it is absent or
+`open_survey`, so a survey that does not customize its button is unchanged. Clients must
+treat the field as an **open** enum: an absent or unrecognized value renders as
+`open_survey`, never as a decoding failure, so a key added later degrades gracefully on
+apps that predate it.
 
 Targeting fields: `visible_stop_list` / `visible_route_list` are arrays of stop/route ids
 (or `null` = everywhere); `show_on_map` / `show_on_stops` say where the survey surfaces;

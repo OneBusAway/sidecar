@@ -21,6 +21,17 @@ const (
 	TypeExternalSurvey = "external_survey"
 )
 
+// The button_label keys an external_survey question may carry. Clients map
+// each key to their own localized title, so this is a closed set at
+// authoring time; the wire contract is open, and a client that does not
+// know a key falls back to ButtonLabelOpenSurvey (design spec §2.12).
+const (
+	ButtonLabelOpenSurvey    = "open_survey"
+	ButtonLabelLearnMore     = "learn_more"
+	ButtonLabelShareFeedback = "share_feedback"
+	ButtonLabelSignUp        = "sign_up"
+)
+
 // Content is a question's type-specific body (design spec §2.12). The JSON
 // tags are the storage and authoring-document shape; MarshalJSON below
 // narrows the emitted keys per type for the wire and for storage alike.
@@ -32,6 +43,7 @@ type Content struct {
 	SurveyProvider         string          `json:"survey_provider,omitempty"`
 	EmbeddedDataFields     []string        `json:"embedded_data_fields,omitempty"`
 	SDKConfigurationValues json.RawMessage `json:"sdk_configuration_values,omitempty"`
+	ButtonLabel            string          `json:"button_label,omitempty"`
 }
 
 func isSelectable(typ string) bool { return typ == TypeRadio || typ == TypeCheckbox }
@@ -54,8 +66,8 @@ func (c Content) Validate() error {
 	if c.Type == TypeExternalSurvey {
 		return c.validateExternalSurvey()
 	}
-	if c.URL != "" || c.SurveyProvider != "" || len(c.EmbeddedDataFields) > 0 || len(c.SDKConfigurationValues) > 0 {
-		return fmt.Errorf("%s question cannot have url, survey_provider, embedded_data_fields, or sdk_configuration_values", c.Type)
+	if c.URL != "" || c.SurveyProvider != "" || len(c.EmbeddedDataFields) > 0 || len(c.SDKConfigurationValues) > 0 || c.ButtonLabel != "" {
+		return fmt.Errorf("%s question cannot have url, survey_provider, embedded_data_fields, sdk_configuration_values, or button_label", c.Type)
 	}
 	return nil
 }
@@ -86,6 +98,11 @@ func (c Content) validateExternalSurvey() error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("external_survey url must be an absolute http(s) URL")
 	}
+	switch c.ButtonLabel {
+	case "", ButtonLabelOpenSurvey, ButtonLabelLearnMore, ButtonLabelShareFeedback, ButtonLabelSignUp:
+	default:
+		return fmt.Errorf("external_survey button_label %q is not one of open_survey, learn_more, share_feedback, sign_up", c.ButtonLabel)
+	}
 	if len(c.SDKConfigurationValues) > 0 {
 		trimmed := bytes.TrimSpace(c.SDKConfigurationValues)
 		if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
@@ -98,7 +115,9 @@ func (c Content) validateExternalSurvey() error {
 // MarshalJSON emits exactly the key set the reference implementation
 // emits per type (design spec §2.3): text/label carry type and label_text;
 // radio/checkbox add options; external_survey adds url, survey_provider,
-// embedded_data_fields, and sdk_configuration_values when set. Lists are
+// embedded_data_fields, sdk_configuration_values when set, and button_label
+// when it is not the default -- so a survey that leaves its button alone is
+// byte-identical to one written before the field existed. Lists are
 // always arrays, never null, because the clients type them as arrays.
 func (c Content) MarshalJSON() ([]byte, error) {
 	out := map[string]any{"type": c.Type, "label_text": c.LabelText}
@@ -112,8 +131,20 @@ func (c Content) MarshalJSON() ([]byte, error) {
 		if len(c.SDKConfigurationValues) > 0 {
 			out["sdk_configuration_values"] = c.SDKConfigurationValues
 		}
+		if label := c.buttonLabel(); label != "" {
+			out["button_label"] = label
+		}
 	}
 	return json.Marshal(out)
+}
+
+// buttonLabel is ButtonLabel with the default folded into absence: an
+// explicit open_survey and an omitted key are the same button.
+func (c Content) buttonLabel() string {
+	if c.ButtonLabel == ButtonLabelOpenSurvey {
+		return ""
+	}
+	return c.ButtonLabel
 }
 
 func nonNilStrings(in []string) []string {

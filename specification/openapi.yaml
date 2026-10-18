@@ -1233,6 +1233,16 @@ components:
                 Provider-specific SDK configuration (`external_survey`
                 only); the key is omitted entirely when the stored value is
                 unparseable.
+            button_label:
+              type: string
+              examples: [learn_more]
+              description: >
+                Title key for the button that opens an `external_survey`
+                (`external_survey` only). Servers accept `open_survey`,
+                `learn_more`, `share_feedback` and `sign_up`, and omit the key
+                when it is absent or `open_survey`. Clients map the key to a
+                localized title and must treat this as an open enum: an absent
+                or unrecognized value renders as `open_survey`.
 
     WeatherForecast:
       type: object
