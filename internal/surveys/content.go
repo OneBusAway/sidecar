@@ -25,7 +25,8 @@ const (
 // The button_label keys an external_survey question may carry. Clients map
 // each key to their own localized title, so this is a closed set at
 // authoring time; the wire contract is open, and a client that does not
-// know a key falls back to ButtonLabelOpenSurvey (design spec §2.12).
+// know a key falls back to ButtonLabelOpenSurvey (specification.md §7.1,
+// question content).
 const (
 	ButtonLabelOpenSurvey    = "open_survey"
 	ButtonLabelLearnMore     = "learn_more"

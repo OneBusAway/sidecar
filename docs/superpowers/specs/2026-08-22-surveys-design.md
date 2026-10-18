@@ -547,6 +547,7 @@ type Content struct {
     SurveyProvider         string   // external_survey
     EmbeddedDataFields     []string // external_survey
     SDKConfigurationValues json.RawMessage // external_survey; a JSON object or nil
+    ButtonLabel            string   // external_survey; open_survey (default), learn_more, share_feedback, sign_up (added 2026-10)
 }
 
 type Answer struct {

@@ -61,7 +61,7 @@ func surveyDef(name string) surveys.Definition {
 			{Required: true, Content: surveys.Content{Type: "radio", LabelText: "Trip?", Options: []string{"Good", "Bad"}}},
 			{Content: surveys.Content{Type: "external_survey", LabelText: "More", URL: "https://e.org/s",
 				SurveyProvider: "qualtrics", EmbeddedDataFields: []string{"user_id"},
-				SDKConfigurationValues: json.RawMessage(`{"a":1}`)}},
+				SDKConfigurationValues: json.RawMessage(`{"a":1}`), ButtonLabel: "sign_up"}},
 		},
 	}
 }
