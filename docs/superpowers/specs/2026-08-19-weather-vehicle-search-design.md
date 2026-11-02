@@ -626,8 +626,10 @@ learns from the log rather than from a rider.
 | Upstream error, non-200, or timeout | `403 {}` | `502` |
 | Store error on region lookup | `500`, empty body | same |
 
-Every non-200 that is not a `404` logs at `Error` with the region id and the rewrapped
-cause (§2.10). No upstream error text, and no API key, ever reaches a rider or a log.
+A `403` for a persistent condition, no centroid or `weather.ErrNoProvider`, logs at `Warn`
+with the region id, and so does a client disconnecting mid-request. Other upstream failures
+and the store error log at `Error` with the region id and the rewrapped cause (§2.10). No
+upstream error text, and no API key, ever reaches a rider or a log.
 
 ## 12. Testing strategy
 
