@@ -18,6 +18,7 @@ import (
 	"github.com/OneBusAway/sidecar/internal/regions"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/vehicles"
+	"github.com/OneBusAway/sidecar/internal/weather"
 )
 
 // fakeOBA is an obaapi.Client that returns a canned fleet or a canned error.
@@ -338,3 +339,28 @@ func TestVehiclesLogsCancellationAtWarnOnly(t *testing.T) {
 // direct half of the design spec's key-in-logs requirement (the durable half
 // is regions.Region.LogValue, in internal/regions/region.go).
 const sentinelKey = "SENTINEL-REGION-OBA-API-KEY-do-not-log"
+
+func TestNewRouter_VehiclesAndWeatherRequireRegions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		deps Deps
+	}{
+		{"vehicles", Deps{Vehicles: &vehicles.Service{}, Logger: discardLogger()}},
+		{"weather", Deps{Weather: &weather.Service{}, Logger: discardLogger()}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				msg, ok := recover().(string)
+				if !ok {
+					t.Fatal("NewRouter did not panic with a message when Deps.Regions is nil")
+				}
+				assertContains(t, "panic message", msg, "Deps.Regions")
+			}()
+			NewRouter(tt.deps)
+		})
+	}
+}
