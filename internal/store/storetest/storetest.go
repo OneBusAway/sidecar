@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -1072,18 +1071,14 @@ func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 	}
 
 	// UPDATE trigger: break the centroid of the row just written.
-	const wantMsg = "latitude and longitude must be set together"
 	updateErr := w.WriteHalfSetCentroidForTest(ctx, 1)
 	if updateErr == nil {
 		t.Fatal("UPDATE with latitude but no longitude succeeded, want a constraint failure")
 	}
-	if !strings.Contains(updateErr.Error(), wantMsg) {
-		t.Errorf("UPDATE error = %q, want it to mention %q", updateErr.Error(), wantMsg)
-	}
 	// Any non-nil error -- a renamed column, a broken raw statement, a closed
-	// connection -- would satisfy the checks above without proving the
-	// trigger fired. Re-reading the row is what proves the ABORT rolled the
-	// write back rather than merely failing for some unrelated reason.
+	// connection -- would satisfy the check above without proving the
+	// invariant held. Re-reading the row is what proves the write was rolled
+	// back rather than merely failing for some unrelated reason.
 	got, err := repo.Get(ctx, 1)
 	if err != nil {
 		t.Fatalf("Get(1) after rejected UPDATE: %v", err)
@@ -1098,9 +1093,6 @@ func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 	insertErr := w.InsertHalfSetCentroidForTest(ctx, 2)
 	if insertErr == nil {
 		t.Fatal("INSERT with latitude but no longitude succeeded, want a constraint failure")
-	}
-	if !strings.Contains(insertErr.Error(), wantMsg) {
-		t.Errorf("INSERT error = %q, want it to mention %q", insertErr.Error(), wantMsg)
 	}
 	// Same rollback proof as above, applied to the INSERT case: the row must
 	// not exist at all, not merely have failed to receive a centroid.

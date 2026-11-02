@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -556,5 +557,28 @@ func TestCreateRegionKeyRefusesAnUndefinedScopeBeforeWriting(t *testing.T) {
 	}
 	if len(keys) != 0 {
 		t.Errorf("ListRegionKeys = %+v, want none", keys)
+	}
+}
+
+func TestRegionCentroidTriggersNameTheInvariant(t *testing.T) {
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	repo, ok := store.Regions().(storetest.HalfSetCentroidWriter)
+	if !ok {
+		t.Fatal("sqlite region repo does not implement HalfSetCentroidWriter")
+	}
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{
+		{ID: 1, Name: "Whole", OBABaseURL: "https://a.example/", Active: true,
+			Centroid: &regions.LatLon{Lat: 47.75, Lon: -122.49}},
+	}, time.Unix(0, 0)); err != nil {
+		t.Fatalf("UpsertFromDirectory: %v", err)
+	}
+
+	const wantMsg = "latitude and longitude must be set together"
+	if err := repo.WriteHalfSetCentroidForTest(ctx, 1); err == nil || !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("UPDATE error = %v, want it to mention %q", err, wantMsg)
+	}
+	if err := repo.InsertHalfSetCentroidForTest(ctx, 2); err == nil || !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("INSERT error = %v, want it to mention %q", err, wantMsg)
 	}
 }
