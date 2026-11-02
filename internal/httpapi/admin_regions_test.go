@@ -222,6 +222,9 @@ func TestAdminRegions_PatchRejections(t *testing.T) {
 			http.StatusBadRequest, []string{"Local", "machine-dependent"},
 		},
 		{"malformed JSON", "/api/admin/v1/regions/1", `{"timezone":`, http.StatusBadRequest, []string{"invalid JSON"}},
+		{"key status word region", "/api/admin/v1/regions/1", `{"oba_api_key":"region"}`, http.StatusBadRequest, []string{"oba_api_key", "status"}},
+		{"key status word default", "/api/admin/v1/regions/1", `{"oba_api_key":"default"}`, http.StatusBadRequest, []string{"oba_api_key", "status"}},
+		{"key status word none", "/api/admin/v1/regions/1", `{"oba_api_key":"none"}`, http.StatusBadRequest, []string{"oba_api_key", "status"}},
 	}
 
 	for _, tt := range tests {
@@ -235,7 +238,7 @@ func TestAdminRegions_PatchRejections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stored region: %v", err)
 	}
-	if stored.DefaultAgencyID != "1" || stored.Timezone != "America/Los_Angeles" {
+	if stored.DefaultAgencyID != "1" || stored.Timezone != "America/Los_Angeles" || stored.OBAAPIKey != "" {
 		t.Errorf("rejected patches mutated region 1: %+v", stored)
 	}
 }
