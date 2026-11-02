@@ -317,9 +317,11 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 		newKey = *obaKey
 	}
 	if *obaKeyStdin {
-		if newKey, err = readRegionKey(stdin); err != nil {
-			return err
+		key, keyErr := readRegionKey(stdin)
+		if keyErr != nil {
+			return keyErr
 		}
+		newKey = key
 	}
 
 	if err := repo.SetLocalFields(ctx, *id, regions.LocalFields{
