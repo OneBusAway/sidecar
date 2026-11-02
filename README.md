@@ -495,12 +495,13 @@ its live vehicle ids.
 ### Endpoints
 
 - `GET /api/v1/regions/{regionId}/weather` — current conditions plus an hourly
-  forecast for the region's centroid. A `403` means "unavailable" and covers every
-  failure mode alike: no Pirate Weather key configured, the region has no centroid
-  yet, or the upstream provider errored or timed out. This is deliberate, not a
-  placeholder -- shipped apps treat any non-200 response as "hide the weather UI"
-  and have been tested against `403` specifically, so it must never be "improved"
-  to a 5xx. An unknown `{regionId}` is still a plain `404`.
+  forecast for the region's centroid. A `403` means "unavailable" and covers the
+  provider and configuration failures alike: no Pirate Weather key configured, the
+  region has no centroid yet, or the upstream provider errored or timed out. This is
+  deliberate, not a placeholder -- shipped apps treat any non-200 response as "hide
+  the weather UI" and have been tested against `403` specifically, so these must
+  never be "improved" to a 5xx. An unknown `{regionId}` is still a plain `404`, and a
+  failure reading the region from the sidecar's own store is a `500`.
 - `GET /api/v1/regions/{regionId}/vehicles?query=` — substring search over the
   region's live vehicle ids. `query` must be between 3 and 64 characters (runes, not
   bytes); shorter or longer queries return `[]` without an upstream call. Only the
