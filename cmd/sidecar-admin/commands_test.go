@@ -896,6 +896,37 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 	}
 }
 
+func TestRegionSet_ReadsKeyFromStdin(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+
+	if _, _, err := cliStdin(t, strings.NewReader("from-stdin\n"), dbPath, "region", "set", "--id", "1", "--oba-api-key-stdin"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+	got, err := store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != "from-stdin" {
+		t.Errorf("OBAAPIKey = %q, want from-stdin", got.OBAAPIKey)
+	}
+
+	if _, _, err = cliStdin(t, strings.NewReader("\n"), dbPath, "region", "set", "--id", "1", "--oba-api-key-stdin"); err == nil {
+		t.Error("empty stdin succeeded, want an error")
+	}
+	if _, _, err = cliStdin(t, strings.NewReader("x"), dbPath, "region", "set", "--id", "1", "--oba-api-key", "y", "--oba-api-key-stdin"); err == nil {
+		t.Error("both key flags succeeded, want an error")
+	}
+	got, err = store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != "from-stdin" {
+		t.Errorf("OBAAPIKey = %q after rejected sets, want from-stdin", got.OBAAPIKey)
+	}
+}
+
 // The centroid comes from the directory, so a region seeded without bounds
 // shows an em dash rather than 0,0.
 func TestRegionList_ShowsCentroid(t *testing.T) {

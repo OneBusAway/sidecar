@@ -89,7 +89,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) error {
 
 	switch cmd {
 	case "region":
-		return runRegion(ctx, stdout, store, *regionsURL, now, cmdArgs)
+		return runRegion(ctx, stdin, stdout, store, *regionsURL, now, cmdArgs)
 	case "alert":
 		return runAlert(ctx, stdout, store, now, cmdArgs)
 	case "study":
@@ -208,7 +208,7 @@ func formatInZone(t time.Time, tz string) string {
 // region
 // ---------------------------------------------------------------------------
 
-func runRegion(ctx context.Context, stdout io.Writer, store *sqlite.Store, regionsURL string, now time.Time, args []string) error {
+func runRegion(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sqlite.Store, regionsURL string, now time.Time, args []string) error {
 	if len(args) == 0 {
 		return errors.New("region requires a subcommand: list, set, sync")
 	}
@@ -216,7 +216,7 @@ func runRegion(ctx context.Context, stdout io.Writer, store *sqlite.Store, regio
 	case "list":
 		return regionList(ctx, stdout, store.Regions())
 	case "set":
-		return regionSet(ctx, store.Regions(), now, args[1:])
+		return regionSet(ctx, stdin, store.Regions(), now, args[1:])
 	case "sync":
 		return regionSync(ctx, store.Regions(), regionsURL, now)
 	default:
@@ -254,19 +254,23 @@ func regionList(ctx context.Context, stdout io.Writer, repo regions.Repository) 
 // omitted --agency-id/--timezone/--oba-api-key leaves that field unchanged,
 // which is why the current row is fetched and merged before the (full-row)
 // write.
-func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args []string) error {
+func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, now time.Time, args []string) error {
 	fs := flag.NewFlagSet("region set", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	id := fs.Int64("id", 0, "region id (required)")
 	agencyID := fs.String("agency-id", "", "default agency id for this region")
 	timezone := fs.String("timezone", "", "IANA timezone for this region, e.g. America/Los_Angeles")
-	obaKey := fs.String("oba-api-key", "", "OneBusAway REST API key for this region (empty clears it)")
+	obaKey := fs.String("oba-api-key", "", "OneBusAway REST API key for this region; empty clears it, otherwise prefer --oba-api-key-stdin")
+	obaKeyStdin := fs.Bool("oba-api-key-stdin", false, "read the OneBusAway REST API key for this region from stdin")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	seen := visitedFlags(fs)
 	if !seen["id"] {
 		return errors.New("region set requires --id")
+	}
+	if seen["oba-api-key"] && *obaKeyStdin {
+		return errors.New("region set: use either --oba-api-key or --oba-api-key-stdin, not both")
 	}
 
 	current, err := repo.Get(ctx, *id)
@@ -310,6 +314,16 @@ func regionSet(ctx context.Context, repo regions.Repository, now time.Time, args
 	newKey := current.OBAAPIKey
 	if seen["oba-api-key"] {
 		newKey = *obaKey
+	}
+	if *obaKeyStdin {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return fmt.Errorf("region set: read key from stdin: %w", err)
+		}
+		newKey = strings.TrimRight(string(b), "\r\n")
+		if newKey == "" {
+			return errors.New("region set: --oba-api-key-stdin read an empty key; use --oba-api-key \"\" to clear it")
+		}
 	}
 
 	if err := repo.SetLocalFields(ctx, *id, regions.LocalFields{

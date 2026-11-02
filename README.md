@@ -82,7 +82,7 @@ Full command surface:
 
 ```
 sidecar-admin region  list
-                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key KEY]
+                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key-stdin | --oba-api-key KEY]
                        sync
 sidecar-admin alert   create --region N --header TEXT --start RFC3339
                               [--description TEXT] [--url URL] [--end RFC3339]
@@ -552,9 +552,9 @@ A region can also carry its own OneBusAway REST API key, overriding
 per-region fields:
 
 ```sh
-# A region's own key overrides SIDECAR_OBA_API_KEY for that region. Pass an
-# empty value to clear it and fall back to the process default.
-./bin/sidecar-admin --db ./sidecar.db region set --id 1 --oba-api-key <key>
+# A region's own key overrides SIDECAR_OBA_API_KEY for that region. Use
+# --oba-api-key "" to clear it and fall back to the process default.
+./bin/sidecar-admin --db ./sidecar.db region set --id 1 --oba-api-key-stdin < key.txt
 ```
 
 The key is write-only: `region set` accepts it but never prints it back, `region
