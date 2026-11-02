@@ -5,6 +5,8 @@ package vehicles
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -106,6 +108,12 @@ func NewService(oba obaapi.Client, fleet *cache.Cache[[]obaapi.Vehicle], result 
 	return &Service{oba: oba, fleet: fleet, result: result, logger: logger}
 }
 
+// fleetCacheKey includes the upstream config so a rotated key or new base URL misses the cache.
+func fleetCacheKey(region regions.Region) string {
+	sum := sha256.Sum256([]byte(region.OBABaseURL + "\x00" + region.OBAAPIKey))
+	return strconv.FormatInt(region.ID, 10) + "|" + hex.EncodeToString(sum[:8])
+}
+
 // Search returns the matches for rawQuery in region. A query that fails
 // Normalize returns an empty slice and no error, without any upstream call.
 func (s *Service) Search(ctx context.Context, region regions.Region, rawQuery string) ([]Match, error) {
@@ -116,7 +124,7 @@ func (s *Service) Search(ctx context.Context, region regions.Region, rawQuery st
 
 	// Formatted once and shared by both cache keys: this runs on every
 	// search, and the endpoint is called per keystroke.
-	regionKey := strconv.FormatInt(region.ID, 10)
+	regionKey := fleetCacheKey(region)
 	return s.result.Get(ctx, regionKey+"|"+q, func(ctx context.Context) ([]Match, error) {
 		fleet, err := s.fleet.Get(ctx, regionKey,
 			func(ctx context.Context) ([]obaapi.Vehicle, error) {
