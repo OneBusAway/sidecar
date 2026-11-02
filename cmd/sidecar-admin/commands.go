@@ -269,7 +269,8 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 	if !seen["id"] {
 		return errors.New("region set requires --id")
 	}
-	if seen["oba-api-key"] && *obaKeyStdin {
+	keyFlagSet := seen["oba-api-key"]
+	if keyFlagSet && *obaKeyStdin {
 		return errors.New("region set: use either --oba-api-key or --oba-api-key-stdin, not both")
 	}
 
@@ -312,17 +313,12 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 	// must leave it untouched. Testing *obaKey == "" would conflate those two
 	// and silently wipe the key on every unrelated `region set`.
 	newKey := current.OBAAPIKey
-	if seen["oba-api-key"] {
+	if keyFlagSet {
 		newKey = *obaKey
 	}
 	if *obaKeyStdin {
-		b, err := io.ReadAll(stdin)
-		if err != nil {
-			return fmt.Errorf("region set: read key from stdin: %w", err)
-		}
-		newKey = strings.TrimRight(string(b), "\r\n")
-		if newKey == "" {
-			return errors.New("region set: --oba-api-key-stdin read an empty key; use --oba-api-key \"\" to clear it")
+		if newKey, err = readRegionKey(stdin); err != nil {
+			return err
 		}
 	}
 
@@ -334,6 +330,18 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 		return fmt.Errorf("region set: %w", err)
 	}
 	return nil
+}
+
+func readRegionKey(stdin io.Reader) (string, error) {
+	b, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("region set: read key from stdin: %w", err)
+	}
+	key := strings.TrimRight(string(b), "\r\n")
+	if key == "" {
+		return "", errors.New("region set: --oba-api-key-stdin read an empty key; use --oba-api-key \"\" to clear it")
+	}
+	return key, nil
 }
 
 func regionSync(ctx context.Context, repo regions.Repository, url string, now time.Time) error {
