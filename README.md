@@ -82,7 +82,7 @@ Full command surface:
 
 ```
 sidecar-admin region  list
-                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key KEY]
+                       set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key-stdin | --oba-api-key KEY]
                        sync
 sidecar-admin alert   create --region N --header TEXT --start RFC3339
                               [--description TEXT] [--url URL] [--end RFC3339]
@@ -553,18 +553,18 @@ A region can also carry its own OneBusAway REST API key, overriding
 per-region fields:
 
 ```sh
-# A region's own key overrides SIDECAR_OBA_API_KEY for that region. Pass an
-# empty value to clear it and fall back to the process default.
-./bin/sidecar-admin --db ./sidecar.db region set --id 1 --oba-api-key <key>
+# A region's own key overrides SIDECAR_OBA_API_KEY for that region. Use
+# --oba-api-key "" to clear it and fall back to the process default.
+./bin/sidecar-admin --db ./sidecar.db region set --id 1 --oba-api-key-stdin < key.txt
 ```
 
 The key is write-only: `region set` accepts it but never prints it back, `region
 list` reports only whether a region has "own key" or "none (may inherit server
 default)", and the admin API's region endpoints report the same status word
-(`region`/`default`/`none`) instead of the key's value. Passing the key as a
-command-line argument puts it in shell history and in `ps` output visible to
-other users on the same host; a future revision will offer a stdin form so the
-key never appears on the command line at all.
+(`region`/`default`/`none`) instead of the key's value. Passing a non-empty key
+as a command-line argument puts it in shell history and in `ps` output visible to
+other users on the same host, so use `--oba-api-key-stdin` to keep it off the
+command line.
 
 Weather needs no separate coordinate configuration -- a region's centroid arrives
 automatically as part of `region sync`, computed from the regions directory's

@@ -566,7 +566,7 @@ JSON for a client that decodes before checking status.
 ### 9.1 `sidecar-admin`
 
 ```
-region set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key KEY]
+region set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key-stdin | --oba-api-key KEY]
 ```
 
 `--oba-api-key ""` clears the region's key, restoring the process-default fallback
