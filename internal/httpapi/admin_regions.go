@@ -141,6 +141,12 @@ func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	// already configured on an unrelated edit. An explicit "" clears it.
 	newKey := current.OBAAPIKey
 	if req.OBAAPIKey != nil {
+		switch *req.OBAAPIKey {
+		case keyStatusRegion, keyStatusDefault, keyStatusNone:
+			writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
+				"oba_api_key must be the key itself, not the status word a GET returns")
+			return
+		}
 		newKey = *req.OBAAPIKey
 	}
 
