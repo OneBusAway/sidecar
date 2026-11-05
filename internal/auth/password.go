@@ -85,7 +85,9 @@ func VerifyPassword(phc, password string) (bool, error) {
 		return false, errors.New("auth: malformed hash salt")
 	}
 	want, err := base64.RawStdEncoding.DecodeString(parts[5])
-	if err != nil {
+	if err != nil || len(want) == 0 {
+		// An empty segment decodes to zero bytes; argon2 cannot derive a
+		// zero-length key and would panic.
 		return false, errors.New("auth: malformed hash value")
 	}
 	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
