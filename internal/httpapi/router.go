@@ -227,6 +227,10 @@ func NewRouter(deps Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 
+	if (deps.Vehicles != nil || deps.Weather != nil) && deps.Regions == nil {
+		panic("httpapi: Deps.Regions required when Deps.Vehicles or Deps.Weather is set")
+	}
+
 	if deps.Vehicles != nil {
 		vh := &vehiclesHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
