@@ -1045,11 +1045,11 @@ func testCentroidRoundTrip(t *testing.T, newStore newStoreFunc) {
 }
 
 // testCentroidRejectsHalfSet proves the invariant lives in the schema, not
-// only in the Go type: it exercises both the INSERT and UPDATE triggers, and
-// -- beyond just checking that some error came back -- confirms each abort
-// actually rolled back the offending write, rather than merely proving that
-// some unrelated statement failed. A Postgres adapter expresses this as a
-// CHECK; both must refuse the same row the same way.
+// only in the Go type: it exercises both the INSERT and UPDATE triggers. Each
+// half-set write follows a control through the same hook with both coordinates,
+// so a hook that fails for an unrelated reason fails the control instead of
+// passing as a rejected write. A Postgres adapter expresses this as a CHECK;
+// both must refuse the same row the same way.
 func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 	_, repo := newStore(t)
 	ctx := context.Background()
@@ -1070,33 +1070,46 @@ func testCentroidRejectsHalfSet(t *testing.T, newStore newStoreFunc) {
 		t.Fatalf("UpsertFromDirectory: %v", err)
 	}
 
+	if err := w.WriteWholeCentroidForTest(ctx, 1); err != nil {
+		t.Fatalf("control UPDATE with both coordinates: %v", err)
+	}
+	whole, err := repo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get(1) after control UPDATE: %v", err)
+	}
+	if whole.Centroid == nil || *whole.Centroid == (regions.LatLon{Lat: 47.75, Lon: -122.49}) {
+		t.Fatalf("Centroid after control UPDATE = %+v, want it changed", whole.Centroid)
+	}
+
 	// UPDATE trigger: break the centroid of the row just written.
-	updateErr := w.WriteHalfSetCentroidForTest(ctx, 1)
-	if updateErr == nil {
+	if err = w.WriteHalfSetCentroidForTest(ctx, 1); err == nil {
 		t.Fatal("UPDATE with latitude but no longitude succeeded, want a constraint failure")
 	}
-	// Any non-nil error -- a renamed column, a broken raw statement, a closed
-	// connection -- would satisfy the check above without proving the
-	// invariant held. Re-reading the row is what proves the write was rolled
-	// back rather than merely failing for some unrelated reason.
+	// Re-reading the row proves the rejected write left it alone.
 	got, err := repo.Get(ctx, 1)
 	if err != nil {
 		t.Fatalf("Get(1) after rejected UPDATE: %v", err)
 	}
-	if got.Centroid == nil || got.Centroid.Lat != 47.75 || got.Centroid.Lon != -122.49 {
-		t.Errorf("Centroid after rejected UPDATE = %+v, want unchanged {47.75 -122.49}", got.Centroid)
+	if got.Centroid == nil || *got.Centroid != *whole.Centroid {
+		t.Errorf("Centroid after rejected UPDATE = %+v, want unchanged %+v", got.Centroid, whole.Centroid)
+	}
+
+	if err = w.InsertWholeCentroidForTest(ctx, 3); err != nil {
+		t.Fatalf("control INSERT with both coordinates: %v", err)
+	}
+	control, err := repo.Get(ctx, 3)
+	if err != nil || control.Centroid == nil {
+		t.Fatalf("Get(3) after control INSERT = %+v, %v, want a centroid", control, err)
 	}
 
 	// INSERT trigger: UpsertFromDirectory only ever writes both coordinates
 	// or neither, so nothing above -- or anywhere in the normal write path --
 	// ever exercises this trigger.
-	insertErr := w.InsertHalfSetCentroidForTest(ctx, 2)
-	if insertErr == nil {
+	if err = w.InsertHalfSetCentroidForTest(ctx, 2); err == nil {
 		t.Fatal("INSERT with latitude but no longitude succeeded, want a constraint failure")
 	}
-	// Same rollback proof as above, applied to the INSERT case: the row must
-	// not exist at all, not merely have failed to receive a centroid.
-	if _, err := repo.Get(ctx, 2); !errors.Is(err, regions.ErrNotFound) {
+	// The row must not exist at all, not merely have failed to receive a centroid.
+	if _, err = repo.Get(ctx, 2); !errors.Is(err, regions.ErrNotFound) {
 		t.Errorf("Get(2) after rejected INSERT: err = %v, want regions.ErrNotFound (the row must not exist)", err)
 	}
 }
@@ -1146,7 +1159,13 @@ type HalfSetCentroidWriter interface {
 	// WriteHalfSetCentroidForTest attempts to break an existing row's paired
 	// centroid columns, exercising the UPDATE trigger.
 	WriteHalfSetCentroidForTest(ctx context.Context, id int64) error
+	// WriteWholeCentroidForTest is the control for WriteHalfSetCentroidForTest:
+	// the same write with both coordinates, which has to succeed.
+	WriteWholeCentroidForTest(ctx context.Context, id int64) error
 	// InsertHalfSetCentroidForTest attempts to insert a brand new row with a
 	// half-set centroid, exercising the INSERT trigger.
 	InsertHalfSetCentroidForTest(ctx context.Context, id int64) error
+	// InsertWholeCentroidForTest is the control for InsertHalfSetCentroidForTest:
+	// the same insert with both coordinates, which has to succeed.
+	InsertWholeCentroidForTest(ctx context.Context, id int64) error
 }

@@ -363,8 +363,18 @@ func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, in regions.Lo
 // trigger. It bypasses the generated queries because no legitimate query can
 // express this row -- which is exactly the property under test.
 func (r *regionRepo) WriteHalfSetCentroidForTest(ctx context.Context, id int64) error {
+	return r.updateCentroidForTest(ctx, id, 47.5, nil)
+}
+
+// WriteWholeCentroidForTest is WriteHalfSetCentroidForTest's control: the same
+// statement with both coordinates, which the trigger has to let through.
+func (r *regionRepo) WriteWholeCentroidForTest(ctx context.Context, id int64) error {
+	return r.updateCentroidForTest(ctx, id, 47.5, -122.5)
+}
+
+func (r *regionRepo) updateCentroidForTest(ctx context.Context, id int64, lat, lon any) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE regions SET latitude = ?, longitude = NULL WHERE id = ?`, 47.5, id)
+		`UPDATE regions SET latitude = ?, longitude = ? WHERE id = ?`, lat, lon, id)
 	return err
 }
 
@@ -374,10 +384,20 @@ func (r *regionRepo) WriteHalfSetCentroidForTest(ctx context.Context, id int64) 
 // in the normal write path ever fires that trigger; without this hook it
 // would carry zero test coverage.
 func (r *regionRepo) InsertHalfSetCentroidForTest(ctx context.Context, id int64) error {
+	return r.insertCentroidForTest(ctx, id, 47.5, nil)
+}
+
+// InsertWholeCentroidForTest is InsertHalfSetCentroidForTest's control: the
+// same statement with both coordinates, which the trigger has to let through.
+func (r *regionRepo) InsertWholeCentroidForTest(ctx context.Context, id int64) error {
+	return r.insertCentroidForTest(ctx, id, 47.5, -122.5)
+}
+
+func (r *regionRepo) insertCentroidForTest(ctx context.Context, id int64, lat, lon any) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO regions (id, region_name, oba_base_url, latitude, longitude, synced_at, created_at, updated_at)
-		VALUES (?, 'Half-set insert', 'https://half-set.example/', ?, NULL, 0, 0, 0)`,
-		id, 47.5)
+		VALUES (?, 'Half-set insert', 'https://half-set.example/', ?, ?, 0, 0, 0)`,
+		id, lat, lon)
 	return err
 }
 
