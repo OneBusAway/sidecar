@@ -894,6 +894,24 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 	if got.Timezone != "America/Los_Angeles" {
 		t.Errorf("Timezone = %q, want America/Los_Angeles -- an unrelated edit reset it", got.Timezone)
 	}
+
+	if _, _, err = cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "8", "--timezone", "America/New_York"); err != nil {
+		t.Fatalf("region set (agency+timezone, key omitted): %v", err)
+	}
+
+	got, err = store.Regions().Get(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.OBAAPIKey != secret {
+		t.Errorf("OBAAPIKey = %q, want %q -- an unrelated edit reset it", got.OBAAPIKey, secret)
+	}
+	if got.DefaultAgencyID != "8" {
+		t.Errorf("DefaultAgencyID = %q, want 8", got.DefaultAgencyID)
+	}
+	if got.Timezone != "America/New_York" {
+		t.Errorf("Timezone = %q, want America/New_York", got.Timezone)
+	}
 }
 
 // The centroid comes from the directory, so a region seeded without bounds
