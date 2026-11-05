@@ -140,3 +140,32 @@ func TestServiceCachesFleetAcrossQueries(t *testing.T) {
 		t.Errorf("fleet fetched %d times for two distinct queries in the same region, want 1 (fleet cache not in effect)", got)
 	}
 }
+
+func TestServiceRefetchesFleetWhenUpstreamChanges(t *testing.T) {
+	region := regions.Region{ID: 1, Name: "A", OBABaseURL: "https://a.example", OBAAPIKey: "old"}
+	oba := newFleetByRegion(map[int64][]obaapi.Vehicle{
+		region.ID: {{AgencyID: "1", AgencyName: "A", VehicleID: "1_4361"}},
+	})
+	svc := newTestService(t, oba)
+	ctx := context.Background()
+
+	steps := []struct {
+		name   string
+		mutate func(*regions.Region)
+		want   int64
+	}{
+		{"first search", func(*regions.Region) {}, 1},
+		{"same config stays cached", func(*regions.Region) {}, 1},
+		{"rotated key", func(r *regions.Region) { r.OBAAPIKey = "new" }, 2},
+		{"corrected base URL", func(r *regions.Region) { r.OBABaseURL = "https://b.example" }, 3},
+	}
+	for _, step := range steps {
+		step.mutate(&region)
+		if _, err := svc.Search(ctx, region, "436"); err != nil {
+			t.Fatalf("%s: Search: %v", step.name, err)
+		}
+		if got := oba.calls[region.ID].Load(); got != step.want {
+			t.Errorf("%s: fleet fetched %d times, want %d", step.name, got, step.want)
+		}
+	}
+}
