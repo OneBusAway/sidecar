@@ -31,7 +31,7 @@ func regionByID(t *testing.T, list []map[string]any, id int64) map[string]any {
 	return nil
 }
 
-// TestAdminRegions_List pins the list shape, including the two locally-managed
+// TestAdminRegions_List pins the list shape, including the locally-managed
 // fields that exist nowhere in the directory document and are the only reason
 // this endpoint is editable at all.
 func TestAdminRegions_List(t *testing.T) {

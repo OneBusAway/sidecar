@@ -80,7 +80,7 @@ export interface RegionPatchPayload {
  * explicit agency id.
  *
  * timezone is sent only when non-empty. Regions arrive from the directory with
- * no timezone at all -- it is one of the two locally-managed fields -- so an
+ * no timezone at all -- it is one of the three locally-managed fields -- so an
  * empty box is the normal starting state, and the API rejects an empty
  * timezone ("timezone must not be empty"). Sending it anyway would make every
  * attempt to set an agency id on a zoneless region fail with a message about

@@ -40,7 +40,7 @@ describe('buildRegionPatch', () => {
 	});
 
 	// Regions arrive from the directory with no timezone -- it is one of the
-	// two locally-managed fields -- so a blank timezone box is the normal
+	// three locally-managed fields -- so a blank timezone box is the normal
 	// starting state. Sending `timezone: ""` would make the server reject the
 	// save with "timezone must not be empty", so setting an agency id on a
 	// zoneless region would fail with a message about timezones.

@@ -49,7 +49,7 @@
 	let busy = $state(false);
 
 	// '' means the region has no configured timezone. It is the DEFAULT state:
-	// timezone is one of the two locally-managed region fields, so a freshly
+	// timezone is one of the three locally-managed region fields, so a freshly
 	// synced region has none until an operator sets one.
 	const zone = $derived(region.timezone);
 

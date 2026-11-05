@@ -92,8 +92,8 @@ type directoryResponse struct {
 }
 
 // directoryEntry is one region as the directory document represents it. The
-// document carries no timezone and no default agency id -- those are locally
-// managed, which is why they are absent here too.
+// document carries no timezone, default agency id or OBA API key -- those are
+// locally managed, which is why they are absent here too.
 type directoryEntry struct {
 	ID             int64            `json:"id"`
 	RegionName     string           `json:"regionName"`

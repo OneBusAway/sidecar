@@ -57,11 +57,11 @@ go build -o bin/sidecar-admin ./cmd/sidecar-admin
 # Pull the regions directory (id, name, base URLs) into the database.
 ./bin/sidecar-admin --db ./sidecar.db region sync
 
-# Configure the two locally-managed fields the directory doesn't carry: the
-# default agency id stamped onto alerts that don't specify one, and the
-# timezone `alert create`/`alert edit` interpret naive-looking times against
-# (an explicit UTC offset is still required; the timezone is only used to
-# report a helpful error). Required before the first `alert create` below.
+# Configure the locally-managed fields alerts rely on, which the directory
+# doesn't carry: the default agency id stamped onto alerts that don't specify
+# one, and the timezone `alert create`/`alert edit` interpret naive-looking
+# times against (an explicit UTC offset is still required; the timezone is only
+# used to report a helpful error). Required before the first `alert create` below.
 ./bin/sidecar-admin --db ./sidecar.db region set --id 1 \
   --agency-id 1 --timezone America/Los_Angeles
 
