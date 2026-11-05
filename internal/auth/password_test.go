@@ -63,6 +63,22 @@ func TestVerifyRejectsLooseVersion(t *testing.T) {
 	}
 }
 
+// The parameters field must be exactly what encodePHC writes: no trailing
+// garbage, signs or leading zeros in m, t or p. Everything else in the hash
+// is valid, so an error here can only come from the parameters check.
+func TestVerifyRejectsLooseParams(t *testing.T) {
+	for _, params := range []string{
+		"m=19456,t=2,p=1junk", "m=19456,t=2xx,p=1", "m=19456xx,t=2,p=1",
+		"m=19456,t=2,p=+1", "m=19456,t=+2,p=1", "m=+19456,t=2,p=1",
+		"m=19456,t=2,p=01", "m=19456,t=02,p=1", "m=019456,t=2,p=1",
+	} {
+		phc := strings.Replace(DummyPHC, "$m=19456,t=2,p=1$", "$"+params+"$", 1)
+		if _, err := VerifyPassword(phc, "x"); err == nil {
+			t.Errorf("VerifyPassword with %q should error", params)
+		}
+	}
+}
+
 func TestDummyPHCIsWellFormed(t *testing.T) {
 	ok, err := VerifyPassword(DummyPHC, "anything at all")
 	if err != nil {
