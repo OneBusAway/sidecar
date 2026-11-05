@@ -912,6 +912,9 @@ func TestRegionSet_ReadsKeyFromStdin(t *testing.T) {
 		t.Errorf("OBAAPIKey = %q, want from-stdin", got.OBAAPIKey)
 	}
 
+	if _, _, err = cliStdin(t, strings.NewReader("  \n"), dbPath, "region", "set", "--id", "1", "--oba-api-key-stdin"); err == nil {
+		t.Error("whitespace-only stdin succeeded, want an error")
+	}
 	if _, _, err = cliStdin(t, strings.NewReader("\n"), dbPath, "region", "set", "--id", "1", "--oba-api-key-stdin"); err == nil {
 		t.Error("empty stdin succeeded, want an error")
 	}

@@ -339,7 +339,7 @@ func readRegionKey(stdin io.Reader) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("region set: read key from stdin: %w", err)
 	}
-	key := strings.TrimRight(string(b), "\r\n")
+	key := strings.TrimSpace(string(b))
 	if key == "" {
 		return "", errors.New("region set: --oba-api-key-stdin read an empty key; use --oba-api-key \"\" to clear it")
 	}
