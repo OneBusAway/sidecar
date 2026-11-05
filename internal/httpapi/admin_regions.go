@@ -19,10 +19,10 @@ const (
 )
 
 // regionJSON is the response shape for one region (design spec §5).
-// DefaultAgencyID and Timezone are the two locally-managed fields: the
-// regions directory carries neither, and the periodic refresh must never
-// overwrite them. OBAAPIKey is a status word, never the key itself -- see the
-// keyStatus* constants.
+// DefaultAgencyID, Timezone and the OBA API key are the three locally-managed
+// fields: the regions directory carries none of them, and the periodic refresh
+// must never overwrite them. OBAAPIKey is a status word, never the key itself
+// -- see the keyStatus* constants.
 type regionJSON struct {
 	ID              int64    `json:"id"`
 	Name            string   `json:"name"`
@@ -50,7 +50,7 @@ type patchRegionRequest struct {
 
 // adminRegionsHandler serves the authenticated region endpoints. Regions
 // themselves come from the directory, so there is no create or delete here --
-// only the two locally-managed fields are editable.
+// only the three locally-managed fields are editable.
 type adminRegionsHandler struct {
 	deps Deps
 }

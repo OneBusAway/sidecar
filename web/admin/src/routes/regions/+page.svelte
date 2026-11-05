@@ -87,8 +87,8 @@
 
 <p class="note">
 	Regions come from the OneBusAway regions directory and cannot be added or
-	removed here. The default agency id and the timezone are the two
-	locally-managed fields; a directory refresh leaves them alone.
+	removed here. The default agency id, the timezone and the OBA API key are the
+	three locally-managed fields; a directory refresh leaves them alone.
 </p>
 
 <p class="note">
