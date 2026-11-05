@@ -77,7 +77,7 @@ func VerifyPassword(phc, password string) (bool, error) {
 	var m, t uint32
 	var p uint8
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &m, &t, &p); err != nil ||
-		parts[3] != fmt.Sprintf("m=%d,t=%d,p=%d", m, t, p) {
+		parts[3] != fmt.Sprintf("m=%d,t=%d,p=%d", m, t, p) || t < 1 || p < 1 {
 		return false, errors.New("auth: malformed hash parameters")
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

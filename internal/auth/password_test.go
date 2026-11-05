@@ -79,6 +79,16 @@ func TestVerifyRejectsLooseParams(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsZeroParams(t *testing.T) {
+	for _, params := range []string{"m=19456,t=0,p=1", "m=19456,t=2,p=0"} {
+		phc := strings.Replace(DummyPHC, "$m=19456,t=2,p=1$", "$"+params+"$", 1)
+		_, err := VerifyPassword(phc, "x")
+		if err == nil || err.Error() != "auth: malformed hash parameters" {
+			t.Errorf("VerifyPassword with %q: got %v, want malformed hash parameters", params, err)
+		}
+	}
+}
+
 func TestDummyPHCIsWellFormed(t *testing.T) {
 	ok, err := VerifyPassword(DummyPHC, "anything at all")
 	if err != nil {
