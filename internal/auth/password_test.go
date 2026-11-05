@@ -89,6 +89,16 @@ func TestVerifyRejectsZeroParams(t *testing.T) {
 	}
 }
 
+// An empty hash segment decodes to zero bytes without error. Deriving a
+// zero-length key panics inside x/crypto, so it must be rejected as malformed.
+func TestVerifyRejectsEmptyHash(t *testing.T) {
+	phc := "$argon2id$v=19$m=19456,t=2,p=1$AAAA$"
+	_, err := VerifyPassword(phc, "x")
+	if err == nil || err.Error() != "auth: malformed hash value" {
+		t.Errorf("VerifyPassword with empty hash segment: got %v, want malformed hash value", err)
+	}
+}
+
 func TestDummyPHCIsWellFormed(t *testing.T) {
 	ok, err := VerifyPassword(DummyPHC, "anything at all")
 	if err != nil {
