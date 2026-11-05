@@ -235,7 +235,7 @@ Both keys travel in the URL. Pirate Weather takes its key as a **path segment**
 **query parameter** (`option.WithQuery("key", …)`).
 
 Go's HTTP transport reports failures as `*url.Error`, which embeds the full URL in its
-`Error()` string. §11 requires logging every non-200 with its cause — so a plain
+`Error()` string. §11 requires logging upstream failures with their cause — so a plain
 `err` in that log line writes the secret into the log file, undoing the care §2.2
 spends keeping it out of JSON and devtools.
 
@@ -487,7 +487,7 @@ Handler, in order:
    a. Fleet cache, keyed by region id → `obaapi.Fleet`.
    b. Filter with `strings.Contains(v.VehicleID, q)` — **raw id, lowered query only**.
    c. Map to `[]VehicleMatch{ID: agency id, Name: agency name, VehicleID: …}`.
-5. Errors → `502` with an empty body and a logged `Error` naming the region and cause.
+5. Errors → `502` with an empty body and a log line naming the region, at the level §11 gives.
 6. Success → `200` with a JSON array. **Never `null`**: the slice is initialized with
    `make([]VehicleMatch, 0)` so a no-match response is `[]`, which is what the schema
    says and what a client decoding into an array expects.
@@ -626,10 +626,10 @@ learns from the log rather than from a rider.
 | Upstream error, non-200, or timeout | `403 {}` | `502` |
 | Store error on region lookup | `500`, empty body | same |
 
-A `403` for a persistent condition, no centroid or `weather.ErrNoProvider`, logs at `Warn`
-with the region id, and so does a client disconnecting mid-request. Other upstream failures
-and the store error log at `Error` with the region id and the rewrapped cause (§2.10). No
-upstream error text, and no API key, ever reaches a rider or a log.
+A persistent condition (no centroid, `weather.ErrNoProvider`, or `obaapi.ErrNotConfigured`)
+logs at `Warn` with the region id, and so does a client disconnecting mid-request. Other
+upstream failures and the store error log at `Error` with the region id and the rewrapped
+cause (§2.10). No upstream error text, and no API key, ever reaches a rider or a log.
 
 ## 12. Testing strategy
 
