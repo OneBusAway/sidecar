@@ -217,15 +217,22 @@ func NewRouter(deps Deps) http.Handler {
 		deps.VerifyPassword = auth.VerifyPassword
 	}
 
-	h := &alertsHandler{deps: deps}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
 
 	// The feed routes are unauthenticated by design (design spec §1.3) and
-	// deliberately bypass every admin middleware.
-	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
-	mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
+	// deliberately bypass every admin middleware. The handlers deref Regions
+	// (resolveRegion) and Now on the first request, so fail at boot instead.
+	if deps.Alerts != nil {
+		if missing := missingDeps(map[string]bool{
+			"Deps.Regions": deps.Regions == nil, "Deps.Now": deps.Now == nil,
+		}); len(missing) > 0 {
+			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Alerts is set")
+		}
+		h := &alertsHandler{deps: deps}
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
+	}
 
 	if (deps.Vehicles != nil || deps.Weather != nil) && deps.Regions == nil {
 		panic("httpapi: Deps.Regions required when Deps.Vehicles or Deps.Weather is set")
