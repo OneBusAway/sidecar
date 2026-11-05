@@ -251,6 +251,8 @@ paths:
           description: Upstream weather provider unavailable. Any body is ignored by clients.
         '404':
           $ref: '#/components/responses/RegionNotFound'
+        '500':
+          description: Region store failure. Empty body.
 
   /api/v1/regions/{regionId}/vehicles:
     get:
@@ -283,6 +285,8 @@ paths:
                   $ref: '#/components/schemas/VehicleMatch'
         '404':
           $ref: '#/components/responses/RegionNotFound'
+        '500':
+          description: Region store failure. Empty body.
         '502':
           description: |
             The region's OBA REST API server could not be reached, or no API

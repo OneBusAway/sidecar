@@ -30,10 +30,11 @@ type weatherHandler struct {
 
 // forecast serves GET /api/v1/regions/{regionId}/weather.
 //
-// Every failure that is not an unknown region is a 403, per spec §9: shipped
-// apps treat any non-200 as "hide the weather UI", and 403 is the code they
-// have been tested against. A 404 would tell the app the region does not
-// exist, which is a different and false claim.
+// Every provider or configuration failure is a 403, per spec §9: shipped apps
+// treat any non-200 as "hide the weather UI", and 403 is the code they have
+// been tested against. A 404 would tell the app the region does not exist,
+// which is a different and false claim. A region store failure is a 500,
+// through resolveRegion and writeServerError.
 func (h *weatherHandler) forecast(w http.ResponseWriter, r *http.Request) {
 	region, ok := resolveRegion(w, r, h.deps)
 	if !ok {
