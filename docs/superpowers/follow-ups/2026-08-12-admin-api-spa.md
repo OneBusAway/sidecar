@@ -61,10 +61,6 @@ part of it.
 
 ## 4. Smaller items
 
-- `internal/auth/password.go` — `VerifyPassword` parses the PHC version with
-  `fmt.Sscanf`, which accepts trailing garbage (`v=19xxx` parses as 19). Not
-  exploitable; PHC strings only ever come from our own `HashPassword`. Fix: exact
-  string compare against `"v=19"`.
 - Header guards test `== ""`, not whitespace, so a header of `"   "` still passes all
   three surfaces. The neighbouring `agency_id` guard has the identical hole; fix both
   together, including a `.trim()` in the SPA's payload builders.
