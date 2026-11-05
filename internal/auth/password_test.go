@@ -51,6 +51,18 @@ func TestVerifyRejectsGarbage(t *testing.T) {
 	}
 }
 
+// The version field must be exactly "v=19". Sscanf-style parsing would read
+// each of these as 19; everything else in the hash is valid, so an error here
+// can only come from the version check.
+func TestVerifyRejectsLooseVersion(t *testing.T) {
+	for _, v := range []string{"v=19xxx", "v=+19", "v=019"} {
+		phc := strings.Replace(DummyPHC, "$v=19$", "$"+v+"$", 1)
+		if _, err := VerifyPassword(phc, "x"); err == nil {
+			t.Errorf("VerifyPassword with %q should error", v)
+		}
+	}
+}
+
 func TestDummyPHCIsWellFormed(t *testing.T) {
 	ok, err := VerifyPassword(DummyPHC, "anything at all")
 	if err != nil {

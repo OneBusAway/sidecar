@@ -71,8 +71,7 @@ func VerifyPassword(phc, password string) (bool, error) {
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return false, errors.New("auth: malformed password hash")
 	}
-	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
+	if parts[2] != fmt.Sprintf("v=%d", argon2.Version) {
 		return false, errors.New("auth: unsupported hash version")
 	}
 	var m, t uint32
