@@ -511,7 +511,8 @@ its live vehicle ids.
   Results are capped at 250. An upstream failure is a `502`, not an empty `200`: an
   empty list is indistinguishable from "no such vehicle", so a rider searching for a
   bus that exists would otherwise be told, confidently, that it doesn't. An unknown
-  `{regionId}` is a `404`.
+  `{regionId}` is a `404`, and a failure reading the region from the sidecar's own
+  store is a `500`.
 
 ### Configuration
 
