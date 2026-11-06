@@ -79,12 +79,11 @@ export interface RegionPatchPayload {
  * default on purpose, after which creating an alert in that region needs an
  * explicit agency id.
  *
- * timezone is sent only when non-empty. Regions arrive from the directory with
- * no timezone at all -- it is one of the three locally-managed fields -- so an
- * empty box is the normal starting state, and the API rejects an empty
- * timezone ("timezone must not be empty"). Sending it anyway would make every
- * attempt to set an agency id on a zoneless region fail with a message about
- * timezones.
+ * timezone is sent only when non-empty. The API rejects an empty timezone
+ * ("timezone must not be empty"), so sending a blank value would make every
+ * save from this form fail with a message about timezones. A synced region
+ * never has a blank timezone: the directory sync leaves the column to its
+ * default, 'UTC'.
  *
  * obaAPIKey is sent only when it is defined, and `undefined` is the normal
  * state: the server never sends a key back, so an untouched field has no

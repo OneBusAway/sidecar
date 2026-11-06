@@ -39,11 +39,10 @@ describe('buildRegionPatch', () => {
 		});
 	});
 
-	// Regions arrive from the directory with no timezone -- it is one of the
-	// three locally-managed fields -- so a blank timezone box is the normal
-	// starting state. Sending `timezone: ""` would make the server reject the
-	// save with "timezone must not be empty", so setting an agency id on a
-	// zoneless region would fail with a message about timezones.
+	// The server rejects `timezone: ""` with "timezone must not be empty", so
+	// sending a blank timezone would fail the save and show a message about
+	// timezones. A synced region holds 'UTC' (the column default), so the form
+	// does not normally start blank.
 	it('omits a blank timezone rather than sending an empty one', () => {
 		const payload = buildRegionPatch('HART', '');
 		expect('timezone' in payload).toBe(false);
