@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -442,5 +443,24 @@ func TestFeed_CacheControl(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("404 Cache-Control = %q, want no-store; a CDN default TTL would shadow a region added later", got)
+	}
+}
+
+func TestNewRouterPanicsWhenAlertsFeedLacksRegionsOrNow(t *testing.T) {
+	defer func() {
+		msg, _ := recover().(string)
+		if !strings.Contains(msg, "Deps.Regions") || !strings.Contains(msg, "Deps.Now") {
+			t.Errorf("panic message = %q, want it to name Deps.Regions and Deps.Now", msg)
+		}
+	}()
+	httpapi.NewRouter(httpapi.Deps{Alerts: sqlitetest.Open(t).Alerts(), Logger: slog.New(slog.DiscardHandler)})
+}
+
+func TestAlertsFeedNotRoutedWithoutAlerts(t *testing.T) {
+	h := httpapi.NewRouter(httpapi.Deps{Logger: slog.New(slog.DiscardHandler)})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/alerts", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
 	}
 }

@@ -837,11 +837,10 @@ func TestNewRouter_RequiresNowWithAuth(t *testing.T) {
 		NewRouter(Deps{Auth: newStubAuth(), Logger: discardLogger()})
 	})
 
-	t.Run("feed-only router without now is fine", func(t *testing.T) {
+	t.Run("router with no features wired needs no now", func(t *testing.T) {
 		t.Parallel()
-		// The feed handlers call Now per request, not at construction, and
-		// every feed caller already supplies it; requiring it here would
-		// break callers this task has no business touching.
+		// Every feature that reads Now, the alerts feed included, requires it
+		// at boot. Deps{Logger} wires none of them, so a nil Now is fine.
 		defer func() {
 			if r := recover(); r != nil {
 				t.Fatalf("NewRouter panicked without Auth: %v", r)
