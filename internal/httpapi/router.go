@@ -39,6 +39,8 @@ import (
 // handler tests are deterministic, cost no wall-clock time, and the package
 // stays clear of the repo-wide time.Now ban.
 type Deps struct {
+	// Alerts backs the public alert feeds and the admin alert routes. Nil
+	// means the feed routes are not registered; Auth requires it.
 	Alerts  alerts.Repository
 	Regions regions.Repository
 	// Auth backs the admin session endpoints. When it is nil the admin routes
@@ -224,18 +226,16 @@ func NewRouter(deps Deps) http.Handler {
 	// deliberately bypass every admin middleware. The handlers deref Regions
 	// (resolveRegion) and Now on the first request, so fail at boot instead.
 	if deps.Alerts != nil {
-		if missing := missingDeps(map[string]bool{
-			"Deps.Regions": deps.Regions == nil, "Deps.Now": deps.Now == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Alerts is set")
-		}
+		requireDeps("Deps.Alerts is set", map[string]bool{
+			depRegions: deps.Regions == nil, depNow: deps.Now == nil,
+		})
 		h := &alertsHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 	}
 
-	if (deps.Vehicles != nil || deps.Weather != nil) && deps.Regions == nil {
-		panic("httpapi: Deps.Regions required when Deps.Vehicles or Deps.Weather is set")
+	if deps.Vehicles != nil || deps.Weather != nil {
+		requireDeps("Deps.Vehicles or Deps.Weather is set", map[string]bool{depRegions: deps.Regions == nil})
 	}
 
 	if deps.Vehicles != nil {
@@ -252,11 +252,9 @@ func NewRouter(deps Deps) http.Handler {
 		// The handlers deref Regions (resolveRegion) and Now on the first
 		// request; fail at boot, naming everything missing so the fix is one
 		// edit rather than three restarts, matching the Auth block below.
-		if missing := missingDeps(map[string]bool{
-			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.PushRegs is set")
-		}
+		requireDeps("Deps.PushRegs is set", map[string]bool{
+			depNow: deps.Now == nil, depRegions: deps.Regions == nil,
+		})
 		if deps.PushLimiter == nil {
 			deps.PushLimiter = ratelimit.New(30, time.Minute)
 		}
@@ -273,12 +271,10 @@ func NewRouter(deps Deps) http.Handler {
 		// on the first alarm. Checked independently of the PushRegs block
 		// above rather than leaning on its guard: these are this block's own
 		// requirements, and the panic should say which one is missing.
-		if missing := missingDeps(map[string]bool{
-			"Deps.PushRegs": deps.PushRegs == nil, "Deps.Now": deps.Now == nil,
-			"Deps.Regions": deps.Regions == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Alarms is set")
-		}
+		requireDeps("Deps.Alarms is set", map[string]bool{
+			"Deps.PushRegs": deps.PushRegs == nil, depNow: deps.Now == nil,
+			depRegions: deps.Regions == nil,
+		})
 		ah := &alarmsHandler{deps: deps}
 		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
 		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
@@ -287,11 +283,9 @@ func NewRouter(deps Deps) http.Handler {
 	}
 
 	if deps.LiveActivities != nil {
-		if missing := missingDeps(map[string]bool{
-			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.LiveActivities is set")
-		}
+		requireDeps("Deps.LiveActivities is set", map[string]bool{
+			depNow: deps.Now == nil, depRegions: deps.Regions == nil,
+		})
 		if deps.LiveActivityLimiter == nil {
 			deps.LiveActivityLimiter = ratelimit.New(liveActivityRegistrationsPerMinute, time.Minute)
 		}
@@ -329,11 +323,9 @@ func NewRouter(deps Deps) http.Handler {
 	}
 
 	if deps.Surveys != nil {
-		if missing := missingDeps(map[string]bool{
-			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Surveys is set")
-		}
+		requireDeps("Deps.Surveys is set", map[string]bool{
+			depNow: deps.Now == nil, depRegions: deps.Regions == nil,
+		})
 		if deps.SurveyLimiter == nil {
 			deps.SurveyLimiter = ratelimit.New(surveyWritesPerMinute, time.Minute)
 		}
@@ -353,11 +345,9 @@ func NewRouter(deps Deps) http.Handler {
 	}
 
 	if deps.GhostBus != nil {
-		if missing := missingDeps(map[string]bool{
-			"Deps.Now": deps.Now == nil, "Deps.Regions": deps.Regions == nil,
-		}); len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.GhostBus is set")
-		}
+		requireDeps("Deps.GhostBus is set", map[string]bool{
+			depNow: deps.Now == nil, depRegions: deps.Regions == nil,
+		})
 		if deps.GhostBusIPLimiter == nil {
 			deps.GhostBusIPLimiter = ratelimit.New(10, time.Hour) // spec §2.6
 		}
@@ -399,13 +389,10 @@ func NewRouter(deps Deps) http.Handler {
 	// there is still a stack trace worth reading, naming everything missing so
 	// the fix is one edit rather than three restarts.
 	if deps.Auth != nil {
-		missing := missingDeps(map[string]bool{
-			"Deps.Now": deps.Now == nil, "Deps.Alerts": deps.Alerts == nil,
-			"Deps.Regions": deps.Regions == nil,
+		requireDeps("Deps.Auth is set", map[string]bool{
+			depNow: deps.Now == nil, "Deps.Alerts": deps.Alerts == nil,
+			depRegions: deps.Regions == nil,
 		})
-		if len(missing) > 0 {
-			panic("httpapi: " + strings.Join(missing, ", ") + " required when Deps.Auth is set")
-		}
 		// Charged only on a failed bearer attempt (see rejectBearer), so this
 		// bucket never meters a working consumer.
 		if deps.BearerFailLimiter == nil {
@@ -416,10 +403,7 @@ func NewRouter(deps Deps) http.Handler {
 		// above, so the registry is the one thing left that would nil-deref
 		// inside the first handler instead of at boot.
 		if alertPushRoutesEnabled(deps) {
-			if missing := missingDeps(map[string]bool{"Deps.PushRegs": deps.PushRegs == nil}); len(missing) > 0 {
-				panic("httpapi: " + strings.Join(missing, ", ") +
-					" required when Deps.AlertPushes and Deps.AlertPushWaker are set")
-			}
+			requireDeps("Deps.AlertPushes and Deps.AlertPushWaker are set", map[string]bool{"Deps.PushRegs": deps.PushRegs == nil})
 		}
 		registerAdminRoutes(mux, deps)
 	}
@@ -667,6 +651,19 @@ func adminFeatures(deps Deps) []string {
 		features = append(features, "api_keys")
 	}
 	return features
+}
+
+const (
+	depNow     = "Deps.Now"
+	depRegions = "Deps.Regions"
+)
+
+// requireDeps panics at boot, naming every absent dependency, when the
+// feature described by when is wired without them.
+func requireDeps(when string, absent map[string]bool) {
+	if missing := missingDeps(absent); len(missing) > 0 {
+		panic("httpapi: " + strings.Join(missing, ", ") + " required when " + when)
+	}
 }
 
 // missingDeps returns the names of the absent dependencies, sorted so the
