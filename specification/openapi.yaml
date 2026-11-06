@@ -94,6 +94,8 @@ paths:
                 description: Serialized `transit_realtime.FeedMessage` protocol buffer.
         '404':
           $ref: '#/components/responses/RegionNotFound'
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v1/regions/{regionId}/surveys:
     get:
@@ -130,6 +132,8 @@ paths:
                 $ref: '#/components/schemas/LegacyErrors'
               example:
                 errors: ["user_id is required"]
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v1/survey_responses:
     post:
@@ -252,7 +256,7 @@ paths:
         '404':
           $ref: '#/components/responses/RegionNotFound'
         '500':
-          description: Region store failure. Empty body.
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v1/regions/{regionId}/vehicles:
     get:
@@ -286,7 +290,7 @@ paths:
         '404':
           $ref: '#/components/responses/RegionNotFound'
         '500':
-          description: Region store failure. Empty body.
+          $ref: '#/components/responses/RegionStoreFailure'
         '502':
           description: |
             The region's OBA REST API server could not be reached, or no API
@@ -334,9 +338,10 @@ paths:
                 messages: ["Push identifier can't be blank"]
         '500':
           description: >
-            The V1 path deliberately lets OBA lookup failures (unknown trip,
-            upstream network errors) escape as an unstructured 500 rather
-            than degrading to a generic alarm as V2 does.
+            Region store failure, with an empty body. The V1 path also
+            deliberately lets OBA lookup failures (unknown trip, upstream
+            network errors) escape as an unstructured 500 rather than
+            degrading to a generic alarm as V2 does.
 
   /api/v1/regions/{regionId}/alarms/{alarmToken}:
     delete:
@@ -352,6 +357,8 @@ paths:
           description: Alarm deleted. The deletion has actually occurred; a failed delete must be a 5xx, never a 204.
         '404':
           description: No alarm with this token. Empty body.
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v1/payment_intents:
     post:
@@ -425,6 +432,8 @@ paths:
               example:
                 error: Unable to register alarm
                 messages: ["Operating system can't be blank"]
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v2/regions/{regionId}/alarms/{alarmToken}:
     delete:
@@ -444,6 +453,8 @@ paths:
           description: Alarm deleted.
         '404':
           description: No alarm with this token. Empty body.
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v2/regions/{regionId}/live_activities:
     post:
@@ -484,6 +495,8 @@ paths:
               example:
                 error: Unable to register live activity
                 messages: ["Push token can't be blank"]
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v2/regions/{regionId}/live_activities/{activityToken}:
     delete:
@@ -508,6 +521,8 @@ paths:
           description: Subscription deleted.
         '404':
           description: No subscription with this token. Empty body.
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v2/regions/{regionId}/push_registrations:
     post:
@@ -547,6 +562,8 @@ paths:
                 messages: ["Operating system is not included in the list"]
         '429':
           description: Rate limited.
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
     delete:
       tags: [Push Registrations]
       operationId: unregisterPushToken
@@ -572,6 +589,8 @@ paths:
           description: No registration with this token in this region. Empty body.
         '429':
           description: Rate limited (shared bucket with registration).
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
   /api/v2/regions/{regionId}/ghost_bus_reports:
     post:
@@ -640,6 +659,8 @@ paths:
             at 8 KB) — rejected outright, since a legitimate report is far
             smaller and an uncounted oversized body would bypass the per-user
             limit.
+        '500':
+          $ref: '#/components/responses/RegionStoreFailure'
 
 # Out-of-band messages the sidecar *sends* (via APNs/FCM, not HTTP callbacks to
 # a client-registered URL). Modeled as webhooks because they are the other half
@@ -773,6 +794,9 @@ components:
             $ref: '#/components/schemas/SimpleError'
           example:
             error: Couldn't find Region
+    RegionStoreFailure:
+      description: >
+        The sidecar could not read the region from its own store. Empty body.
     ResourceUrlCreated:
       description: >
         Resource created. `url` is the fully-qualified, secure-token-addressed
