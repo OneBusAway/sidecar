@@ -48,9 +48,9 @@
 	let error = $state('');
 	let busy = $state(false);
 
-	// '' means the region has no configured timezone. It is the DEFAULT state:
-	// timezone is one of the three locally-managed region fields, so a freshly
-	// synced region has none until an operator sets one.
+	// A synced region holds 'UTC': the directory sync never sets timezone, so
+	// the column default applies. '' is not a state the server returns, since
+	// it rejects an empty timezone.
 	const zone = $derived(region.timezone);
 
 	async function submit(event: SubmitEvent) {

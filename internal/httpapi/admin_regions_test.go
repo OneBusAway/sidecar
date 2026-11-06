@@ -124,8 +124,8 @@ func TestAdminRegions_ListEmptyIsAnArray(t *testing.T) {
 	}
 }
 
-// TestAdminRegions_PatchSetsOnlyWhatWasSent: both fields are pointers, so an
-// omitted one must survive the write. The stored row is written whole, so an
+// TestAdminRegions_PatchSetsOnlyWhatWasSent: all three fields are pointers, so
+// an omitted one must survive the write. The stored row is written whole, so an
 // implementation that forgot to merge would blank the field it did not touch.
 func TestAdminRegions_PatchSetsOnlyWhatWasSent(t *testing.T) {
 	t.Parallel()
