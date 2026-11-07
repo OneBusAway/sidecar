@@ -269,6 +269,24 @@ func TestGhostBusCreate_JSONBody(t *testing.T) {
 	assertPinnedCreateFields(t, in)
 }
 
+// TestGhostBusCreate_JSONServiceDateOutOfRange pins issue #49: a JSON
+// number beyond int64 must fail presence like any other non-integer, not
+// convert to a garbage service_date that reaches the dedupe key.
+func TestGhostBusCreate_JSONServiceDateOutOfRange(t *testing.T) {
+	t.Parallel()
+	repo := &fakeGhostBusRepo{}
+	h, regs := newGhostBusTestServer(t, repo, nil, nil, nil)
+	putRegion(t, regs, 1)
+
+	fields := stringsToAny(validGhostBusFields())
+	fields["service_date"] = 1e30
+	rec := ghostBusPost(t, h, jsonCT, jsonEncode(t, fields))
+	require422Message(t, rec, "Service date can't be blank")
+	if len(repo.attempts) != 0 {
+		t.Errorf("attempts = %d, want 0", len(repo.attempts))
+	}
+}
+
 // TestGhostBusCreate_PredictedThreeStates pins the other two states of
 // Predicted's three-state contract (present-true is already covered by
 // cases 1/2 above): present-false must store &false, not be dropped to
