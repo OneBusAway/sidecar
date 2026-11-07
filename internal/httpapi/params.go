@@ -116,6 +116,11 @@ func (p params) int64(key string) (int64, bool) {
 		if t != math.Trunc(t) {
 			return 0, false
 		}
+		// Bound by 2^63, not math.MaxInt64: float64(math.MaxInt64) rounds
+		// up to 2^63, which int64 cannot hold.
+		if t >= 1<<63 || t < -(1<<63) {
+			return 0, false
+		}
 		return int64(t), true
 	case string:
 		n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)

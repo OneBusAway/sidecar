@@ -304,6 +304,48 @@ func TestParamsInt64(t *testing.T) {
 			wantVal: 0,
 			wantOk:  false,
 		},
+		{
+			name:    "JSON float 1.5",
+			m:       map[string]any{"n": 1.5},
+			key:     "n",
+			wantVal: 0,
+			wantOk:  false,
+		},
+		{
+			name:    "JSON float far above int64 range",
+			m:       map[string]any{"n": 1e30},
+			key:     "n",
+			wantVal: 0,
+			wantOk:  false,
+		},
+		{
+			name:    "JSON float far below int64 range",
+			m:       map[string]any{"n": -1e30},
+			key:     "n",
+			wantVal: 0,
+			wantOk:  false,
+		},
+		{
+			name:    "JSON float exactly 2^63",
+			m:       map[string]any{"n": float64(9223372036854775808)},
+			key:     "n",
+			wantVal: 0,
+			wantOk:  false,
+		},
+		{
+			name:    "JSON float largest below 2^63",
+			m:       map[string]any{"n": float64(9223372036854774784)},
+			key:     "n",
+			wantVal: 9223372036854774784,
+			wantOk:  true,
+		},
+		{
+			name:    "JSON float exactly -2^63",
+			m:       map[string]any{"n": float64(-9223372036854775808)},
+			key:     "n",
+			wantVal: -9223372036854775808,
+			wantOk:  true,
+		},
 	}
 
 	for _, tt := range tests {
