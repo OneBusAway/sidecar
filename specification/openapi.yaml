@@ -511,6 +511,8 @@ paths:
               example:
                 error: Unable to register live activity
                 messages: ["Push token can't be blank"]
+        '429':
+          description: Rate limited (30/minute per client address). DELETE is not throttled.
         '500':
           $ref: '#/components/responses/RegionStoreFailure'
 
