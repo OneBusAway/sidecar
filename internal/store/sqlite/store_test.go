@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +21,12 @@ import (
 	"github.com/OneBusAway/sidecar/internal/liveactivities"
 	"github.com/OneBusAway/sidecar/internal/pushreg"
 	"github.com/OneBusAway/sidecar/internal/regions"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite/migrations"
 	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 	"github.com/OneBusAway/sidecar/internal/store/storetest"
 	"github.com/OneBusAway/sidecar/internal/surveys"
 
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -182,6 +185,82 @@ func columnTypes(ctx context.Context, db *sql.DB, table string) (map[string]stri
 // explicitly-numbered sqlc.arg was numbered as a fourth, unfilled
 // placeholder, so every real Feed call failed with "missing argument with
 // index 4" even though the hand-run SQL was correct.
+// TestMigrateClearsDefaultUTCTimezone pins migration 14 against data that
+// predates it: a stored 'UTC' cannot be told apart from the old column
+// default, so it becomes ” (not configured), while a zone an operator
+// chose is left alone. Down puts the default back. It drives goose through
+// a Provider rather than Store.Migrate, because it has to stop at version 13
+// to seed rows, and a Provider leaves goose's package globals untouched for
+// the tests running in parallel.
+func TestMigrateClearsDefaultUTCTimezone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migrate.db"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+
+	p, err := goose.NewProvider(goose.DialectSQLite3, db, migrations.FS)
+	if err != nil {
+		t.Fatalf("goose.NewProvider: %v", err)
+	}
+	if _, err := p.UpTo(ctx, 13); err != nil {
+		t.Fatalf("UpTo(13): %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO regions
+		(id, region_name, oba_base_url, timezone, synced_at, created_at, updated_at)
+		VALUES (1, 'Tampa Bay', 'https://a.example.org/', 'UTC', 0, 0, 0),
+		       (2, 'Puget Sound', 'https://b.example.org/', 'America/Los_Angeles', 0, 0, 0)`); err != nil {
+		t.Fatalf("seed regions: %v", err)
+	}
+
+	zones := func() map[int64]string {
+		t.Helper()
+		rows, qErr := db.QueryContext(ctx, "SELECT id, timezone FROM regions ORDER BY id")
+		if qErr != nil {
+			t.Fatalf("select regions: %v", qErr)
+		}
+		defer rows.Close()
+		out := map[int64]string{}
+		for rows.Next() {
+			var id int64
+			var tz string
+			if scanErr := rows.Scan(&id, &tz); scanErr != nil {
+				t.Fatalf("scan: %v", scanErr)
+			}
+			out[id] = tz
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			t.Fatalf("rows: %v", rowsErr)
+		}
+		return out
+	}
+
+	if _, err := p.UpTo(ctx, 14); err != nil {
+		t.Fatalf("UpTo(14): %v", err)
+	}
+	got := zones()
+	if got[1] != "" {
+		t.Errorf("after up: region 1 timezone = %q, want \"\" (UTC was the unconfigured default)", got[1])
+	}
+	if got[2] != "America/Los_Angeles" {
+		t.Errorf("after up: region 2 timezone = %q, want America/Los_Angeles (configured zone must survive)", got[2])
+	}
+
+	if _, err := p.DownTo(ctx, 13); err != nil {
+		t.Fatalf("DownTo(13): %v", err)
+	}
+	got = zones()
+	if got[1] != "UTC" {
+		t.Errorf("after down: region 1 timezone = %q, want UTC", got[1])
+	}
+	if got[2] != "America/Los_Angeles" {
+		t.Errorf("after down: region 2 timezone = %q, want America/Los_Angeles", got[2])
+	}
+}
+
 func TestFeed(t *testing.T) {
 	t.Parallel()
 

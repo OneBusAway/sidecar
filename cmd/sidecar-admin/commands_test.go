@@ -402,11 +402,10 @@ func TestUnknownTimezoneRejected(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	// The schema default ("UTC") is what a freshly-synced, never-configured
-	// region carries; the assertion is that the rejected --timezone never
-	// overwrote it.
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	// A freshly-synced, never-configured region has no timezone (""); the
+	// assertion is that the rejected --timezone never overwrote it.
+	if got.Timezone != "" {
+		t.Errorf("Timezone = %q, want it still unconfigured (rejection must write nothing)", got.Timezone)
 	}
 }
 
@@ -639,6 +638,11 @@ func TestRegionSetRejectsEmptyTimezone(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
+	// Configure a zone first: a fresh region is already "", so asserting it
+	// stays "" could not catch a rejected value that was written anyway.
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
 
 	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "")
 	if err == nil {
@@ -649,8 +653,8 @@ func TestRegionSetRejectsEmptyTimezone(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	if got.Timezone != "America/Los_Angeles" {
+		t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
 	}
 }
 
@@ -658,6 +662,11 @@ func TestRegionSetRejectsLocalTimezone(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
+	// Configure a zone first: a fresh region is already "", so asserting it
+	// stays "" could not catch a rejected value that was written anyway.
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
 
 	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "Local")
 	if err == nil {
@@ -668,8 +677,8 @@ func TestRegionSetRejectsLocalTimezone(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	if got.Timezone != "America/Los_Angeles" {
+		t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
 	}
 }
 

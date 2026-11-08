@@ -83,10 +83,11 @@ func TestAdminRegions_List(t *testing.T) {
 	if v := str(t, bare, "default_agency_id"); v != "" {
 		t.Errorf("region 2 default_agency_id = %q, want empty", v)
 	}
-	// Never configured, so it still holds the schema's default rather than an
-	// empty string: the column is NOT NULL DEFAULT 'UTC'.
-	if v := str(t, bare, "timezone"); v != "UTC" {
-		t.Errorf("region 2 timezone = %q, want the schema default UTC", v)
+	// Never configured, so the API reports an empty timezone: the directory
+	// sync stores "" rather than a placeholder zone the alert form would
+	// mistake for one an operator chose.
+	if v := str(t, bare, "timezone"); v != "" {
+		t.Errorf("region 2 timezone = %q, want \"\" (not configured)", v)
 	}
 }
 

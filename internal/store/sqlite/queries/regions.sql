@@ -8,11 +8,13 @@ SELECT * FROM regions ORDER BY id;
 -- Partial upsert: default_agency_id, timezone, and oba_api_key are locally
 -- managed and must survive every refresh. A full-row upsert would wipe them
 -- hourly, after which alerts emit an empty agency_id and vehicle search loses
--- its key.
+-- its key. A new row gets an empty timezone (not configured) rather than the
+-- column's unused DEFAULT 'UTC', which is indistinguishable from a zone an
+-- operator chose; timezone stays out of DO UPDATE so a refresh keeps it.
 INSERT INTO regions (
   id, region_name, oba_base_url, sidecar_base_url, language, active,
-  latitude, longitude, synced_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  latitude, longitude, timezone, synced_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)
 ON CONFLICT (id) DO UPDATE SET
   region_name      = excluded.region_name,
   oba_base_url     = excluded.oba_base_url,

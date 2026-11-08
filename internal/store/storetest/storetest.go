@@ -44,6 +44,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("RegionScoping", func(t *testing.T) { testRegionScoping(t, newStore) })
 	t.Run("StartTimeBeyond32Bit", func(t *testing.T) { testStartTimeBeyond32Bit(t, newStore) })
 	t.Run("PartialUpsertPreservesLocalFields", func(t *testing.T) { testPartialUpsertPreservesLocalFields(t, newStore) })
+	t.Run("FreshRegionHasNoTimezone", func(t *testing.T) { testFreshRegionHasNoTimezone(t, newStore) })
 	t.Run("CentroidRoundTrip", func(t *testing.T) { testCentroidRoundTrip(t, newStore) })
 	t.Run("CentroidRejectsHalfSet", func(t *testing.T) { testCentroidRejectsHalfSet(t, newStore) })
 	t.Run("SetLocalFieldsWritesAllThree", func(t *testing.T) { testSetLocalFieldsWritesAllThree(t, newStore) })
@@ -440,6 +441,39 @@ func testStartTimeBeyond32Bit(t *testing.T, newStore newStoreFunc) {
 	}
 	if !got.StartTime.Equal(want) {
 		t.Fatalf("StartTime = %v (unix %d), want %v (unix %d)", got.StartTime, got.StartTime.Unix(), want, want.Unix())
+	}
+}
+
+// testFreshRegionHasNoTimezone pins that a region the directory has just
+// created has no timezone. The directory carries none, and a placeholder
+// zone such as UTC would be indistinguishable from one an operator chose:
+// the admin alert form would then read times typed for an unconfigured
+// region as UTC instead of asking for an explicit offset. A later refresh
+// must not invent one either.
+func testFreshRegionHasNoTimezone(t *testing.T, newStore newStoreFunc) {
+	_, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	got, err := regionRepo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Timezone != "" {
+		t.Errorf("fresh region Timezone = %q, want \"\" (not configured)", got.Timezone)
+	}
+
+	if upErr := regionRepo.UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+	}}, base.Add(time.Hour)); upErr != nil {
+		t.Fatalf("UpsertFromDirectory (refresh): %v", upErr)
+	}
+	got, err = regionRepo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get after refresh: %v", err)
+	}
+	if got.Timezone != "" {
+		t.Errorf("refreshed region Timezone = %q, want \"\" (not configured)", got.Timezone)
 	}
 }
 
