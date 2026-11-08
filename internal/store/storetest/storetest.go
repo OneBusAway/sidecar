@@ -25,6 +25,9 @@ import (
 // base is the fixed instant every subtest builds its timestamps from.
 var base = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// testOBABaseURL is the directory base URL the subtests seed regions with.
+const testOBABaseURL = "https://example.org/"
+
 // newStoreFunc is shorthand for the callback every subtest receives: it
 // hands back a fresh, migrated pair of repositories backed by the same
 // underlying store.
@@ -44,6 +47,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("RegionScoping", func(t *testing.T) { testRegionScoping(t, newStore) })
 	t.Run("StartTimeBeyond32Bit", func(t *testing.T) { testStartTimeBeyond32Bit(t, newStore) })
 	t.Run("PartialUpsertPreservesLocalFields", func(t *testing.T) { testPartialUpsertPreservesLocalFields(t, newStore) })
+	t.Run("FreshRegionHasNoTimezone", func(t *testing.T) { testFreshRegionHasNoTimezone(t, newStore) })
 	t.Run("CentroidRoundTrip", func(t *testing.T) { testCentroidRoundTrip(t, newStore) })
 	t.Run("CentroidRejectsHalfSet", func(t *testing.T) { testCentroidRejectsHalfSet(t, newStore) })
 	t.Run("SetLocalFieldsWritesAllThree", func(t *testing.T) { testSetLocalFieldsWritesAllThree(t, newStore) })
@@ -71,7 +75,7 @@ func putRegion(t *testing.T, repo regions.Repository, id int64) {
 	if err := repo.UpsertFromDirectory(context.Background(), []regions.Region{{
 		ID:         id,
 		Name:       fmt.Sprintf("Region %d", id),
-		OBABaseURL: "https://example.org/",
+		OBABaseURL: testOBABaseURL,
 		Active:     true,
 	}}, base); err != nil {
 		t.Fatalf("UpsertFromDirectory(%d): %v", id, err)
@@ -443,6 +447,39 @@ func testStartTimeBeyond32Bit(t *testing.T, newStore newStoreFunc) {
 	}
 }
 
+// testFreshRegionHasNoTimezone pins that a region the directory has just
+// created has no timezone. The directory carries none, and a placeholder
+// zone such as UTC would be indistinguishable from one an operator chose:
+// the admin alert form would then read times typed for an unconfigured
+// region as UTC instead of asking for an explicit offset. A later refresh
+// must not invent one either.
+func testFreshRegionHasNoTimezone(t *testing.T, newStore newStoreFunc) {
+	_, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	got, err := regionRepo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Timezone != "" {
+		t.Errorf("fresh region Timezone = %q, want \"\" (not configured)", got.Timezone)
+	}
+
+	if upErr := regionRepo.UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 1, Name: "Region 1", OBABaseURL: testOBABaseURL, Active: true,
+	}}, base.Add(time.Hour)); upErr != nil {
+		t.Fatalf("UpsertFromDirectory (refresh): %v", upErr)
+	}
+	got, err = regionRepo.Get(ctx, 1)
+	if err != nil {
+		t.Fatalf("Get after refresh: %v", err)
+	}
+	if got.Timezone != "" {
+		t.Errorf("refreshed region Timezone = %q, want \"\" (not configured)", got.Timezone)
+	}
+}
+
 func testPartialUpsertPreservesLocalFields(t *testing.T, newStore newStoreFunc) {
 	_, regionRepo := newStore(t)
 	ctx := context.Background()
@@ -509,7 +546,7 @@ func testUpsertNeverDeletes(t *testing.T, newStore newStoreFunc) {
 	// upstream. Upsert must not delete it, or its alert would be destroyed
 	// along with it by the FK cascade.
 	if err := regionRepo.UpsertFromDirectory(ctx, []regions.Region{{
-		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+		ID: 1, Name: "Region 1", OBABaseURL: testOBABaseURL, Active: true,
 	}}, base.Add(time.Hour)); err != nil {
 		t.Fatalf("UpsertFromDirectory({1}): %v", err)
 	}

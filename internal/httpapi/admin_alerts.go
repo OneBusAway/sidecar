@@ -602,11 +602,9 @@ func formatInstant(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 func parseInstantJSON(s string, region regions.Region) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		// An empty Timezone would render as "region 16 is configured as :",
-		// which reads like a truncated sentence rather than the fact it is.
-		// PATCH /regions refuses to store an empty zone, so this only comes up
-		// for a row written before that check existed -- rare enough to be
-		// confusing, which is exactly when the message has to carry itself.
+		// An empty Timezone is a region nobody has configured yet (the
+		// directory sync stores ""), and "region 16 is configured as :"
+		// would read like a truncated sentence rather than the fact it is.
 		zone := fmt.Sprintf("region %d is configured as %s", region.ID, region.Timezone)
 		if region.Timezone == "" {
 			zone = fmt.Sprintf("region %d has no configured timezone", region.ID)

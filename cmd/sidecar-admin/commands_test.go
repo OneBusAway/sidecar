@@ -402,11 +402,10 @@ func TestUnknownTimezoneRejected(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	// The schema default ("UTC") is what a freshly-synced, never-configured
-	// region carries; the assertion is that the rejected --timezone never
-	// overwrote it.
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+	// A freshly-synced, never-configured region has no timezone (""); the
+	// assertion is that the rejected --timezone never overwrote it.
+	if got.Timezone != "" {
+		t.Errorf("Timezone = %q, want it still unconfigured (rejection must write nothing)", got.Timezone)
 	}
 }
 
@@ -628,48 +627,37 @@ func TestMigrateUpStillMigrates(t *testing.T) {
 	}
 }
 
-// TestRegionSetRejectsEmptyTimezone and TestRegionSetRejectsLocalTimezone
-// assert that region set rejects "" and "Local" explicitly. Both make
-// time.LoadLocation return a nil error, so neither was caught by the
-// pre-existing LoadLocation check: "" would silently blank a configured
-// timezone, and "Local" resolves to whatever zone the invoking machine
-// happens to have -- exactly the machine-local dependence this design bans
-// everywhere else.
-func TestRegionSetRejectsEmptyTimezone(t *testing.T) {
+// TestRegionSetRejectsEmptyAndLocalTimezone asserts that region set rejects
+// "" and "Local" explicitly. Both make time.LoadLocation return a nil error,
+// so neither was caught by the pre-existing LoadLocation check: "" would
+// silently blank a configured timezone, and "Local" resolves to whatever zone
+// the invoking machine happens to have -- exactly the machine-local
+// dependence this design bans everywhere else.
+func TestRegionSetRejectsEmptyAndLocalTimezone(t *testing.T) {
 	t.Parallel()
-	dbPath, store := newDB(t)
-	seedRegion(t, store.Regions(), 1)
+	for _, tz := range []string{"", "Local"} {
+		t.Run(fmt.Sprintf("%q", tz), func(t *testing.T) {
+			t.Parallel()
+			dbPath, store := newDB(t)
+			seedRegion(t, store.Regions(), 1)
+			// Configure a zone first: a fresh region is already "", so asserting
+			// it stays "" could not catch a rejected value that was written anyway.
+			if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
+				t.Fatalf("region set: %v", err)
+			}
 
-	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "")
-	if err == nil {
-		t.Fatal("region set --timezone \"\": want error, got nil")
-	}
+			if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", tz); err == nil {
+				t.Fatalf("region set --timezone %q: want error, got nil", tz)
+			}
 
-	got, gerr := store.Regions().Get(context.Background(), 1)
-	if gerr != nil {
-		t.Fatalf("Get: %v", gerr)
-	}
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
-	}
-}
-
-func TestRegionSetRejectsLocalTimezone(t *testing.T) {
-	t.Parallel()
-	dbPath, store := newDB(t)
-	seedRegion(t, store.Regions(), 1)
-
-	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "Local")
-	if err == nil {
-		t.Fatal("region set --timezone Local: want error, got nil")
-	}
-
-	got, gerr := store.Regions().Get(context.Background(), 1)
-	if gerr != nil {
-		t.Fatalf("Get: %v", gerr)
-	}
-	if got.Timezone != "UTC" {
-		t.Errorf("Timezone = %q, want unchanged default %q (rejection must write nothing)", got.Timezone, "UTC")
+			got, err := store.Regions().Get(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Timezone != "America/Los_Angeles" {
+				t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
+			}
+		})
 	}
 }
 
@@ -795,6 +783,49 @@ func TestParseInstantWrapsUnderlyingError(t *testing.T) {
 	}
 }
 
+// A region with no timezone used to render as "region 16 is configured as
+// :" -- a sentence that stops mid-clause. It now says the region has no
+// configured timezone, matching the admin API's wording.
+func TestParseInstantNamesUnconfiguredZone(t *testing.T) {
+	t.Parallel()
+	_, err := parseInstant("2026-08-15T14:00:00", regions.Region{ID: 16})
+	if err == nil {
+		t.Fatal("naive instant: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "region 16 has no configured timezone") {
+		t.Errorf("error = %q, want it to say region 16 has no configured timezone", err.Error())
+	}
+	if strings.Contains(err.Error(), "configured as") {
+		t.Errorf("error = %q, want no \"configured as\" clause for an empty zone", err.Error())
+	}
+}
+
+// region list spells an unconfigured timezone out rather than printing a bare
+// "tz=", and still prints a configured one as-is.
+func TestRegionList_ShowsUnconfiguredTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	seedRegion(t, store.Regions(), 2)
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "2", "--timezone", "America/Los_Angeles"); err != nil {
+		t.Fatalf("region set 2: %v", err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "region", "list")
+	if err != nil {
+		t.Fatalf("region list: %v", err)
+	}
+	if !strings.Contains(stdout, "tz=(not configured)") {
+		t.Errorf("region list = %q, want tz=(not configured) for region 1", stdout)
+	}
+	if strings.Contains(stdout, "tz=\t") {
+		t.Errorf("region list = %q, want no bare tz= field", stdout)
+	}
+	if !strings.Contains(stdout, "tz=America/Los_Angeles") {
+		t.Errorf("region list = %q, want region 2's configured zone", stdout)
+	}
+}
+
 // The CLI prints a status word, never the key: `region list` output routinely
 // ends up pasted into issues and chat.
 func TestRegionSet_OBAAPIKeyIsNeverPrinted(t *testing.T) {
@@ -866,12 +897,10 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 
-	// Set agency and timezone together first, away from both their zero
-	// values and the schema default (seedRegion leaves agency "" and
-	// timezone at the schema default "UTC", so a --oba-api-key-only set
-	// afterwards could not tell "preserved" from "reset to zero value" or
-	// "reset to schema default" -- only a prior non-default, non-empty value
-	// on both fields can catch that regression).
+	// Set agency and timezone together first, away from their zero values
+	// (seedRegion leaves both "", so a --oba-api-key-only set afterwards
+	// could not tell "preserved" from "reset to zero value" -- only a prior
+	// non-empty value on both fields can catch that regression).
 	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "7", "--timezone", "America/Los_Angeles"); err != nil {
 		t.Fatalf("region set (agency+timezone): %v", err)
 	}

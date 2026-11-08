@@ -136,13 +136,22 @@ func visitedFlags(fs *flag.FlagSet) map[string]bool {
 // parseInstant requires an explicit UTC offset. A naive datetime is rejected
 // rather than guessed: interpreting it in the server's local zone would
 // place an alert hours from where the author meant, and the regions
-// directory carries no timezone to fall back on.
+// directory carries no timezone to fall back on. The error names the
+// region's zone, or says it has none, using the same wording as the admin
+// API's parseInstantJSON.
 func parseInstant(s string, region regions.Region) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
+		// An empty Timezone is a region nobody has configured yet (the
+		// directory sync stores ""), and "configured as :" would read like a
+		// truncated sentence.
+		zone := fmt.Sprintf("region %d is configured as %s", region.ID, region.Timezone)
+		if region.Timezone == "" {
+			zone = fmt.Sprintf("region %d has no configured timezone", region.ID)
+		}
 		return time.Time{}, fmt.Errorf(
 			"%q must be RFC 3339 with an explicit offset (e.g. 2026-08-15T14:00:00-07:00); "+
-				"region %d is configured as %s: %w", s, region.ID, region.Timezone, err)
+				"%s: %w", s, zone, err)
 	}
 	return t.UTC(), nil
 }
@@ -243,8 +252,12 @@ func regionList(ctx context.Context, stdout io.Writer, repo regions.Repository) 
 		if r.OBAAPIKey != "" {
 			key = "own key"
 		}
+		tz := r.Timezone
+		if tz == "" {
+			tz = "(not configured)"
+		}
 		fmt.Fprintf(stdout, "%d\t%s\tactive=%t\tagency=%s\ttz=%s\tcentroid=%s\toba-key=%s\n",
-			r.ID, r.Name, r.Active, r.DefaultAgencyID, r.Timezone, centroid, key)
+			r.ID, r.Name, r.Active, r.DefaultAgencyID, tz, centroid, key)
 	}
 	return nil
 }
