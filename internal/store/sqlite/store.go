@@ -70,7 +70,10 @@ type Store struct {
 	q      *gen.Queries
 }
 
-// Open connects with the pragmas this design depends on:
+// dsn builds the connection string every store handle uses, so a test that
+// opens the database through its own driver registration gets the same
+// pragmas and transaction mode as production. The parameters this design
+// depends on:
 //
 //	_pragma=journal_mode(WAL)   server reads and CLI writes coexist
 //	_pragma=busy_timeout(5000)  block briefly rather than failing on a lock
@@ -83,9 +86,13 @@ type Store struct {
 //	                            with SQLITE_BUSY_SNAPSHOT on its first write
 //	                            (design spec surveys 2.6); ReadOnly
 //	                            transactions are unaffected (modernc tx.go)
+func dsn(path string) string {
+	return path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate"
+}
+
+// Open connects to the database at path with the parameters dsn documents.
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}

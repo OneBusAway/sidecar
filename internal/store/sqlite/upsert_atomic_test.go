@@ -72,8 +72,7 @@ func openFaulty(t *testing.T, match string, failAfter int32) *Store {
 	sql.Register(name, &faultyDriver{real: &modernc.Driver{}, match: match, failAfter: failAfter})
 
 	path := filepath.Join(t.TempDir(), "test.db")
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
-	db, err := sql.Open(name, dsn)
+	db, err := sql.Open(name, dsn(path))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
