@@ -98,10 +98,9 @@
 </p>
 
 <p class="note">
-	The timezone column is <code>NOT NULL DEFAULT 'UTC'</code> in the database and
-	the directory sync never fills it in, so a region reading <code>UTC</code> may
-	simply be one nobody has configured — which is why the alert form warns about
-	<code>UTC</code> regions too.
+	A region the directory has just added has no timezone until you set one here,
+	and is marked <em>Not configured</em> below. <code>UTC</code> is a valid zone and
+	is treated like any other.
 </p>
 
 <table>
@@ -134,12 +133,14 @@
 					<input
 						bind:value={row.timezone}
 						aria-label="Timezone for {row.region.name}"
-						placeholder="America/New_York"
+						placeholder="e.g. America/New_York"
 					/>
-					{#if row.region.timezone === 'UTC'}
+					{#if row.region.timezone === ''}
 						<!-- Reads off the SAVED region, not the input, so typing a
-						     real zone does not clear the warning before Save does. -->
-						<span class="unset">UTC (default — not configured)</span>
+						     real zone does not clear the marker before Save does. -->
+						<span class="unset"
+							>Not configured — alert times need an explicit offset</span
+						>
 					{/if}
 				</td>
 				<td>{formatCentroid(row.region)}</td>

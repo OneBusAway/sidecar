@@ -81,9 +81,10 @@ export interface RegionPatchPayload {
  *
  * timezone is sent only when non-empty. The API rejects an empty timezone
  * ("timezone must not be empty"), so sending a blank value would make every
- * save from this form fail with a message about timezones. A synced region
- * never has a blank timezone: the directory sync leaves the column to its
- * default, 'UTC'.
+ * save from this form fail with a message about timezones. A blank field is
+ * normal for a region nobody has configured yet (the directory sync stores
+ * ''), and leaving it out keeps an unrelated edit, such as the agency id,
+ * from failing on it.
  *
  * obaAPIKey is sent only when it is defined, and `undefined` is the normal
  * state: the server never sends a key back, so an untouched field has no

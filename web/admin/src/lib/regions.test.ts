@@ -41,8 +41,8 @@ describe('buildRegionPatch', () => {
 
 	// The server rejects `timezone: ""` with "timezone must not be empty", so
 	// sending a blank timezone would fail the save and show a message about
-	// timezones. A synced region holds 'UTC' (the column default), so the form
-	// does not normally start blank.
+	// timezones. A region nobody has configured yet starts blank (the
+	// directory sync stores ''), so this is the common case, not an edge.
 	it('omits a blank timezone rather than sending an empty one', () => {
 		const payload = buildRegionPatch('HART', '');
 		expect('timezone' in payload).toBe(false);
