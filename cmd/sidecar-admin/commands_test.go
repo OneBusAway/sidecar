@@ -804,6 +804,49 @@ func TestParseInstantWrapsUnderlyingError(t *testing.T) {
 	}
 }
 
+// A region with no timezone used to render as "region 16 is configured as
+// :" -- a sentence that stops mid-clause. It now says the region has no
+// configured timezone, matching the admin API's wording.
+func TestParseInstantNamesUnconfiguredZone(t *testing.T) {
+	t.Parallel()
+	_, err := parseInstant("2026-08-15T14:00:00", regions.Region{ID: 16})
+	if err == nil {
+		t.Fatal("naive instant: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "region 16 has no configured timezone") {
+		t.Errorf("error = %q, want it to say region 16 has no configured timezone", err.Error())
+	}
+	if strings.Contains(err.Error(), "configured as") {
+		t.Errorf("error = %q, want no \"configured as\" clause for an empty zone", err.Error())
+	}
+}
+
+// region list spells an unconfigured timezone out rather than printing a bare
+// "tz=", and still prints a configured one as-is.
+func TestRegionList_ShowsUnconfiguredTimezone(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	seedRegion(t, store.Regions(), 2)
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "2", "--timezone", "America/Los_Angeles"); err != nil {
+		t.Fatalf("region set 2: %v", err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "region", "list")
+	if err != nil {
+		t.Fatalf("region list: %v", err)
+	}
+	if !strings.Contains(stdout, "tz=(not configured)") {
+		t.Errorf("region list = %q, want tz=(not configured) for region 1", stdout)
+	}
+	if strings.Contains(stdout, "tz=\t") {
+		t.Errorf("region list = %q, want no bare tz= field", stdout)
+	}
+	if !strings.Contains(stdout, "tz=America/Los_Angeles") {
+		t.Errorf("region list = %q, want region 2's configured zone", stdout)
+	}
+}
+
 // The CLI prints a status word, never the key: `region list` output routinely
 // ends up pasted into issues and chat.
 func TestRegionSet_OBAAPIKeyIsNeverPrinted(t *testing.T) {
