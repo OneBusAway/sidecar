@@ -152,8 +152,8 @@ func TestSurveyCreateRejectsBadDocuments(t *testing.T) {
 // wire the CLI's own parseInstant(s, region) into DefinitionFromDocument, so
 // a naive datetime's rejection names the study's region and its configured
 // zone -- the hint an author needs to fix the value. Region 1 is set to
-// America/Los_Angeles below (seedRegion alone leaves the schema default,
-// UTC, which the assertion below could not distinguish from a bug that
+// America/Los_Angeles below (seedRegion alone leaves the region with no
+// timezone, which the assertion below could not distinguish from a bug that
 // dropped the region entirely).
 func TestSurveyCreateNaiveDateNamesRegionTimezone(t *testing.T) {
 	t.Parallel()

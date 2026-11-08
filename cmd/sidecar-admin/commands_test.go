@@ -918,12 +918,10 @@ func TestRegionSet_PreservesKeyWhenFlagOmitted(t *testing.T) {
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
 
-	// Set agency and timezone together first, away from both their zero
-	// values and the schema default (seedRegion leaves agency "" and
-	// timezone at the schema default "UTC", so a --oba-api-key-only set
-	// afterwards could not tell "preserved" from "reset to zero value" or
-	// "reset to schema default" -- only a prior non-default, non-empty value
-	// on both fields can catch that regression).
+	// Set agency and timezone together first, away from their zero values
+	// (seedRegion leaves both "", so a --oba-api-key-only set afterwards
+	// could not tell "preserved" from "reset to zero value" -- only a prior
+	// non-empty value on both fields can catch that regression).
 	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "7", "--timezone", "America/Los_Angeles"); err != nil {
 		t.Fatalf("region set (agency+timezone): %v", err)
 	}

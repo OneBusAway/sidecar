@@ -59,9 +59,12 @@ go build -o bin/sidecar-admin ./cmd/sidecar-admin
 
 # Configure the locally-managed fields alerts rely on, which the directory
 # doesn't carry: the default agency id stamped onto alerts that don't specify
-# one, and the timezone `alert create`/`alert edit` interpret naive-looking
-# times against (an explicit UTC offset is still required; the timezone is only
-# used to report a helpful error). Required before the first `alert create` below.
+# one, and the region's timezone. A newly synced region has no timezone until
+# `region set --timezone` gives it one (`region list` shows
+# `tz=(not configured)`). The CLI still requires an explicit UTC offset on
+# every time and only uses the zone in error messages and listings; the admin
+# UI needs it to offer a date picker. Required before the first
+# `alert create` below.
 ./bin/sidecar-admin --db ./sidecar.db region set --id 1 \
   --agency-id 1 --timezone America/Los_Angeles
 
@@ -83,6 +86,7 @@ Full command surface:
 ```
 sidecar-admin region  list
                        set --id N [--agency-id ID] [--timezone TZ] [--oba-api-key-stdin | --oba-api-key KEY]
+                                       # a synced region has no timezone until --timezone sets one
                        sync
 sidecar-admin alert   create --region N --header TEXT --start RFC3339
                               [--description TEXT] [--url URL] [--end RFC3339]
@@ -1150,8 +1154,8 @@ the hand-maintained staging directory (*Staging*).
 ```sh
 render ssh sidecar -- sidecar-admin --db /data/sidecar.db region sync
 render ssh sidecar -- sidecar-admin --db /data/sidecar.db region list
-# 0	Tampa Bay	active=true	agency=	tz=UTC	centroid=27.9553,-82.5231	oba-key=none (may inherit server default)
-# 1	Puget Sound	active=true	agency=	tz=UTC	centroid=47.7528,-122.4924	oba-key=none (may inherit server default)
+# 0	Tampa Bay	active=true	agency=	tz=(not configured)	centroid=27.9553,-82.5231	oba-key=none (may inherit server default)
+# 1	Puget Sound	active=true	agency=	tz=(not configured)	centroid=47.7528,-122.4924	oba-key=none (may inherit server default)
 ```
 
 `region sync` prints nothing when it succeeds -- `region list` is how you
