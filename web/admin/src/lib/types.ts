@@ -72,7 +72,11 @@ export interface Region {
 	language: string;
 	active: boolean;
 	default_agency_id: string;
-	/** IANA name. Every datetime the operator types is interpreted in it. */
+	/**
+	 * IANA name. Every datetime the operator types is interpreted in it. ''
+	 * means not configured -- what the directory sync gives a new region --
+	 * and the alert form then asks for RFC 3339 with an explicit offset.
+	 */
 	timezone: string;
 	/** null until a directory sync supplies usable bounds. 0 is a real value. */
 	latitude: number | null;
