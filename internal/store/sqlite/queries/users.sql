@@ -12,6 +12,9 @@ SELECT * FROM users WHERE id = ?;
 -- name: ListUsers :many
 SELECT * FROM users ORDER BY username;
 
+-- name: CountUsers :one
+SELECT COUNT(*) FROM users;
+
 -- name: DeleteUser :execrows
 DELETE FROM users WHERE username = ?;
 

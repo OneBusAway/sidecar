@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,18 @@ func RunAuthRepository(t *testing.T, newRepo newAuthRepoFunc) {
 	})
 	t.Run("DeleteExpiredSessionsCount", func(t *testing.T) { testDeleteExpiredSessionsCount(t, newRepo) })
 	t.Run("UserDeleteCascadesToSessions", func(t *testing.T) { testUserDeleteCascadesToSessions(t, newRepo) })
+	t.Run("DeleteUserUnlessLastRejectsLastUser", func(t *testing.T) {
+		testDeleteUserUnlessLastRejectsLastUser(t, newRepo)
+	})
+	t.Run("DeleteUserUnlessLastUnknownUserIsErrNotFound", func(t *testing.T) {
+		testDeleteUserUnlessLastUnknownUserIsErrNotFound(t, newRepo)
+	})
+	t.Run("DeleteUserUnlessLastDeletesWhenOthersRemain", func(t *testing.T) {
+		testDeleteUserUnlessLastDeletesWhenOthersRemain(t, newRepo)
+	})
+	t.Run("DeleteUserUnlessLastConcurrentDeletesLeaveOne", func(t *testing.T) {
+		testDeleteUserUnlessLastConcurrentDeletesLeaveOne(t, newRepo)
+	})
 	t.Run("TokenHashIsNotTheToken", func(t *testing.T) { testTokenHashIsNotTheToken(t, newRepo) })
 	t.Run("PasswordUpdatePersists", func(t *testing.T) { testPasswordUpdatePersists(t, newRepo) })
 	t.Run("TimestampsSurvive32BitBoundary", func(t *testing.T) { testTimestampsSurvive32BitBoundary(t, newRepo) })
@@ -583,6 +596,156 @@ func testUserDeleteCascadesToSessions(t *testing.T, newRepo newAuthRepoFunc) {
 
 	if _, err := repo.GetSession(ctx, keeperSession, base); err != nil {
 		t.Errorf("GetSession(keeper) after deleting the other user = %v, want the live session", err)
+	}
+}
+
+// testDeleteUserUnlessLastRejectsLastUser asserts the guard's core promise:
+// the only account left is never deleted, and the refusal is ErrLastUser --
+// the sentinel the CLI maps to its --force hint -- not a generic error.
+func testDeleteUserUnlessLastRejectsLastUser(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+
+	only := mustCreateUser(t, repo, "only")
+
+	err := repo.DeleteUserUnlessLast(ctx, "only")
+	if !errors.Is(err, auth.ErrLastUser) {
+		t.Fatalf("DeleteUserUnlessLast(only) = %v, want auth.ErrLastUser", err)
+	}
+	if errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("DeleteUserUnlessLast(only) = %v, must not also match auth.ErrNotFound", err)
+	}
+
+	got, err := repo.GetUserByUsername(ctx, "only")
+	if err != nil {
+		t.Fatalf("GetUserByUsername(only) after a refused delete = %v, want the account to still exist", err)
+	}
+	assertSameUser(t, "only after refused delete", got, only)
+}
+
+// testDeleteUserUnlessLastUnknownUserIsErrNotFound asserts that a username
+// that names no account is ErrNotFound, never ErrLastUser -- including on a
+// one-account table, where a count-first implementation would report the
+// typo as "last user" and hint that --force would help. Nothing may be
+// deleted either way.
+func testDeleteUserUnlessLastUnknownUserIsErrNotFound(t *testing.T, newRepo newAuthRepoFunc) {
+	ctx := context.Background()
+
+	for _, existing := range [][]string{{}, {"alice"}, {"alice", "bob"}} {
+		repo := newRepo(t)
+		for _, name := range existing {
+			mustCreateUser(t, repo, name)
+		}
+
+		err := repo.DeleteUserUnlessLast(ctx, "ghost")
+		if !errors.Is(err, auth.ErrNotFound) {
+			t.Errorf("with %d existing account(s): DeleteUserUnlessLast(ghost) = %v, want auth.ErrNotFound", len(existing), err)
+		}
+		if errors.Is(err, auth.ErrLastUser) {
+			t.Errorf("with %d existing account(s): DeleteUserUnlessLast(ghost) = %v, must not match auth.ErrLastUser", len(existing), err)
+		}
+
+		users, err := repo.ListUsers(ctx)
+		if err != nil {
+			t.Fatalf("ListUsers: %v", err)
+		}
+		if len(users) != len(existing) {
+			t.Errorf("with %d existing account(s): %d left after deleting an unknown user, want %d", len(existing), len(users), len(existing))
+		}
+	}
+}
+
+// testDeleteUserUnlessLastDeletesWhenOthersRemain is the control for the
+// guard: with another account left, the delete happens, normalizes the
+// username like every other lookup, takes the user's sessions with it, and
+// leaves the other account and its sessions alone.
+func testDeleteUserUnlessLastDeletesWhenOthersRemain(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+
+	doomed := mustCreateUser(t, repo, "doomed")
+	keeper := mustCreateUser(t, repo, "keeper")
+	expires := base.Add(auth.SessionLifetime)
+	_, doomedSession := mustCreateSession(t, repo, doomed.ID, base, expires)
+	_, keeperSession := mustCreateSession(t, repo, keeper.ID, base, expires)
+
+	if err := repo.DeleteUserUnlessLast(ctx, "  DOOMED "); err != nil {
+		t.Fatalf("DeleteUserUnlessLast(\"  DOOMED \") = %v, want nil", err)
+	}
+
+	if _, err := repo.GetUserByID(ctx, doomed.ID); !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("GetUserByID(doomed) after delete = %v, want auth.ErrNotFound", err)
+	}
+	assertSessionGone(t, repo, "doomed user's session", doomedSession)
+
+	users, err := repo.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListUsers: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != keeper.ID {
+		t.Errorf("ListUsers after delete = %+v, want only keeper (ID %d)", users, keeper.ID)
+	}
+	if _, err := repo.GetSession(ctx, keeperSession, base); err != nil {
+		t.Errorf("GetSession(keeper) after deleting the other user = %v, want the live session", err)
+	}
+}
+
+// testDeleteUserUnlessLastConcurrentDeletesLeaveOne asserts the check and
+// the delete are atomic: two callers deleting different accounts from a
+// two-account table at the same moment must leave exactly one account, with
+// one call succeeding and the other refused as ErrLastUser. A check-then-
+// delete without a lock lets both counts see two accounts and both deletes
+// go through. That interleaving needs the two calls to overlap, so a single
+// pair proves little; many fresh attempts, failing on the first bad
+// outcome, make the test a reliable detector.
+func testDeleteUserUnlessLastConcurrentDeletesLeaveOne(t *testing.T, newRepo newAuthRepoFunc) {
+	const attempts = 20
+	ctx := context.Background()
+
+	for i := range attempts {
+		repo := newRepo(t)
+		mustCreateUser(t, repo, "alice")
+		mustCreateUser(t, repo, "bob")
+
+		names := [2]string{"alice", "bob"}
+		var errs [2]error
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for j := range names {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[j] = repo.DeleteUserUnlessLast(ctx, names[j])
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		users, err := repo.ListUsers(ctx)
+		if err != nil {
+			t.Fatalf("attempt %d: ListUsers: %v", i, err)
+		}
+		if len(users) != 1 {
+			t.Fatalf("attempt %d: %d accounts left after two concurrent deletes (alice: %v, bob: %v), want exactly 1",
+				i, len(users), errs[0], errs[1])
+		}
+
+		// The survivor must be the account whose delete was refused, and
+		// the refusal must be ErrLastUser rather than some other failure.
+		winner, loser := 0, 1
+		if errs[0] != nil {
+			winner, loser = 1, 0
+		}
+		if errs[winner] != nil {
+			t.Fatalf("attempt %d: both deletes failed (alice: %v, bob: %v), want one to succeed", i, errs[0], errs[1])
+		}
+		if !errors.Is(errs[loser], auth.ErrLastUser) {
+			t.Fatalf("attempt %d: DeleteUserUnlessLast(%s) = %v, want auth.ErrLastUser", i, names[loser], errs[loser])
+		}
+		if users[0].Username != names[loser] {
+			t.Fatalf("attempt %d: survivor = %q, want %q (the account whose delete was refused)", i, users[0].Username, names[loser])
+		}
 	}
 }
 

@@ -127,6 +127,43 @@ func (r *authRepo) DeleteUser(ctx context.Context, username string) error {
 	return nil
 }
 
+// DeleteUserUnlessLast reads the user, counts the table, and deletes in one
+// immediate transaction (the store opens with _txlock=immediate), so a
+// concurrent delete waits on busy_timeout at BEGIN instead of counting the
+// same rows this call is about to change. The lookup runs first so an
+// unknown username is ErrNotFound even when the table holds one account.
+func (r *authRepo) DeleteUserUnlessLast(ctx context.Context, username string) error {
+	username = auth.NormalizeUsername(username)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: delete user %q: begin tx: %w", username, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	if _, err = q.GetUserByUsername(ctx, username); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sqlite: delete user %q: %w", username, auth.ErrNotFound)
+		}
+		return fmt.Errorf("sqlite: delete user %q: %w", username, err)
+	}
+	n, err := q.CountUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("sqlite: delete user %q: count users: %w", username, err)
+	}
+	if n <= 1 {
+		return fmt.Errorf("sqlite: delete user %q: %w", username, auth.ErrLastUser)
+	}
+	if _, err = q.DeleteUser(ctx, username); err != nil {
+		return fmt.Errorf("sqlite: delete user %q: %w", username, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: delete user %q: commit: %w", username, err)
+	}
+	return nil
+}
+
 // UpdatePassword reports auth.ErrNotFound when nothing matched, for the same
 // reason DeleteUser does. It does not revoke sessions itself -- the caller
 // pairs it with DeleteUserSessions, which is what makes a password change lock
