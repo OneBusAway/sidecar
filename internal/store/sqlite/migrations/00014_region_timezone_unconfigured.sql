@@ -7,4 +7,6 @@
 UPDATE regions SET timezone = '' WHERE timezone = 'UTC';
 
 -- +goose Down
-UPDATE regions SET timezone = 'UTC' WHERE timezone = '';
+-- length() = 0 rather than = '': same test on a NOT NULL TEXT column, and
+-- static analysers that assume Oracle (where '' is NULL) do not misread it.
+UPDATE regions SET timezone = 'UTC' WHERE length(timezone) = 0;

@@ -179,88 +179,86 @@ func columnTypes(ctx context.Context, db *sql.DB, table string) (map[string]stri
 	return out, nil
 }
 
+// TestMigrateClearsDefaultUTCTimezone pins migration 14 against data that
+// predates it: a stored 'UTC' cannot be told apart from the old column
+// default, so it becomes an empty string (not configured), while a zone an
+// operator chose is left alone. Down puts the default back. It drives goose
+// through a Provider rather than Store.Migrate, because it has to stop at
+// version 13 to seed rows, and a Provider leaves goose's package globals
+// untouched for the tests running in parallel.
+func TestMigrateClearsDefaultUTCTimezone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, p := openMigrationProvider(t)
+	if _, err := p.UpTo(ctx, 13); err != nil {
+		t.Fatalf("UpTo(13): %v", err)
+	}
+	seedPreMigrationZones(t, db)
+
+	if _, err := p.UpTo(ctx, 14); err != nil {
+		t.Fatalf("UpTo(14): %v", err)
+	}
+	// Region 1's UTC was the unconfigured default; region 2's zone was chosen
+	// by an operator and must survive.
+	assertRegionZones(t, "after up", db, map[int64]string{1: "", 2: "America/Los_Angeles"})
+
+	if _, err := p.DownTo(ctx, 13); err != nil {
+		t.Fatalf("DownTo(13): %v", err)
+	}
+	assertRegionZones(t, "after down", db, map[int64]string{1: "UTC", 2: "America/Los_Angeles"})
+}
+
+// openMigrationProvider opens a fresh, unmigrated database and a goose
+// Provider over the embedded migrations.
+func openMigrationProvider(t *testing.T) (*sql.DB, *goose.Provider) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migrate.db"))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	p, err := goose.NewProvider(goose.DialectSQLite3, db, migrations.FS)
+	if err != nil {
+		t.Fatalf("goose.NewProvider: %v", err)
+	}
+	return db, p
+}
+
+// seedPreMigrationZones writes one region on the old 'UTC' default and one
+// with a configured zone, straight into a version-13 schema.
+func seedPreMigrationZones(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO regions
+		(id, region_name, oba_base_url, timezone, synced_at, created_at, updated_at)
+		VALUES (1, 'Tampa Bay', 'https://a.example.org/', 'UTC', 0, 0, 0),
+		       (2, 'Puget Sound', 'https://b.example.org/', 'America/Los_Angeles', 0, 0, 0)`); err != nil {
+		t.Fatalf("seed regions: %v", err)
+	}
+}
+
+// assertRegionZones checks every region in want has exactly that stored
+// timezone. stage names the migration step in the failure message.
+func assertRegionZones(t *testing.T, stage string, db *sql.DB, want map[int64]string) {
+	t.Helper()
+	for id, wantZone := range want {
+		var got string
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT timezone FROM regions WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("%s: read region %d timezone: %v", stage, id, err)
+		}
+		if got != wantZone {
+			t.Errorf("%s: region %d timezone = %q, want %q", stage, id, got, wantZone)
+		}
+	}
+}
+
 // TestFeed exercises Feed through the generated Go bindings rather than by
 // hand-running SQL: an earlier review verified the FeedAlerts/FeedTranslations
 // SQL by hand and missed that a bare `LIMIT ?` mixed with an
 // explicitly-numbered sqlc.arg was numbered as a fourth, unfilled
 // placeholder, so every real Feed call failed with "missing argument with
 // index 4" even though the hand-run SQL was correct.
-// TestMigrateClearsDefaultUTCTimezone pins migration 14 against data that
-// predates it: a stored 'UTC' cannot be told apart from the old column
-// default, so it becomes ” (not configured), while a zone an operator
-// chose is left alone. Down puts the default back. It drives goose through
-// a Provider rather than Store.Migrate, because it has to stop at version 13
-// to seed rows, and a Provider leaves goose's package globals untouched for
-// the tests running in parallel.
-func TestMigrateClearsDefaultUTCTimezone(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migrate.db"))
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	defer db.Close()
-
-	p, err := goose.NewProvider(goose.DialectSQLite3, db, migrations.FS)
-	if err != nil {
-		t.Fatalf("goose.NewProvider: %v", err)
-	}
-	if _, err := p.UpTo(ctx, 13); err != nil {
-		t.Fatalf("UpTo(13): %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO regions
-		(id, region_name, oba_base_url, timezone, synced_at, created_at, updated_at)
-		VALUES (1, 'Tampa Bay', 'https://a.example.org/', 'UTC', 0, 0, 0),
-		       (2, 'Puget Sound', 'https://b.example.org/', 'America/Los_Angeles', 0, 0, 0)`); err != nil {
-		t.Fatalf("seed regions: %v", err)
-	}
-
-	zones := func() map[int64]string {
-		t.Helper()
-		rows, qErr := db.QueryContext(ctx, "SELECT id, timezone FROM regions ORDER BY id")
-		if qErr != nil {
-			t.Fatalf("select regions: %v", qErr)
-		}
-		defer rows.Close()
-		out := map[int64]string{}
-		for rows.Next() {
-			var id int64
-			var tz string
-			if scanErr := rows.Scan(&id, &tz); scanErr != nil {
-				t.Fatalf("scan: %v", scanErr)
-			}
-			out[id] = tz
-		}
-		if rowsErr := rows.Err(); rowsErr != nil {
-			t.Fatalf("rows: %v", rowsErr)
-		}
-		return out
-	}
-
-	if _, err := p.UpTo(ctx, 14); err != nil {
-		t.Fatalf("UpTo(14): %v", err)
-	}
-	got := zones()
-	if got[1] != "" {
-		t.Errorf("after up: region 1 timezone = %q, want \"\" (UTC was the unconfigured default)", got[1])
-	}
-	if got[2] != "America/Los_Angeles" {
-		t.Errorf("after up: region 2 timezone = %q, want America/Los_Angeles (configured zone must survive)", got[2])
-	}
-
-	if _, err := p.DownTo(ctx, 13); err != nil {
-		t.Fatalf("DownTo(13): %v", err)
-	}
-	got = zones()
-	if got[1] != "UTC" {
-		t.Errorf("after down: region 1 timezone = %q, want UTC", got[1])
-	}
-	if got[2] != "America/Los_Angeles" {
-		t.Errorf("after down: region 2 timezone = %q, want America/Los_Angeles", got[2])
-	}
-}
-
 func TestFeed(t *testing.T) {
 	t.Parallel()
 

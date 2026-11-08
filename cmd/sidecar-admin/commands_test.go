@@ -627,58 +627,37 @@ func TestMigrateUpStillMigrates(t *testing.T) {
 	}
 }
 
-// TestRegionSetRejectsEmptyTimezone and TestRegionSetRejectsLocalTimezone
-// assert that region set rejects "" and "Local" explicitly. Both make
-// time.LoadLocation return a nil error, so neither was caught by the
-// pre-existing LoadLocation check: "" would silently blank a configured
-// timezone, and "Local" resolves to whatever zone the invoking machine
-// happens to have -- exactly the machine-local dependence this design bans
-// everywhere else.
-func TestRegionSetRejectsEmptyTimezone(t *testing.T) {
+// TestRegionSetRejectsEmptyAndLocalTimezone asserts that region set rejects
+// "" and "Local" explicitly. Both make time.LoadLocation return a nil error,
+// so neither was caught by the pre-existing LoadLocation check: "" would
+// silently blank a configured timezone, and "Local" resolves to whatever zone
+// the invoking machine happens to have -- exactly the machine-local
+// dependence this design bans everywhere else.
+func TestRegionSetRejectsEmptyAndLocalTimezone(t *testing.T) {
 	t.Parallel()
-	dbPath, store := newDB(t)
-	seedRegion(t, store.Regions(), 1)
-	// Configure a zone first: a fresh region is already "", so asserting it
-	// stays "" could not catch a rejected value that was written anyway.
-	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
-		t.Fatalf("region set: %v", err)
-	}
+	for _, tz := range []string{"", "Local"} {
+		t.Run(fmt.Sprintf("%q", tz), func(t *testing.T) {
+			t.Parallel()
+			dbPath, store := newDB(t)
+			seedRegion(t, store.Regions(), 1)
+			// Configure a zone first: a fresh region is already "", so asserting
+			// it stays "" could not catch a rejected value that was written anyway.
+			if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
+				t.Fatalf("region set: %v", err)
+			}
 
-	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "")
-	if err == nil {
-		t.Fatal("region set --timezone \"\": want error, got nil")
-	}
+			if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", tz); err == nil {
+				t.Fatalf("region set --timezone %q: want error, got nil", tz)
+			}
 
-	got, gerr := store.Regions().Get(context.Background(), 1)
-	if gerr != nil {
-		t.Fatalf("Get: %v", gerr)
-	}
-	if got.Timezone != "America/Los_Angeles" {
-		t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
-	}
-}
-
-func TestRegionSetRejectsLocalTimezone(t *testing.T) {
-	t.Parallel()
-	dbPath, store := newDB(t)
-	seedRegion(t, store.Regions(), 1)
-	// Configure a zone first: a fresh region is already "", so asserting it
-	// stays "" could not catch a rejected value that was written anyway.
-	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "America/Los_Angeles"); err != nil {
-		t.Fatalf("region set: %v", err)
-	}
-
-	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--timezone", "Local")
-	if err == nil {
-		t.Fatal("region set --timezone Local: want error, got nil")
-	}
-
-	got, gerr := store.Regions().Get(context.Background(), 1)
-	if gerr != nil {
-		t.Fatalf("Get: %v", gerr)
-	}
-	if got.Timezone != "America/Los_Angeles" {
-		t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
+			got, err := store.Regions().Get(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Timezone != "America/Los_Angeles" {
+				t.Errorf("Timezone = %q, want unchanged %q (rejection must write nothing)", got.Timezone, "America/Los_Angeles")
+			}
+		})
 	}
 }
 

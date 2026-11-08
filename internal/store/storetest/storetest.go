@@ -25,6 +25,9 @@ import (
 // base is the fixed instant every subtest builds its timestamps from.
 var base = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// testOBABaseURL is the directory base URL the subtests seed regions with.
+const testOBABaseURL = "https://example.org/"
+
 // newStoreFunc is shorthand for the callback every subtest receives: it
 // hands back a fresh, migrated pair of repositories backed by the same
 // underlying store.
@@ -72,7 +75,7 @@ func putRegion(t *testing.T, repo regions.Repository, id int64) {
 	if err := repo.UpsertFromDirectory(context.Background(), []regions.Region{{
 		ID:         id,
 		Name:       fmt.Sprintf("Region %d", id),
-		OBABaseURL: "https://example.org/",
+		OBABaseURL: testOBABaseURL,
 		Active:     true,
 	}}, base); err != nil {
 		t.Fatalf("UpsertFromDirectory(%d): %v", id, err)
@@ -464,7 +467,7 @@ func testFreshRegionHasNoTimezone(t *testing.T, newStore newStoreFunc) {
 	}
 
 	if upErr := regionRepo.UpsertFromDirectory(ctx, []regions.Region{{
-		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+		ID: 1, Name: "Region 1", OBABaseURL: testOBABaseURL, Active: true,
 	}}, base.Add(time.Hour)); upErr != nil {
 		t.Fatalf("UpsertFromDirectory (refresh): %v", upErr)
 	}
@@ -543,7 +546,7 @@ func testUpsertNeverDeletes(t *testing.T, newStore newStoreFunc) {
 	// upstream. Upsert must not delete it, or its alert would be destroyed
 	// along with it by the FK cascade.
 	if err := regionRepo.UpsertFromDirectory(ctx, []regions.Region{{
-		ID: 1, Name: "Region 1", OBABaseURL: "https://example.org/", Active: true,
+		ID: 1, Name: "Region 1", OBABaseURL: testOBABaseURL, Active: true,
 	}}, base.Add(time.Hour)); err != nil {
 		t.Fatalf("UpsertFromDirectory({1}): %v", err)
 	}
