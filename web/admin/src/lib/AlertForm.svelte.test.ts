@@ -2,7 +2,7 @@
 //
 // This behaviour cannot be lifted into a plain module: it is the form's
 // reaction to its `region` prop, which drives a branch in the markup (the
-// zoned/zoneless field switch, the UTC hint). Without a DOM project, the
+// zoned/zoneless field switch). Without a DOM project, the
 // whole node suite stays green even if these branches are gutted.
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
@@ -32,9 +32,8 @@ function region(over: Partial<Region>): Region {
 	};
 }
 
-// A zoned region and a zoneless one. Zoneless cannot be produced through the
-// API today (see the regions screen's note), but the type allows it and the
-// form has a whole branch for it, so it is exercised here.
+// A zoned region and a zoneless one. Zoneless is what the directory sync
+// gives a new region: '' until an operator sets a zone on the Regions screen.
 const ZONED = region({
 	id: 1,
 	name: 'Puget Sound',
@@ -80,9 +79,18 @@ describe('AlertForm region rendering', () => {
 			onsubmit: vi.fn(),
 		});
 		expect(startField().type).toBe('text');
+		expect(endField().type).toBe('text');
+		expect(
+			screen.getByText(/Davis, CA has no configured timezone/),
+		).toBeInTheDocument();
 		expect(
 			screen.getByText(/times must be typed as RFC 3339/),
 		).toBeInTheDocument();
+		expect(
+			screen.getByRole('link', {
+				name: /Set a timezone on the Regions screen/,
+			}),
+		).toHaveAttribute('href', '/admin/regions');
 
 		await user.type(startField(), '2026-08-15T14:00:00-04:00');
 		expect(startField().value).toBe('2026-08-15T14:00:00-04:00');
@@ -124,23 +132,18 @@ describe('AlertForm region rendering', () => {
 		);
 	});
 
-	// A region whose zone reads 'UTC' may simply be unconfigured: the column is
-	// NOT NULL DEFAULT 'UTC' and the directory sync never fills it in.
-	it('warns that a UTC region may be unconfigured', () => {
+	// UTC is a real zone now: the directory sync stores '' for a region nobody
+	// has configured, so a stored 'UTC' is one an operator chose. It gets the
+	// same date picker as any other zone, with no "unconfigured" hint.
+	it('treats a UTC region as configured', () => {
 		render(AlertForm, {
 			region: region({ id: 0, name: 'Tampa Bay', timezone: 'UTC' }),
 			submitLabel: 'Create alert',
 			onsubmit: vi.fn(),
 		});
-		expect(screen.getByText(/nobody has configured yet/)).toBeInTheDocument();
-	});
-
-	it('does not warn for a non-UTC zoned region', () => {
-		render(AlertForm, {
-			region: ZONED,
-			submitLabel: 'Create alert',
-			onsubmit: vi.fn(),
-		});
-		expect(screen.queryByText(/nobody has configured yet/)).toBeNull();
+		expect(startField().type).toBe('datetime-local');
+		expect(screen.getByText('(UTC)')).toBeInTheDocument();
+		expect(screen.queryByText(/no configured timezone/)).toBeNull();
+		expect(screen.queryByText(/configured yet/)).toBeNull();
 	});
 });
