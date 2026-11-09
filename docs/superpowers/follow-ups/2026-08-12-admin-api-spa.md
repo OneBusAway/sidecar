@@ -44,6 +44,9 @@ then surface it in both the SPA and `sidecar-admin alert show`.
 
 ## 3. `sidecar-admin user delete` last-user race, and `user passwd` atomicity
 
+**Resolved.** The delete race was fixed in #57 (`DeleteUserUnlessLast`). `user passwd` now
+changes the hash and revokes sessions in one transaction.
+
 Two concurrent CLI invocations can both pass the last-user `--force` guard before
 either deletes, leaving zero users. Recovery is one command (`user create` against an
 empty users table is the documented bootstrap path), so exposure is minutes of
