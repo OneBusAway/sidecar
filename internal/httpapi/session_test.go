@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/store/sqlitetest"
 )
 
 // testPassword is the plaintext behind testHash; it is long enough to satisfy
@@ -29,6 +30,10 @@ var testHash = sync.OnceValue(func() string {
 	}
 	return h
 })
+
+// otherHash stands in for the hash `user passwd` writes. The store treats it
+// as opaque, so it only has to differ from testHash.
+const otherHash = "$argon2id$v=19$m=19456,t=2,p=1$b3RoZXJzYWx0$b3RoZXJoYXNo"
 
 // testFailDelay is the configured login failure delay in these tests. No test
 // actually sleeps it -- Deps.Sleep is a recorder -- so the value only needs to
@@ -65,16 +70,25 @@ type verifyCall struct {
 // login handler verified against. This is the only way to observe the
 // unknown-user dummy verification at all: it deliberately changes nothing
 // about the response, which is the whole point of it (design spec §4.3).
+//
+// afterVerify, when set before the request, runs once the real verification
+// has finished and before the handler sees its result: the point where a
+// concurrent `user passwd` can land mid-login.
 type verifyRecorder struct {
-	mu    sync.Mutex
-	calls []verifyCall
+	mu          sync.Mutex
+	calls       []verifyCall
+	afterVerify func()
 }
 
 func (v *verifyRecorder) verify(phc, password string) (bool, error) {
 	v.mu.Lock()
 	v.calls = append(v.calls, verifyCall{phc: phc, password: password})
 	v.mu.Unlock()
-	return auth.VerifyPassword(phc, password)
+	ok, err := auth.VerifyPassword(phc, password)
+	if v.afterVerify != nil {
+		v.afterVerify()
+	}
+	return ok, err
 }
 
 func (v *verifyRecorder) recorded() []verifyCall {
@@ -96,7 +110,16 @@ type loginFixture struct {
 func newLoginFixture(t *testing.T) *loginFixture {
 	t.Helper()
 	repo := newStubAuth()
-	user := repo.addUser("admin", testHash())
+	f := newLoginFixtureFor(t, repo)
+	f.repo = repo
+	f.user = repo.addUser("admin", testHash())
+	return f
+}
+
+// newLoginFixtureFor wires any repository behind the router with the same
+// recorders, seeding no account. Its repo and user fields stay zero.
+func newLoginFixtureFor(t *testing.T, repo auth.Repository) *loginFixture {
+	t.Helper()
 	sleeps := &sleepRecorder{}
 	verifies := &verifyRecorder{}
 	h := newTestRouter(repo, func(d *Deps) {
@@ -104,7 +127,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 		d.Sleep = sleeps.sleep
 		d.VerifyPassword = verifies.verify
 	})
-	return &loginFixture{handler: h, repo: repo, sleeps: sleeps, verifies: verifies, user: user}
+	return &loginFixture{handler: h, sleeps: sleeps, verifies: verifies}
 }
 
 // postLogin sends a login request with no browser headers, which the
@@ -257,12 +280,21 @@ func TestLogin_FailuresAreIndistinguishable(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
+		// midLogin, when set, runs between verification and session
+		// creation, the way a concurrent `user passwd` would.
+		midLogin func(*loginFixture)
 	}{
-		{"unknown user", credentials("nosuchuser", testPassword)},
-		{"wrong password", credentials("admin", "wrong-password-entirely")},
-		{"empty username", credentials("", testPassword)},
-		{"empty password", credentials("admin", "")},
-		{"missing fields", `{}`},
+		{"unknown user", credentials("nosuchuser", testPassword), nil},
+		{"wrong password", credentials("admin", "wrong-password-entirely"), nil},
+		{"empty username", credentials("", testPassword), nil},
+		{"empty password", credentials("admin", ""), nil},
+		{"missing fields", `{}`, nil},
+		{"password changed mid-login", credentials("admin", testPassword), func(f *loginFixture) {
+			f.repo.setPasswordHash("admin", otherHash)
+		}},
+		{"user deleted mid-login", credentials("admin", testPassword), func(f *loginFixture) {
+			f.repo.deleteUser("admin")
+		}},
 	}
 
 	type response struct {
@@ -274,22 +306,17 @@ func TestLogin_FailuresAreIndistinguishable(t *testing.T) {
 
 	for i, tc := range cases {
 		f := newLoginFixture(t)
+		if tc.midLogin != nil {
+			f.verifies.afterVerify = func() { tc.midLogin(f) }
+		}
 		rec := f.postLogin(tc.body, nil)
 
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("%s: status = %d, want 401; body = %s", tc.name, rec.Code, rec.Body.String())
-		}
-		if want := `{"error":"invalid credentials"}`; bodyText(rec) != want {
-			t.Errorf("%s: body = %q, want %q", tc.name, bodyText(rec), want)
-		}
-		if cookies := rec.Result().Cookies(); len(cookies) != 0 {
-			t.Errorf("%s: failed login set cookies %v", tc.name, cookies)
-		}
+		assertLoginRejected(t, tc.name, f, rec)
 		if n := f.repo.sessionCount(); n != 0 {
 			t.Errorf("%s: failed login created %d sessions", tc.name, n)
 		}
-		if want := []time.Duration{testFailDelay}; !equalDurations(f.sleeps.durations(), want) {
-			t.Errorf("%s: Sleep calls = %v, want %v", tc.name, f.sleeps.durations(), want)
+		if n := f.repo.gcCount(); n != 0 {
+			t.Errorf("%s: failed login ran the expired-session sweep %d times", tc.name, n)
 		}
 		got[i] = response{status: rec.Code, body: rec.Body.Bytes(), contentType: rec.Header().Get("Content-Type")}
 	}
@@ -307,6 +334,82 @@ func TestLogin_FailuresAreIndistinguishable(t *testing.T) {
 			t.Errorf("%s Content-Type = %q but %s Content-Type = %q",
 				cases[i].name, got[i].contentType, cases[0].name, got[0].contentType)
 		}
+	}
+}
+
+// assertLoginRejected checks the response every failed login shares: 401,
+// the fixed body, no cookie, and exactly one FailDelay sleep.
+func assertLoginRejected(t *testing.T, label string, f *loginFixture, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("%s: status = %d, want 401; body = %s", label, rec.Code, rec.Body.String())
+	}
+	if want := `{"error":"invalid credentials"}`; bodyText(rec) != want {
+		t.Errorf("%s: body = %q, want %q", label, bodyText(rec), want)
+	}
+	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+		t.Errorf("%s: failed login set cookies %v", label, cookies)
+	}
+	if want := []time.Duration{testFailDelay}; !equalDurations(f.sleeps.durations(), want) {
+		t.Errorf("%s: Sleep calls = %v, want %v", label, f.sleeps.durations(), want)
+	}
+}
+
+// loginRaceTimeout bounds each wait in TestLogin_PasswordChangedMidLoginFails.
+const loginRaceTimeout = 15 * time.Second
+
+// TestLogin_PasswordChangedMidLoginFails is the login versus `user passwd`
+// race end to end against the real store. The login verifies the old
+// password, then passwd commits a new hash and revokes every session, and
+// only then does the login ask for its session. It must fail exactly like a
+// wrong password and leave no session behind. The handler is held inside
+// VerifyPassword while the password changes, so channels order the race and
+// nothing sleeps.
+func TestLogin_PasswordChangedMidLoginFails(t *testing.T) {
+	t.Parallel()
+
+	store := sqlitetest.Open(t)
+	ctx := context.Background()
+	user, err := store.Auth().CreateUser(ctx, "admin", testHash(), testNow)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	f := newLoginFixtureFor(t, store.Auth())
+
+	reached, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseLogin := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseLogin)
+	f.verifies.afterVerify = func() {
+		close(reached)
+		<-release
+	}
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- f.postLogin(credentials("admin", testPassword), nil) }()
+
+	select {
+	case <-reached:
+	case <-time.After(loginRaceTimeout):
+		t.Fatalf("login did not finish verifying within %v", loginRaceTimeout)
+	}
+	if err = store.Auth().UpdatePassword(ctx, "admin", otherHash, testNow); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+	releaseLogin()
+
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(loginRaceTimeout):
+		t.Fatalf("login did not finish within %v", loginRaceTimeout)
+	}
+
+	assertLoginRejected(t, "password changed mid-login", f, rec)
+	// DeleteUserSessions reports how many rows it removed, so zero proves the
+	// login left none behind.
+	if n, err := store.Auth().DeleteUserSessions(ctx, user.ID); err != nil || n != 0 {
+		t.Errorf("sessions for admin after the race = %d, %v, want 0, nil", n, err)
 	}
 }
 

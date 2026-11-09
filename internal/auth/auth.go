@@ -29,6 +29,10 @@ var ErrUsernameTaken = errors.New("username already taken")
 // the next `sidecar-admin user create`.
 var ErrLastUser = errors.New("last remaining admin account")
 
+// ErrPasswordChanged is returned by CreateSession when the account's password
+// hash is no longer the one the caller verified.
+var ErrPasswordChanged = errors.New("password changed since it was verified")
+
 // User is an admin account. PasswordHash is a PHC-format argon2id string.
 type User struct {
 	ID           int64
@@ -70,7 +74,14 @@ type Repository interface {
 	// alive next to the new hash. An unknown username is ErrNotFound.
 	UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error
 
-	CreateSession(ctx context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error
+	// CreateSession stores a session for the account only while its password
+	// hash still equals passwordHash, the hash the caller verified. A mismatch
+	// is ErrPasswordChanged and an unknown userID is ErrNotFound; neither
+	// inserts anything. The check and the insert must be atomic against
+	// UpdatePassword. On SQLite one immediate transaction gives this. An
+	// engine with weaker isolation must lock the user row it checks, since a
+	// foreign key lock is not enough.
+	CreateSession(ctx context.Context, tokenHash string, userID int64, passwordHash string, now, expiresAt time.Time) error
 	// GetSession returns ErrNotFound for unknown OR expired tokens; expiry
 	// is evaluated against the passed now, never the database clock. When it
 	// observes an expired row it DELETES it before returning ErrNotFound --

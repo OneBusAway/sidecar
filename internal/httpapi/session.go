@@ -27,10 +27,10 @@ type loginRequest struct {
 
 // login handles POST /api/admin/v1/session.
 //
-// Every failure -- unknown username, wrong password, blank credentials --
-// returns the same status and the same bytes after the same argon2 cost and
-// the same fixed delay, so the endpoint cannot be used to discover which
-// accounts exist (design spec §4.3).
+// Every failure -- unknown username, wrong password, blank credentials, a
+// password changed while it was being verified -- returns the same status and
+// the same bytes after the same argon2 cost and the same fixed delay, so the
+// endpoint cannot be used to discover which accounts exist (design spec §4.3).
 func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := decodeJSON(w, r, maxAuthBody, &req); err != nil {
@@ -83,7 +83,14 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.deps.Now()
-	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, now, now.Add(auth.SessionLifetime)); err != nil {
+	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime)); err != nil {
+		if errors.Is(err, auth.ErrPasswordChanged) || errors.Is(err, auth.ErrNotFound) {
+			// `user passwd` or `user delete` committed while this login was
+			// verifying, so the password it checked no longer opens the
+			// account. Report it exactly like a wrong password.
+			fail()
+			return
+		}
 		serverErrorJSON(w, h.deps.Logger, "create session", err)
 		return
 	}

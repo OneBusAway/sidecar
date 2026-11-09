@@ -210,14 +210,40 @@ func (r *authRepo) UpdatePassword(ctx context.Context, username, passwordHash st
 // sessions
 // ---------------------------------------------------------------------------
 
-func (r *authRepo) CreateSession(ctx context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error {
-	if err := r.q.CreateSession(ctx, gen.CreateSessionParams{
+// CreateSession reads the user, compares its password hash, and inserts the
+// session in one immediate transaction (the store opens with
+// _txlock=immediate). A concurrent UpdatePassword therefore either commits
+// first, and the stale hash is refused here, or waits at BEGIN until this
+// session exists and then revokes it with the rest.
+func (r *authRepo) CreateSession(ctx context.Context, tokenHash string, userID int64, passwordHash string, now, expiresAt time.Time) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: create session for user %d: begin tx: %w", userID, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	user, err := q.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sqlite: create session for user %d: %w", userID, auth.ErrNotFound)
+		}
+		return fmt.Errorf("sqlite: create session for user %d: %w", userID, err)
+	}
+	if user.PasswordHash != passwordHash {
+		return fmt.Errorf("sqlite: create session for user %d: %w", userID, auth.ErrPasswordChanged)
+	}
+	if err = q.CreateSession(ctx, gen.CreateSessionParams{
 		TokenHash: tokenHash,
 		UserID:    userID,
 		CreatedAt: now.Unix(),
 		ExpiresAt: expiresAt.Unix(),
 	}); err != nil {
-		return fmt.Errorf("sqlite: create session: %w", err)
+		return fmt.Errorf("sqlite: create session for user %d: %w", userID, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: create session for user %d: commit: %w", userID, err)
 	}
 	return nil
 }

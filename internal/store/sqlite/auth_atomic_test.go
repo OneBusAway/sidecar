@@ -25,7 +25,11 @@ import (
 type gateDriver struct {
 	real *modernc.Driver
 
-	// gateDelete, once armed, holds the next "DELETE FROM users" prepare:
+	// match is the statement text the gate holds. It is fixed at
+	// construction, before any goroutine prepares a statement.
+	match string
+
+	// gateDelete, once armed, holds the next prepare containing match:
 	// it closes deleteReached and waits for releaseDelete.
 	gateDelete    atomic.Bool
 	deleteReached chan struct{}
@@ -37,9 +41,10 @@ type gateDriver struct {
 	beginEntered chan struct{}
 }
 
-func newGateDriver() *gateDriver {
+func newGateDriver(match string) *gateDriver {
 	return &gateDriver{
 		real:          &modernc.Driver{},
+		match:         match,
 		deleteReached: make(chan struct{}),
 		releaseDelete: make(chan struct{}),
 		beginEntered:  make(chan struct{}),
@@ -60,7 +65,7 @@ type gateConn struct {
 }
 
 func (c *gateConn) Prepare(query string) (driver.Stmt, error) {
-	if strings.Contains(query, "DELETE FROM users") && c.d.gateDelete.CompareAndSwap(true, false) {
+	if strings.Contains(query, c.d.match) && c.d.gateDelete.CompareAndSwap(true, false) {
 		close(c.d.deleteReached)
 		<-c.d.releaseDelete
 	}
@@ -78,6 +83,71 @@ func (c *gateConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.T
 	return beginner.BeginTx(ctx, opts)
 }
 
+// gateTimeout bounds every wait in the gated tests, so an implementation that
+// never reaches a gate, or blocks past one, fails instead of hanging. It sits
+// well above the store's 5 s busy_timeout.
+const gateTimeout = 15 * time.Second
+
+// raceAtGate runs holder until it prepares d.match, then starts contender and
+// waits for it to enter BeginTx before letting holder continue. Anything the
+// contender reads before its transaction therefore predates the held
+// statement. It returns both calls' errors.
+func raceAtGate(t *testing.T, d *gateDriver, holder, contender func() error) (errHolder, errContender error) {
+	t.Helper()
+
+	// Never leave the holder parked on the gate if the test fails early.
+	var once sync.Once
+	release := func() { once.Do(func() { close(d.releaseDelete) }) }
+	t.Cleanup(release)
+
+	d.gateDelete.Store(true)
+	holderDone := make(chan error, 1)
+	go func() { holderDone <- holder() }()
+	select {
+	case <-d.deleteReached:
+	case err := <-holderDone:
+		t.Fatalf("holder returned %v without reaching %q", err, d.match)
+	case <-time.After(gateTimeout):
+		t.Fatalf("holder did not reach %q within %v", d.match, gateTimeout)
+	}
+
+	d.signalBegin.Store(true)
+	contenderDone := make(chan error, 1)
+	go func() { contenderDone <- contender() }()
+
+	// The contender either enters its transaction, or (in an implementation
+	// with no transaction) finishes without one; either way the holder is
+	// released next.
+	contenderFinished := false
+	select {
+	case <-d.beginEntered:
+	case errContender = <-contenderDone:
+		contenderFinished = true
+	case <-time.After(gateTimeout):
+		t.Fatalf("contender neither entered BeginTx nor finished within %v", gateTimeout)
+	}
+
+	release()
+	errHolder = awaitDone(t, holderDone, "holder")
+	if !contenderFinished {
+		errContender = awaitDone(t, contenderDone, "contender")
+	}
+	return errHolder, errContender
+}
+
+// awaitDone returns the error a gated call finished with, failing the test if
+// it does not finish within gateTimeout.
+func awaitDone(t *testing.T, done <-chan error, who string) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(gateTimeout):
+		t.Fatalf("%s did not finish within %v", who, gateTimeout)
+		return nil
+	}
+}
+
 // TestDeleteUserUnlessLast_SerializesConcurrentDeletes forces the
 // interleaving that empties the users table under a check-then-delete: A
 // has checked the count and is about to delete, and B starts while A is
@@ -89,7 +159,7 @@ func (c *gateConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.T
 func TestDeleteUserUnlessLast_SerializesConcurrentDeletes(t *testing.T) {
 	t.Parallel()
 
-	d := newGateDriver()
+	d := newGateDriver("DELETE FROM users")
 	store := openWithDriver(t, "gate", d)
 	repo := store.Auth()
 	ctx := context.Background()
@@ -101,40 +171,9 @@ func TestDeleteUserUnlessLast_SerializesConcurrentDeletes(t *testing.T) {
 		}
 	}
 
-	// Never leave A parked on the gate if the test fails early.
-	var release sync.Once
-	releaseA := func() { release.Do(func() { close(d.releaseDelete) }) }
-	t.Cleanup(releaseA)
-
-	d.gateDelete.Store(true)
-	aDone := make(chan error, 1)
-	go func() { aDone <- repo.DeleteUserUnlessLast(ctx, "alice") }()
-
-	select {
-	case <-d.deleteReached:
-	case err := <-aDone:
-		t.Fatalf("DeleteUserUnlessLast(alice) returned %v without reaching its DELETE", err)
-	}
-
-	d.signalBegin.Store(true)
-	bDone := make(chan error, 1)
-	go func() { bDone <- repo.DeleteUserUnlessLast(ctx, "bob") }()
-
-	// B either enters its transaction, or (in an implementation with no
-	// transaction) finishes without one; either way A is released next.
-	var errB error
-	bFinished := false
-	select {
-	case <-d.beginEntered:
-	case errB = <-bDone:
-		bFinished = true
-	}
-
-	releaseA()
-	errA := <-aDone
-	if !bFinished {
-		errB = <-bDone
-	}
+	errA, errB := raceAtGate(t, d,
+		func() error { return repo.DeleteUserUnlessLast(ctx, "alice") },
+		func() error { return repo.DeleteUserUnlessLast(ctx, "bob") })
 
 	if errA != nil {
 		t.Errorf("DeleteUserUnlessLast(alice) = %v, want nil (it held the lock first)", errA)
@@ -149,6 +188,48 @@ func TestDeleteUserUnlessLast_SerializesConcurrentDeletes(t *testing.T) {
 	}
 	if len(users) != 1 || users[0].Username != "bob" {
 		t.Errorf("ListUsers after both deletes = %+v, want only bob", users)
+	}
+}
+
+// TestCreateSession_RefusesHashChangedByConcurrentPasswd forces the login
+// versus `user passwd` interleaving at the store: passwd has written the new
+// hash but not committed, and a login that verified the old hash asks for its
+// session. UpdatePassword is held at its session revocation until the login
+// has entered BeginTx, so anything the login reads before its transaction
+// predates the new hash. With the read inside one immediate transaction, the
+// login's BEGIN waits for passwd to commit and then sees the new hash. The
+// ordering comes from the gates alone; nothing here sleeps.
+func TestCreateSession_RefusesHashChangedByConcurrentPasswd(t *testing.T) {
+	t.Parallel()
+
+	d := newGateDriver("DELETE FROM sessions")
+	store := openWithDriver(t, "gate", d)
+	repo := store.Auth()
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	user, err := repo.CreateUser(ctx, "admin", "$argon2id$v=19$m=65536,t=3,p=4$b2xk$b2xkaGFzaA", now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	tokenHash := auth.HashToken("login-token")
+
+	errPasswd, errLogin := raceAtGate(t, d,
+		func() error {
+			return repo.UpdatePassword(ctx, "admin", "$argon2id$v=19$m=65536,t=3,p=4$bmV3$bmV3aGFzaA", now)
+		},
+		func() error {
+			return repo.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime))
+		})
+
+	if errPasswd != nil {
+		t.Errorf("UpdatePassword = %v, want nil (it held the lock first)", errPasswd)
+	}
+	if !errors.Is(errLogin, auth.ErrPasswordChanged) {
+		t.Errorf("CreateSession(old hash) = %v, want auth.ErrPasswordChanged (passwd committed first)", errLogin)
+	}
+	if _, err = repo.GetSession(ctx, tokenHash, now); !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("GetSession after the race = %v, want auth.ErrNotFound (no session for the old password)", err)
 	}
 }
 
@@ -182,7 +263,7 @@ func TestUpdatePassword_RollsBackWhenRevocationFails(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	tokenHash := auth.HashToken("old-session-token")
-	if err = repo.CreateSession(ctx, tokenHash, user.ID, now, now.Add(auth.SessionLifetime)); err != nil {
+	if err = repo.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime)); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
