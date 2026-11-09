@@ -24,6 +24,11 @@ var ErrNotFound = errors.New("user or session not found")
 // from the UNIQUE violation inside the store, never a racy pre-check.
 var ErrUsernameTaken = errors.New("username already taken")
 
+// ErrLastUser is returned by DeleteUserUnlessLast when the named account is
+// the only one left: deleting it would leave the admin UI unreachable until
+// the next `sidecar-admin user create`.
+var ErrLastUser = errors.New("last remaining admin account")
+
 // User is an admin account. PasswordHash is a PHC-format argon2id string.
 type User struct {
 	ID           int64
@@ -51,6 +56,14 @@ type Repository interface {
 	GetUserByID(ctx context.Context, id int64) (User, error)
 	ListUsers(ctx context.Context) ([]User, error)
 	DeleteUser(ctx context.Context, username string) error
+	// DeleteUserUnlessLast deletes the account unless it is the only one
+	// left, in which case it returns ErrLastUser and deletes nothing. An
+	// unknown username is ErrNotFound, never ErrLastUser. The check and the
+	// delete must be atomic against concurrent calls: two callers deleting
+	// different accounts from a two-account table must not both succeed.
+	// On SQLite one immediate transaction gives this; an engine with weaker
+	// default isolation must lock the rows it counts.
+	DeleteUserUnlessLast(ctx context.Context, username string) error
 	UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error
 
 	CreateSession(ctx context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error

@@ -211,7 +211,8 @@ func userList(ctx context.Context, stdout io.Writer, store *sqlite.Store, args [
 // (see DeleteUser's doc comment). Deleting the last remaining account is
 // also rejected unless --force is passed: it would make the admin UI
 // unreachable until the next `user create`, and there is deliberately no web
-// signup to recover through.
+// signup to recover through. The last-user check and the delete happen in
+// one atomic repository call, so two concurrent deletes cannot both pass it.
 func userDelete(ctx context.Context, stdout io.Writer, store *sqlite.Store, args []string) error {
 	fs := flag.NewFlagSet("user delete", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -226,33 +227,24 @@ func userDelete(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 	}
 	normalized := auth.NormalizeUsername(*username)
 
-	// Confirmed to exist before the last-user guard runs, so an unknown
-	// username is always reported as "not found" rather than folded into
-	// (or masked by) the last-user check below.
-	if _, getErr := store.Auth().GetUserByUsername(ctx, normalized); getErr != nil {
-		if errors.Is(getErr, auth.ErrNotFound) {
-			return fmt.Errorf("user delete: user %q not found", normalized)
-		}
-		return fmt.Errorf("user delete: %w", getErr)
+	// DeleteUserUnlessLast reports an unknown username as ErrNotFound before
+	// it considers the last-user guard, so a typo is never answered with the
+	// --force hint.
+	var deleteErr error
+	if *force {
+		deleteErr = store.Auth().DeleteUser(ctx, normalized)
+	} else {
+		deleteErr = store.Auth().DeleteUserUnlessLast(ctx, normalized)
 	}
-
-	if !*force {
-		users, listErr := store.Auth().ListUsers(ctx)
-		if listErr != nil {
-			return fmt.Errorf("user delete: %w", listErr)
-		}
-		if len(users) == 1 {
-			return fmt.Errorf(
-				"user delete: %q is the last admin account; deleting it would leave the admin UI "+
-					"unreachable until the next `sidecar-admin user create`. Pass --force to delete it anyway",
-				normalized)
-		}
-	}
-
-	if deleteErr := store.Auth().DeleteUser(ctx, normalized); deleteErr != nil {
-		if errors.Is(deleteErr, auth.ErrNotFound) {
-			return fmt.Errorf("user delete: user %q not found", normalized)
-		}
+	switch {
+	case errors.Is(deleteErr, auth.ErrNotFound):
+		return fmt.Errorf("user delete: user %q not found", normalized)
+	case errors.Is(deleteErr, auth.ErrLastUser):
+		return fmt.Errorf(
+			"user delete: %q is the last admin account; deleting it would leave the admin UI "+
+				"unreachable until the next `sidecar-admin user create`. Pass --force to delete it anyway",
+			normalized)
+	case deleteErr != nil:
 		return fmt.Errorf("user delete: %w", deleteErr)
 	}
 

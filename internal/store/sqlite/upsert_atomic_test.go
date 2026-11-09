@@ -67,13 +67,19 @@ func (c *faultyConn) Prepare(query string) (driver.Stmt, error) {
 // match fails with errInjected.
 func openFaulty(t *testing.T, match string, failAfter int32) *Store {
 	t.Helper()
+	return openWithDriver(t, "faulty", &faultyDriver{real: &modernc.Driver{}, match: match, failAfter: failAfter})
+}
 
-	name := fmt.Sprintf("sqlite_faulty_%s_%d", t.Name(), time.Now().UnixNano())
-	sql.Register(name, &faultyDriver{real: &modernc.Driver{}, match: match, failAfter: failAfter})
+// openWithDriver registers d under a name unique to this test and opens a
+// fresh, migrated *Store through it, with the production DSN.
+func openWithDriver(t *testing.T, kind string, d driver.Driver) *Store {
+	t.Helper()
+
+	name := fmt.Sprintf("sqlite_%s_%s_%d", kind, t.Name(), time.Now().UnixNano())
+	sql.Register(name, d)
 
 	path := filepath.Join(t.TempDir(), "test.db")
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
-	db, err := sql.Open(name, dsn)
+	db, err := sql.Open(name, dsn(path))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}

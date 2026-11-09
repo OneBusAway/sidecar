@@ -141,6 +141,8 @@ func (s *stubAuth) ListUsers(context.Context) ([]auth.User, error) { return nil,
 
 func (s *stubAuth) DeleteUser(context.Context, string) error { return errStubUnused }
 
+func (s *stubAuth) DeleteUserUnlessLast(context.Context, string) error { return errStubUnused }
+
 func (s *stubAuth) UpdatePassword(context.Context, string, string, time.Time) error {
 	return errStubUnused
 }
