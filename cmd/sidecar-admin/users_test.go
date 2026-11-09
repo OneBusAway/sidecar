@@ -45,7 +45,7 @@ func createUserWithSession(t *testing.T, dbPath string, store *sqlite.Store, use
 	}
 	tokenHash = auth.HashToken(token)
 	now = time.Now()
-	if err = store.Auth().CreateSession(ctx, tokenHash, user.ID, now, now.Add(time.Hour)); err != nil {
+	if err = store.Auth().CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(time.Hour)); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	return tokenHash, now
@@ -335,7 +335,7 @@ func TestUserDelete_TwoUsersCascadesSessions(t *testing.T) {
 	}
 	tokenHash := auth.HashToken("alice-token")
 	now := time.Now()
-	if sessErr := store.Auth().CreateSession(ctx, tokenHash, alice.ID, now, now.Add(time.Hour)); sessErr != nil {
+	if sessErr := store.Auth().CreateSession(ctx, tokenHash, alice.ID, alice.PasswordHash, now, now.Add(time.Hour)); sessErr != nil {
 		t.Fatalf("CreateSession: %v", sessErr)
 	}
 

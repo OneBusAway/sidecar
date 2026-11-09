@@ -63,6 +63,12 @@ func RunAuthRepository(t *testing.T, newRepo newAuthRepoFunc) {
 	t.Run("PasswordUpdateUnknownUserChangesNothing", func(t *testing.T) {
 		testPasswordUpdateUnknownUserChangesNothing(t, newRepo)
 	})
+	t.Run("CreateSessionRefusesStalePasswordHash", func(t *testing.T) {
+		testCreateSessionRefusesStalePasswordHash(t, newRepo)
+	})
+	t.Run("CreateSessionUnknownUserIsErrNotFound", func(t *testing.T) {
+		testCreateSessionUnknownUserIsErrNotFound(t, newRepo)
+	})
 	t.Run("TimestampsSurvive32BitBoundary", func(t *testing.T) { testTimestampsSurvive32BitBoundary(t, newRepo) })
 }
 
@@ -109,16 +115,24 @@ func mustCreateUser(t *testing.T, repo auth.Repository, username string) auth.Us
 	return u
 }
 
-// mustCreateSession mints a fresh token pair, stores the session, and returns
-// both halves so callers can assert that only the hash is a valid lookup key.
-func mustCreateSession(t *testing.T, repo auth.Repository, userID int64, now, expiresAt time.Time) (token, tokenHash string) {
+// mustCreateSession mints a fresh token pair, stores a session for user with
+// user's current password hash, and returns both halves so callers can assert
+// that only the hash is a valid lookup key.
+func mustCreateSession(t *testing.T, repo auth.Repository, user auth.User, now, expiresAt time.Time) (token, tokenHash string) {
+	t.Helper()
+	token, tokenHash = mustNewToken(t)
+	if err := repo.CreateSession(context.Background(), tokenHash, user.ID, user.PasswordHash, now, expiresAt); err != nil {
+		t.Fatalf("CreateSession(user %d): %v", user.ID, err)
+	}
+	return token, tokenHash
+}
+
+// mustNewToken mints a token pair, failing the test if minting errors.
+func mustNewToken(t *testing.T) (token, tokenHash string) {
 	t.Helper()
 	token, tokenHash, err := auth.NewToken()
 	if err != nil {
 		t.Fatalf("NewToken: %v", err)
-	}
-	if err := repo.CreateSession(context.Background(), tokenHash, userID, now, expiresAt); err != nil {
-		t.Fatalf("CreateSession(user %d): %v", userID, err)
 	}
 	return token, tokenHash
 }
@@ -398,7 +412,7 @@ func testSessionRoundTrip(t *testing.T, newRepo newAuthRepoFunc) {
 
 	user := mustCreateUser(t, repo, "admin")
 	expires := base.Add(auth.SessionLifetime)
-	_, hash := mustCreateSession(t, repo, user.ID, base, expires)
+	_, hash := mustCreateSession(t, repo, user, base, expires)
 
 	got, err := repo.GetSession(ctx, hash, base)
 	if err != nil {
@@ -426,7 +440,7 @@ func testSessionExpiryBoundary(t *testing.T, newRepo newAuthRepoFunc) {
 
 	user := mustCreateUser(t, repo, "admin")
 	expires := base.Add(auth.SessionLifetime)
-	_, hash := mustCreateSession(t, repo, user.ID, base, expires)
+	_, hash := mustCreateSession(t, repo, user, base, expires)
 
 	// One second before expiry: still live.
 	alive, err := repo.GetSession(ctx, hash, expires.Add(-time.Second))
@@ -460,7 +474,7 @@ func testExpiredSessionDeletedOnRead(t *testing.T, newRepo newAuthRepoFunc) {
 
 	user := mustCreateUser(t, repo, "admin")
 	expires := base.Add(time.Hour)
-	_, hash := mustCreateSession(t, repo, user.ID, base, expires)
+	_, hash := mustCreateSession(t, repo, user, base, expires)
 
 	if _, err := repo.GetSession(ctx, hash, expires.Add(time.Hour)); !errors.Is(err, auth.ErrNotFound) {
 		t.Fatalf("GetSession(now = expiry+1h) = %v, want auth.ErrNotFound", err)
@@ -485,9 +499,9 @@ func testDeleteUserSessionsRevokesAllAndOnlyTheirs(t *testing.T, newRepo newAuth
 	bob := mustCreateUser(t, repo, "bob")
 	expires := base.Add(auth.SessionLifetime)
 
-	_, aliceLaptop := mustCreateSession(t, repo, alice.ID, base, expires)
-	_, alicePhone := mustCreateSession(t, repo, alice.ID, base.Add(time.Minute), expires)
-	_, bobLaptop := mustCreateSession(t, repo, bob.ID, base, expires)
+	_, aliceLaptop := mustCreateSession(t, repo, alice, base, expires)
+	_, alicePhone := mustCreateSession(t, repo, alice, base.Add(time.Minute), expires)
+	_, bobLaptop := mustCreateSession(t, repo, bob, base, expires)
 
 	n, err := repo.DeleteUserSessions(ctx, alice.ID)
 	if err != nil {
@@ -527,9 +541,9 @@ func testDeleteExpiredSessionsCount(t *testing.T, newRepo newAuthRepoFunc) {
 	user := mustCreateUser(t, repo, "admin")
 	cutoff := base.Add(3 * time.Hour)
 
-	_, longGone := mustCreateSession(t, repo, user.ID, base, base.Add(time.Hour))
-	_, atCutoff := mustCreateSession(t, repo, user.ID, base, cutoff)
-	_, live := mustCreateSession(t, repo, user.ID, base, base.Add(auth.SessionLifetime))
+	_, longGone := mustCreateSession(t, repo, user, base, base.Add(time.Hour))
+	_, atCutoff := mustCreateSession(t, repo, user, base, cutoff)
+	_, live := mustCreateSession(t, repo, user, base, base.Add(auth.SessionLifetime))
 
 	n, err := repo.DeleteExpiredSessions(ctx, cutoff)
 	if err != nil {
@@ -574,8 +588,8 @@ func testUserDeleteCascadesToSessions(t *testing.T, newRepo newAuthRepoFunc) {
 	keeper := mustCreateUser(t, repo, "keeper")
 	expires := base.Add(auth.SessionLifetime)
 
-	_, doomedSession := mustCreateSession(t, repo, doomed.ID, base, expires)
-	_, keeperSession := mustCreateSession(t, repo, keeper.ID, base, expires)
+	_, doomedSession := mustCreateSession(t, repo, doomed, base, expires)
+	_, keeperSession := mustCreateSession(t, repo, keeper, base, expires)
 
 	// Sanity: both sessions are live before the delete, so the assertions
 	// below cannot pass because a session was never stored in the first place.
@@ -669,8 +683,8 @@ func testDeleteUserUnlessLastDeletesWhenOthersRemain(t *testing.T, newRepo newAu
 	doomed := mustCreateUser(t, repo, "doomed")
 	keeper := mustCreateUser(t, repo, "keeper")
 	expires := base.Add(auth.SessionLifetime)
-	_, doomedSession := mustCreateSession(t, repo, doomed.ID, base, expires)
-	_, keeperSession := mustCreateSession(t, repo, keeper.ID, base, expires)
+	_, doomedSession := mustCreateSession(t, repo, doomed, base, expires)
+	_, keeperSession := mustCreateSession(t, repo, keeper, base, expires)
 
 	if err := repo.DeleteUserUnlessLast(ctx, "  DOOMED "); err != nil {
 		t.Fatalf("DeleteUserUnlessLast(\"  DOOMED \") = %v, want nil", err)
@@ -773,7 +787,7 @@ func testTokenHashIsNotTheToken(t *testing.T, newRepo newAuthRepoFunc) {
 	}
 
 	expires := base.Add(auth.SessionLifetime)
-	if err = repo.CreateSession(ctx, hash, user.ID, base, expires); err != nil {
+	if err = repo.CreateSession(ctx, hash, user.ID, user.PasswordHash, base, expires); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
@@ -809,9 +823,9 @@ func testPasswordUpdatePersists(t *testing.T, newRepo newAuthRepoFunc) {
 	created := mustCreateUser(t, repo, "admin")
 	other := mustCreateUser(t, repo, "other")
 	expires := base.Add(auth.SessionLifetime)
-	_, adminSession1 := mustCreateSession(t, repo, created.ID, base, expires)
-	_, adminSession2 := mustCreateSession(t, repo, created.ID, base, expires)
-	_, otherSession := mustCreateSession(t, repo, other.ID, base, expires)
+	_, adminSession1 := mustCreateSession(t, repo, created, base, expires)
+	_, adminSession2 := mustCreateSession(t, repo, created, base, expires)
+	_, otherSession := mustCreateSession(t, repo, other, base, expires)
 
 	const newHash = "$argon2id$v=19$m=65536,t=3,p=4$bmV3c2FsdA$bmV3aGFzaA"
 	changed := base.Add(48 * time.Hour)
@@ -847,7 +861,7 @@ func testPasswordUpdateUnknownUserChangesNothing(t *testing.T, newRepo newAuthRe
 	ctx := context.Background()
 
 	admin := mustCreateUser(t, repo, "admin")
-	_, adminSession := mustCreateSession(t, repo, admin.ID, base, base.Add(auth.SessionLifetime))
+	_, adminSession := mustCreateSession(t, repo, admin, base, base.Add(auth.SessionLifetime))
 
 	err := repo.UpdatePassword(ctx, "ghost", testPasswordHash+"2", base.Add(time.Hour))
 	if !errors.Is(err, auth.ErrNotFound) {
@@ -862,6 +876,65 @@ func testPasswordUpdateUnknownUserChangesNothing(t *testing.T, newRepo newAuthRe
 	if _, err := repo.GetSession(ctx, adminSession, base); err != nil {
 		t.Errorf("GetSession(admin) after UpdatePassword(ghost) = %v, want the live session", err)
 	}
+}
+
+// testCreateSessionRefusesStalePasswordHash asserts CreateSession inserts
+// only while the hash the caller verified is still the account's. A login
+// that verified the old password while `user passwd` ran must not create a
+// session after the revocation. The password change runs at the instant the
+// account was created, so updated_at does not move and only a password_hash
+// comparison can tell the old credential from the new one.
+func testCreateSessionRefusesStalePasswordHash(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+
+	admin := mustCreateUser(t, repo, "admin")
+	other := mustCreateUser(t, repo, "other")
+	expires := base.Add(auth.SessionLifetime)
+	_, otherSession := mustCreateSession(t, repo, other, base, expires)
+
+	if err := repo.UpdatePassword(ctx, "admin", testPasswordHash+"2", base); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+
+	_, stale := mustNewToken(t)
+	err := repo.CreateSession(ctx, stale, admin.ID, admin.PasswordHash, base, expires)
+	if !errors.Is(err, auth.ErrPasswordChanged) {
+		t.Errorf("CreateSession(old hash) = %v, want auth.ErrPasswordChanged", err)
+	}
+	assertSessionGone(t, repo, "session for the old hash", stale)
+	if _, err = repo.GetSession(ctx, otherSession, base); err != nil {
+		t.Errorf("GetSession(other) after a refused CreateSession = %v, want the live session", err)
+	}
+
+	// The current hash still opens a session, so the refusal above is a
+	// comparison and not a blanket rejection after a password change.
+	current, err := repo.GetUserByID(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID(admin): %v", err)
+	}
+	_, fresh := mustCreateSession(t, repo, current, base, expires)
+	if _, err = repo.GetSession(ctx, fresh, base); err != nil {
+		t.Errorf("GetSession(session for the current hash) = %v, want the live session", err)
+	}
+}
+
+// testCreateSessionUnknownUserIsErrNotFound asserts a session for an account
+// that no longer exists is ErrNotFound, not a foreign key error, so a login
+// that raced `user delete` fails like any other bad login.
+func testCreateSessionUnknownUserIsErrNotFound(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+
+	// A real user exists, so a passing result cannot come from an empty table.
+	mustCreateUser(t, repo, "admin")
+
+	_, tokenHash := mustNewToken(t)
+	err := repo.CreateSession(ctx, tokenHash, 999999, testPasswordHash, base, base.Add(auth.SessionLifetime))
+	if !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("CreateSession(user 999999) = %v, want auth.ErrNotFound", err)
+	}
+	assertSessionGone(t, repo, "session for an unknown user", tokenHash)
 }
 
 // testTimestampsSurvive32BitBoundary stores instants a day past the 32-bit
@@ -898,7 +971,7 @@ func testTimestampsSurvive32BitBoundary(t *testing.T, newRepo newAuthRepoFunc) {
 	assertInstant(t, "GetUserByID UpdatedAt", got.UpdatedAt, far)
 
 	expires := far.Add(auth.SessionLifetime)
-	_, hash := mustCreateSession(t, repo, user.ID, far, expires)
+	_, hash := mustCreateSession(t, repo, user, far, expires)
 
 	session, err := repo.GetSession(ctx, hash, far)
 	if err != nil {

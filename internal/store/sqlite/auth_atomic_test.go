@@ -191,6 +191,48 @@ func TestDeleteUserUnlessLast_SerializesConcurrentDeletes(t *testing.T) {
 	}
 }
 
+// TestCreateSession_RefusesHashChangedByConcurrentPasswd forces the login
+// versus `user passwd` interleaving at the store: passwd has written the new
+// hash but not committed, and a login that verified the old hash asks for its
+// session. UpdatePassword is held at its session revocation until the login
+// has entered BeginTx, so anything the login reads before its transaction
+// predates the new hash. With the read inside one immediate transaction, the
+// login's BEGIN waits for passwd to commit and then sees the new hash. The
+// ordering comes from the gates alone; nothing here sleeps.
+func TestCreateSession_RefusesHashChangedByConcurrentPasswd(t *testing.T) {
+	t.Parallel()
+
+	d := newGateDriver("DELETE FROM sessions")
+	store := openWithDriver(t, "gate", d)
+	repo := store.Auth()
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	user, err := repo.CreateUser(ctx, "admin", "$argon2id$v=19$m=65536,t=3,p=4$b2xk$b2xkaGFzaA", now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	tokenHash := auth.HashToken("login-token")
+
+	errPasswd, errLogin := raceAtGate(t, d,
+		func() error {
+			return repo.UpdatePassword(ctx, "admin", "$argon2id$v=19$m=65536,t=3,p=4$bmV3$bmV3aGFzaA", now)
+		},
+		func() error {
+			return repo.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime))
+		})
+
+	if errPasswd != nil {
+		t.Errorf("UpdatePassword = %v, want nil (it held the lock first)", errPasswd)
+	}
+	if !errors.Is(errLogin, auth.ErrPasswordChanged) {
+		t.Errorf("CreateSession(old hash) = %v, want auth.ErrPasswordChanged (passwd committed first)", errLogin)
+	}
+	if _, err = repo.GetSession(ctx, tokenHash, now); !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("GetSession after the race = %v, want auth.ErrNotFound (no session for the old password)", err)
+	}
+}
+
 // TestUpdatePassword_RollsBackWhenRevocationFails makes the session
 // revocation fail after the new hash has been written in the same
 // transaction. The whole change must roll back: the old password still
@@ -221,7 +263,7 @@ func TestUpdatePassword_RollsBackWhenRevocationFails(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	tokenHash := auth.HashToken("old-session-token")
-	if err = repo.CreateSession(ctx, tokenHash, user.ID, now, now.Add(auth.SessionLifetime)); err != nil {
+	if err = repo.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime)); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 

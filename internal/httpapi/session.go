@@ -83,7 +83,7 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.deps.Now()
-	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, now, now.Add(auth.SessionLifetime)); err != nil {
+	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime)); err != nil {
 		serverErrorJSON(w, h.deps.Logger, "create session", err)
 		return
 	}

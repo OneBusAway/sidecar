@@ -147,11 +147,20 @@ func (s *stubAuth) UpdatePassword(context.Context, string, string, time.Time) er
 	return errStubUnused
 }
 
-func (s *stubAuth) CreateSession(_ context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error {
+// CreateSession mirrors the Repository contract: the session is stored only
+// while the account's hash still equals the one the caller verified.
+func (s *stubAuth) CreateSession(_ context.Context, tokenHash string, userID int64, passwordHash string, now, expiresAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.createSessionErr != nil {
 		return s.createSessionErr
+	}
+	u, ok := s.usersByID[userID]
+	if !ok {
+		return auth.ErrNotFound
+	}
+	if u.PasswordHash != passwordHash {
+		return auth.ErrPasswordChanged
 	}
 	s.sessions[tokenHash] = auth.Session{TokenHash: tokenHash, UserID: userID, CreatedAt: now, ExpiresAt: expiresAt}
 	return nil
