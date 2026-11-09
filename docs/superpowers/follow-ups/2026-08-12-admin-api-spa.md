@@ -47,20 +47,20 @@ then surface it in both the SPA and `sidecar-admin alert show`.
 **Resolved.** The delete race was fixed in #57 (`DeleteUserUnlessLast`). `user passwd` now
 changes the hash and revokes sessions in one transaction.
 
-Two concurrent CLI invocations can both pass the last-user `--force` guard before
-either deletes, leaving zero users. Recovery is one command (`user create` against an
-empty users table is the documented bootstrap path), so exposure is minutes of
+Two concurrent CLI invocations could both pass the last-user `--force` guard before
+either deleted, leaving zero users. Recovery was one command (`user create` against an
+empty users table is the documented bootstrap path), so exposure was minutes of
 admin-UI downtime, not lockout.
 
-Same follow-up should cover `userPasswd`'s non-atomic sequence — `UpdatePassword` →
-`GetUserByUsername` → `DeleteUserSessions`. A crash between steps leaves
+The same follow-up covered `userPasswd`'s non-atomic sequence — `UpdatePassword` →
+`GetUserByUsername` → `DeleteUserSessions`. A crash between steps left
 old-password sessions live for up to 30 days, contrary to the command's purpose.
 
-**Fix:** wrap each in a single `BEGIN IMMEDIATE` transaction, which needs either new
+**Fix:** each needed a single `BEGIN IMMEDIATE` transaction, which meant either new
 `auth.Repository` methods or transaction plumbing through the interface — a change to
-the Postgres-portability contract and the shared conformance suite. Resolve
-`authRepo.db` (currently an unused field implying exactly this transactional path) as
-part of it.
+the Postgres-portability contract and the shared conformance suite. `authRepo.db`
+(then an unused field implying exactly this transactional path) was resolved by #57
+and #58, which use it for their transactions.
 
 ## 4. Smaller items
 

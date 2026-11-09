@@ -328,10 +328,11 @@ func testCreateRejectsEmptyPasswordHash(t *testing.T, newRepo newAuthRepoFunc) {
 
 // testUnknownUserIsErrNotFound asserts every user-facing operation reports a
 // missing account as auth.ErrNotFound rather than returning nil. DeleteUser
-// and UpdatePassword run as :execrows statements that affect zero rows and
-// report no driver error, so without an explicit rows-affected check
-// `sidecar-admin user delete typo` would exit 0 and print nothing while the real
-// account stayed live.
+// runs as an :execrows statement that affects zero rows and reports no driver
+// error, so without an explicit rows-affected check `sidecar-admin user delete
+// typo` would exit 0 and print nothing while the real account stayed live.
+// UpdatePassword looks the user up inside its transaction and reports the
+// miss from there.
 func testUnknownUserIsErrNotFound(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
 	ctx := context.Background()
@@ -473,10 +474,11 @@ func testExpiredSessionDeletedOnRead(t *testing.T, newRepo newAuthRepoFunc) {
 }
 
 // testDeleteUserSessionsRevokesAllAndOnlyTheirs asserts bulk revocation is
-// both complete and scoped. `sidecar-admin user passwd` calls this so a
-// password change locks out whoever held the old password; a WHERE clause that
-// matched too broadly would log out every other admin at the same time, and
-// one that matched too narrowly would leave the compromised session live.
+// both complete and scoped. Revoking a user's sessions is meant to lock out
+// whoever holds their credentials; a WHERE clause that matched too broadly
+// would log out every other admin at the same time, and one that matched too
+// narrowly would leave the compromised session live. UpdatePassword's own
+// revocation is covered by testPasswordUpdatePersists.
 func testDeleteUserSessionsRevokesAllAndOnlyTheirs(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
 	ctx := context.Background()
