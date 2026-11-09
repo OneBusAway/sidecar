@@ -105,6 +105,26 @@ func (s *stubAuth) gcCount() int {
 	return s.gcCalls
 }
 
+// setPasswordHash swaps username's stored hash, standing in for a
+// `user passwd` that commits while a login is in flight.
+func (s *stubAuth) setPasswordHash(username, passwordHash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := s.usersByName[username]
+	u.PasswordHash = passwordHash
+	s.usersByName[username] = u
+	s.usersByID[u.ID] = u
+}
+
+// deleteUser removes username, standing in for a `user delete` that commits
+// while a login is in flight.
+func (s *stubAuth) deleteUser(username string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.usersByID, s.usersByName[username].ID)
+	delete(s.usersByName, username)
+}
+
 var errStubUnused = errors.New("stubAuth: method not used by httpapi tests")
 
 func (s *stubAuth) CreateUser(context.Context, string, string, time.Time) (auth.User, error) {
