@@ -64,6 +64,10 @@ type Repository interface {
 	// On SQLite one immediate transaction gives this; an engine with weaker
 	// default isolation must lock the rows it counts.
 	DeleteUserUnlessLast(ctx context.Context, username string) error
+	// UpdatePassword replaces the account's password hash and revokes every
+	// session the account holds, atomically: either both happen or neither
+	// does, so a failed password change never leaves old-password sessions
+	// alive next to the new hash. An unknown username is ErrNotFound.
 	UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error
 
 	CreateSession(ctx context.Context, tokenHash string, userID int64, now, expiresAt time.Time) error

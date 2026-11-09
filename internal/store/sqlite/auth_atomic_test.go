@@ -151,3 +151,63 @@ func TestDeleteUserUnlessLast_SerializesConcurrentDeletes(t *testing.T) {
 		t.Errorf("ListUsers after both deletes = %+v, want only bob", users)
 	}
 }
+
+// TestUpdatePassword_RollsBackWhenRevocationFails makes the session
+// revocation fail after the new hash has been written in the same
+// transaction. The whole change must roll back: the old password still
+// verifies and the old session still works. If the hash were committed on
+// its own first, this failure would leave the new hash in place next to a
+// session minted with the old password, which is the state a password
+// change exists to rule out.
+func TestUpdatePassword_RollsBackWhenRevocationFails(t *testing.T) {
+	t.Parallel()
+
+	store := openFaulty(t, "DELETE FROM sessions WHERE user_id", 0)
+	repo := store.Auth()
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	const oldPassword = "old-password-123"
+	oldHash, err := auth.HashPassword(oldPassword)
+	if err != nil {
+		t.Fatalf("HashPassword(old): %v", err)
+	}
+	newHash, err := auth.HashPassword("new-password-456")
+	if err != nil {
+		t.Fatalf("HashPassword(new): %v", err)
+	}
+
+	user, err := repo.CreateUser(ctx, "admin", oldHash, now)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	tokenHash := auth.HashToken("old-session-token")
+	if err = repo.CreateSession(ctx, tokenHash, user.ID, now, now.Add(auth.SessionLifetime)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	err = repo.UpdatePassword(ctx, "admin", newHash, now.Add(time.Hour))
+	if err == nil {
+		t.Fatal("UpdatePassword: want the injected revocation failure, got nil")
+	}
+	if !errors.Is(err, errInjected) {
+		t.Errorf("UpdatePassword error = %v, want it to wrap the injected failure", err)
+	}
+
+	got, err := repo.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if got.PasswordHash != oldHash {
+		t.Errorf("PasswordHash changed after a failed UpdatePassword, want the old hash kept")
+	}
+	if ok, verr := auth.VerifyPassword(got.PasswordHash, oldPassword); verr != nil || !ok {
+		t.Errorf("VerifyPassword(old) after a failed UpdatePassword = %v, %v, want true, nil", ok, verr)
+	}
+	if !got.UpdatedAt.Equal(now) {
+		t.Errorf("UpdatedAt = %v after a failed UpdatePassword, want unchanged %v", got.UpdatedAt, now)
+	}
+	if _, err := repo.GetSession(ctx, tokenHash, now); err != nil {
+		t.Errorf("GetSession after a failed UpdatePassword = %v, want the session still alive", err)
+	}
+}

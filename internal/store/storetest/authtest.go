@@ -60,6 +60,9 @@ func RunAuthRepository(t *testing.T, newRepo newAuthRepoFunc) {
 	})
 	t.Run("TokenHashIsNotTheToken", func(t *testing.T) { testTokenHashIsNotTheToken(t, newRepo) })
 	t.Run("PasswordUpdatePersists", func(t *testing.T) { testPasswordUpdatePersists(t, newRepo) })
+	t.Run("PasswordUpdateUnknownUserChangesNothing", func(t *testing.T) {
+		testPasswordUpdateUnknownUserChangesNothing(t, newRepo)
+	})
 	t.Run("TimestampsSurvive32BitBoundary", func(t *testing.T) { testTimestampsSurvive32BitBoundary(t, newRepo) })
 }
 
@@ -795,12 +798,20 @@ func testTokenHashIsNotTheToken(t *testing.T, newRepo newAuthRepoFunc) {
 // testPasswordUpdatePersists asserts a password change is durable, stamps
 // updated_at from the injected clock, and leaves created_at alone. A rewritten
 // created_at is invisible in normal use and destroys the only record of when
-// an account was provisioned.
+// an account was provisioned. It also asserts the change revokes every one of
+// the account's sessions, and only that account's: a password change is the
+// compromised-credential recovery path, so a session surviving it would
+// defeat the point.
 func testPasswordUpdatePersists(t *testing.T, newRepo newAuthRepoFunc) {
 	repo := newRepo(t)
 	ctx := context.Background()
 
 	created := mustCreateUser(t, repo, "admin")
+	other := mustCreateUser(t, repo, "other")
+	expires := base.Add(auth.SessionLifetime)
+	_, adminSession1 := mustCreateSession(t, repo, created.ID, base, expires)
+	_, adminSession2 := mustCreateSession(t, repo, created.ID, base, expires)
+	_, otherSession := mustCreateSession(t, repo, other.ID, base, expires)
 
 	const newHash = "$argon2id$v=19$m=65536,t=3,p=4$bmV3c2FsdA$bmV3aGFzaA"
 	changed := base.Add(48 * time.Hour)
@@ -820,6 +831,37 @@ func testPasswordUpdatePersists(t *testing.T, newRepo newAuthRepoFunc) {
 	}
 	assertInstant(t, "UpdatedAt", got.UpdatedAt, changed)
 	assertInstant(t, "CreatedAt", got.CreatedAt, base)
+
+	assertSessionGone(t, repo, "admin session 1 after UpdatePassword", adminSession1)
+	assertSessionGone(t, repo, "admin session 2 after UpdatePassword", adminSession2)
+	if _, err := repo.GetSession(ctx, otherSession, base); err != nil {
+		t.Errorf("GetSession(other) after admin's UpdatePassword = %v, want the live session", err)
+	}
+}
+
+// testPasswordUpdateUnknownUserChangesNothing asserts that a password change
+// for a username that names no account is ErrNotFound and touches nothing
+// else: no other account's hash, updated_at, or sessions.
+func testPasswordUpdateUnknownUserChangesNothing(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+
+	admin := mustCreateUser(t, repo, "admin")
+	_, adminSession := mustCreateSession(t, repo, admin.ID, base, base.Add(auth.SessionLifetime))
+
+	err := repo.UpdatePassword(ctx, "ghost", testPasswordHash+"2", base.Add(time.Hour))
+	if !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("UpdatePassword(ghost) = %v, want auth.ErrNotFound", err)
+	}
+
+	got, err := repo.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername(admin): %v", err)
+	}
+	assertSameUser(t, "admin after UpdatePassword(ghost)", got, admin)
+	if _, err := repo.GetSession(ctx, adminSession, base); err != nil {
+		t.Errorf("GetSession(admin) after UpdatePassword(ghost) = %v, want the live session", err)
+	}
 }
 
 // testTimestampsSurvive32BitBoundary stores instants a day past the 32-bit

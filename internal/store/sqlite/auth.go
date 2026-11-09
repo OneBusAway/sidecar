@@ -164,25 +164,44 @@ func (r *authRepo) DeleteUserUnlessLast(ctx context.Context, username string) er
 	return nil
 }
 
-// UpdatePassword reports auth.ErrNotFound when nothing matched, for the same
-// reason DeleteUser does. It does not revoke sessions itself -- the caller
-// pairs it with DeleteUserSessions, which is what makes a password change lock
-// out whoever held the old one.
+// UpdatePassword looks the user up, writes the new hash, and deletes the
+// user's sessions in one immediate transaction (the store opens with
+// _txlock=immediate). A failure at any step rolls the hash back too, so a
+// password change cannot half-apply and leave old-password sessions alive.
+// An unknown username is auth.ErrNotFound, for the same reason DeleteUser
+// reports it.
 func (r *authRepo) UpdatePassword(ctx context.Context, username, passwordHash string, now time.Time) error {
 	username = auth.NormalizeUsername(username)
 	if passwordHash == "" {
 		return errors.New("sqlite: update password: password hash must not be empty")
 	}
-	n, err := r.q.UpdateUserPassword(ctx, gen.UpdateUserPasswordParams{
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite: update password for %q: begin tx: %w", username, err)
+	}
+	//nolint:errcheck // rollback after a successful commit is a documented no-op; the error is expected and safe to ignore
+	defer func() { _ = tx.Rollback() }()
+	q := r.q.WithTx(tx)
+
+	user, err := q.GetUserByUsername(ctx, username)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("sqlite: update password for %q: %w", username, auth.ErrNotFound)
+		}
+		return fmt.Errorf("sqlite: update password for %q: %w", username, err)
+	}
+	if _, err = q.UpdateUserPassword(ctx, gen.UpdateUserPasswordParams{
 		PasswordHash: passwordHash,
 		UpdatedAt:    now.Unix(),
 		Username:     username,
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("sqlite: update password for %q: %w", username, err)
 	}
-	if n == 0 {
-		return fmt.Errorf("sqlite: update password for %q: %w", username, auth.ErrNotFound)
+	if _, err = q.DeleteUserSessions(ctx, user.ID); err != nil {
+		return fmt.Errorf("sqlite: update password for %q: revoke sessions: %w", username, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: update password for %q: commit: %w", username, err)
 	}
 	return nil
 }
