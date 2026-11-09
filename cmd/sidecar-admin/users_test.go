@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 )
 
 // cliStdin is cli (see commands_test.go) with an explicit stdin reader, for
@@ -24,6 +26,30 @@ func cliStdin(t *testing.T, stdin io.Reader, dbPath string, args ...string) (str
 
 // validPassword satisfies auth.MinPasswordLen (12) with room to spare.
 const validPassword = "hunter2hunter2"
+
+// createUserWithSession creates username through `user create` with
+// validPassword and seeds one live session for it, the way a real login
+// would have. It returns the session's token hash and the instant the
+// session was minted.
+func createUserWithSession(t *testing.T, dbPath string, store *sqlite.Store, username, token string) (tokenHash string, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+
+	if _, _, err := cliStdin(t, strings.NewReader(validPassword), dbPath,
+		"user", "create", "--username", username, "--password-stdin"); err != nil {
+		t.Fatalf("user create: %v", err)
+	}
+	user, err := store.Auth().GetUserByUsername(ctx, username)
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	tokenHash = auth.HashToken(token)
+	now = time.Now()
+	if err = store.Auth().CreateSession(ctx, tokenHash, user.ID, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	return tokenHash, now
+}
 
 func TestUserCreate_ValidPasswordCreatesRow(t *testing.T) {
 	t.Parallel()
@@ -195,22 +221,7 @@ func TestUserPasswd_UpdatesHashAndRevokesSessions(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	ctx := context.Background()
-
-	if _, _, err := cliStdin(t, strings.NewReader(validPassword), dbPath,
-		"user", "create", "--username", "alice", "--password-stdin"); err != nil {
-		t.Fatalf("user create: %v", err)
-	}
-	user, err := store.Auth().GetUserByUsername(ctx, "alice")
-	if err != nil {
-		t.Fatalf("GetUserByUsername: %v", err)
-	}
-
-	// Seed a live session, the way a real login would have.
-	tokenHash := auth.HashToken("test-token")
-	now := time.Now()
-	if sessErr := store.Auth().CreateSession(ctx, tokenHash, user.ID, now, now.Add(time.Hour)); sessErr != nil {
-		t.Fatalf("CreateSession: %v", sessErr)
-	}
+	tokenHash, now := createUserWithSession(t, dbPath, store, "alice", "test-token")
 
 	const newPassword = "newpassword12"
 	stdout, _, err := cliStdin(t, strings.NewReader(newPassword), dbPath,
@@ -253,6 +264,57 @@ func TestUserPasswd_UnknownUserRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error = %q, want it to mention the account was not found", err.Error())
+	}
+}
+
+// TestUserPasswd_RevocationFailureKeepsOldPassword makes the session delete
+// fail inside the database, through a trigger, after the new hash has been
+// written. The command must report an error and change nothing: the old
+// password still verifies and the old session still works. Before the hash
+// change and the revocation shared a transaction, this left the new hash
+// committed and the old session alive.
+func TestUserPasswd_RevocationFailureKeepsOldPassword(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	ctx := context.Background()
+	tokenHash, now := createUserWithSession(t, dbPath, store, "alice", "old-session-token")
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err = raw.ExecContext(ctx, `CREATE TRIGGER fail_session_delete BEFORE DELETE ON sessions
+		BEGIN SELECT RAISE(ABORT, 'injected session delete failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, dropErr := raw.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS fail_session_delete`); dropErr != nil {
+			t.Errorf("drop trigger: %v", dropErr)
+		}
+	})
+
+	stdout, _, err := cliStdin(t, strings.NewReader("newpassword12"), dbPath,
+		"user", "passwd", "--username", "alice", "--password-stdin")
+	if err == nil {
+		t.Fatal("user passwd with a failing session delete: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "injected session delete failure") {
+		t.Errorf("error = %q, want it to carry the trigger's failure", err.Error())
+	}
+	if strings.Contains(stdout, "password updated") {
+		t.Errorf("stdout = %q, want no success line after a failed change", stdout)
+	}
+
+	after, err := store.Auth().GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername after failed passwd: %v", err)
+	}
+	if ok, verr := auth.VerifyPassword(after.PasswordHash, validPassword); verr != nil || !ok {
+		t.Errorf("VerifyPassword(old) after failed passwd = %v, %v, want true, nil", ok, verr)
+	}
+	if _, gerr := store.Auth().GetSession(ctx, tokenHash, now); gerr != nil {
+		t.Errorf("GetSession after failed passwd = %v, want the old session still alive", gerr)
 	}
 }
 

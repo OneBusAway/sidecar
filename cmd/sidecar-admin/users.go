@@ -136,7 +136,8 @@ func userCreate(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 // userPasswd changes an existing admin's password and revokes every session
 // tied to it: a password change is the compromised-credential recovery path,
 // so a session surviving it for up to SessionLifetime would defeat the
-// point.
+// point. UpdatePassword does both in one transaction, so a failure part way
+// through leaves the old password and its sessions as they were.
 func userPasswd(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	fs := flag.NewFlagSet("user passwd", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -169,16 +170,6 @@ func userPasswd(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 			return fmt.Errorf("user passwd: user %q not found", normalized)
 		}
 		return fmt.Errorf("user passwd: %w", updateErr)
-	}
-
-	// UpdatePassword takes a username, not an id; the id is needed to scope
-	// the session revocation that follows.
-	user, err := store.Auth().GetUserByUsername(ctx, normalized)
-	if err != nil {
-		return fmt.Errorf("user passwd: %w", err)
-	}
-	if _, revokeErr := store.Auth().DeleteUserSessions(ctx, user.ID); revokeErr != nil {
-		return fmt.Errorf("user passwd: revoke sessions for %q: %w", normalized, revokeErr)
 	}
 
 	fmt.Fprintf(stdout, "password updated for %s; all sessions revoked\n", normalized)
