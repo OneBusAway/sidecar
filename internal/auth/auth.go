@@ -79,8 +79,8 @@ type Repository interface {
 	// future Postgres one must do the same.
 	GetSession(ctx context.Context, tokenHash string, now time.Time) (Session, error)
 	DeleteSession(ctx context.Context, tokenHash string) error
-	// DeleteUserSessions revokes every session for a user; user passwd calls
-	// it so a password change locks out whoever held the old password.
+	// DeleteUserSessions revokes every session for a user. A password change
+	// does not need it: UpdatePassword revokes the sessions itself.
 	DeleteUserSessions(ctx context.Context, userID int64) (int64, error)
 	DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error)
 }
