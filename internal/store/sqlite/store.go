@@ -462,7 +462,7 @@ func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Tim
 	// API, a bulk importer) would silently store an alert no app can match by
 	// agency. Enforcing it here, rather than only in the CLI, protects every
 	// caller of this Repository.
-	if in.AgencyID == "" {
+	if strings.TrimSpace(in.AgencyID) == "" {
 		return alerts.Alert{}, errors.New("sqlite: create alert: agency id must not be empty")
 	}
 	// HeaderText is the one piece of text riders cannot do without:
@@ -471,7 +471,7 @@ func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Tim
 	// header-less alert. The column is NOT NULL but not non-empty; enforcing
 	// it here, rather than trusting every caller to have checked already,
 	// protects every caller of this Repository.
-	if in.HeaderText == "" {
+	if strings.TrimSpace(in.HeaderText) == "" {
 		return alerts.Alert{}, errors.New("sqlite: create alert: header text must not be empty")
 	}
 	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
@@ -583,7 +583,7 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	// NOT NULL but not non-empty, so without this check Patch{AgencyID: &""}
 	// would succeed and write agency_id = '', producing an
 	// informed_entity{agency_id:""} in the feed that no OBA app matches.
-	if current.AgencyID == "" {
+	if strings.TrimSpace(current.AgencyID) == "" {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: agency id must not be empty", id)
 	}
 
@@ -591,7 +591,7 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	// passes HeaderText straight through with no fallback, so without this
 	// check Patch{HeaderText: &""} would succeed and blank the header of an
 	// already-published alert riders are reading right now.
-	if current.HeaderText == "" {
+	if strings.TrimSpace(current.HeaderText) == "" {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: header text must not be empty", id)
 	}
 

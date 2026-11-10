@@ -170,6 +170,13 @@ describe('buildCreatePayload', () => {
 		const payload = buildCreatePayload(values({ agencyId: '' }), KATHMANDU);
 		expect(payload.agency_id).toBe('');
 	});
+
+	it.each([
+		['   ', ''],
+		[' Detour ', 'Detour'],
+	])('trims header %j to %j', (header, want) => {
+		expect(buildCreatePayload(values({ header }), KATHMANDU).header).toBe(want);
+	});
 });
 
 describe('buildPatchPayload', () => {
@@ -204,6 +211,13 @@ describe('buildPatchPayload', () => {
 		);
 		expect(payload.end_time).toBe('2026-08-17T02:45:00+05:45');
 		expect('clear_end_time' in payload).toBe(false);
+	});
+
+	it.each([
+		['   ', ''],
+		[' Detour ', 'Detour'],
+	])('trims header %j to %j', (header, want) => {
+		expect(buildPatchPayload(values({ header }), KATHMANDU).header).toBe(want);
 	});
 });
 

@@ -330,12 +330,13 @@ func TestUnknownCauseRejected(t *testing.T) {
 	assertNoAlerts(t, store, 1)
 }
 
-// TestAlertCreateEmptyHeaderRejected pins the CLI-level guard against
-// `--header ""`: the flag is seen (so the "requires --header" check does not
-// catch it), and without this check it would reach the repository, which now
-// rejects it too, but with a bare storage-layer message rather than one
-// naming the flag the author typed.
-func TestAlertCreateEmptyHeaderRejected(t *testing.T) {
+// TestAlertCreateBlankHeaderOrAgencyRejected pins the CLI-level guard
+// against `--header ""`: the flag is seen (so the "requires --header" check
+// does not catch it), and without this check it would reach the repository,
+// which now rejects it too, but with a bare storage-layer message rather
+// than one naming the flag the author typed. A blank --agency-id is
+// rejected by the agency resolution check.
+func TestAlertCreateBlankHeaderOrAgencyRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
@@ -343,21 +344,28 @@ func TestAlertCreateEmptyHeaderRejected(t *testing.T) {
 		t.Fatalf("region set: %v", err)
 	}
 
-	_, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "",
-		"--start", "2026-08-15T14:00:00Z")
-	if err == nil {
-		t.Fatal("alert create with empty --header: want error, got nil")
-	}
-	if !strings.Contains(err.Error(), "--header") {
-		t.Errorf("error = %v, want it to name --header", err)
+	for _, flag := range []string{"--header", "--agency-id"} {
+		for _, blank := range []string{"", " \t"} {
+			args := []string{"alert", "create", "--region", "1", "--start", "2026-08-15T14:00:00Z", flag, blank}
+			if flag != "--header" {
+				args = append(args, "--header", "x")
+			}
+			_, _, err := cli(t, dbPath, args...)
+			if err == nil {
+				t.Errorf("alert create with %s %q: want error, got nil", flag, blank)
+				continue
+			}
+			if !strings.Contains(err.Error(), flag) {
+				t.Errorf("alert create with %s %q: error = %v, want it to name %s", flag, blank, err, flag)
+			}
+		}
 	}
 	assertNoAlerts(t, store, 1)
 }
 
-// TestAlertEditEmptyHeaderRejected pins the CLI-level guard against
-// `--header ""` blanking the header of an already-published alert, mirroring
-// the existing --agency-id guard in alert edit.
-func TestAlertEditEmptyHeaderRejected(t *testing.T) {
+// TestAlertEditBlankHeaderOrAgencyRejected pins the CLI-level guards against
+// a blank --header or --agency-id changing an already-published alert.
+func TestAlertEditBlankHeaderOrAgencyRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
@@ -371,20 +379,26 @@ func TestAlertEditEmptyHeaderRejected(t *testing.T) {
 	}
 	id := parseCreatedID(t, stdout)
 
-	_, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(id, 10), "--header", "")
-	if editErr == nil {
-		t.Fatal("alert edit with empty --header: want error, got nil")
-	}
-	if !strings.Contains(editErr.Error(), "--header") {
-		t.Errorf("error = %v, want it to name --header", editErr)
+	for _, flag := range []string{"--header", "--agency-id"} {
+		for _, blank := range []string{"", " \t"} {
+			_, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(id, 10), flag, blank)
+			if editErr == nil {
+				t.Errorf("alert edit with %s %q: want error, got nil", flag, blank)
+				continue
+			}
+			if !strings.Contains(editErr.Error(), flag) {
+				t.Errorf("alert edit with %s %q: error = %v, want it to name %s", flag, blank, editErr, flag)
+			}
+		}
 	}
 
 	got, gerr := store.Alerts().Get(context.Background(), id)
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	if got.HeaderText != "Original" {
-		t.Errorf("HeaderText = %q after a rejected edit, want unchanged %q", got.HeaderText, "Original")
+	if got.HeaderText != "Original" || got.AgencyID != "40" {
+		t.Errorf("after rejected edits: header = %q, agency = %q, want unchanged %q, %q",
+			got.HeaderText, got.AgencyID, "Original", "40")
 	}
 }
 

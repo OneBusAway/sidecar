@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -172,7 +173,7 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 			"region_id is not accepted; the region comes from the path")
 		return
 	}
-	if req.Header == "" {
+	if strings.TrimSpace(req.Header) == "" {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header is required")
 		return
 	}
@@ -201,10 +202,10 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 	// does: the resolved value is what gets stored, so a published alert never
 	// changes agency underneath a later directory sync or region edit.
 	agencyID := req.AgencyID
-	if agencyID == "" {
+	if strings.TrimSpace(agencyID) == "" {
 		agencyID = region.DefaultAgencyID
 	}
-	if agencyID == "" {
+	if strings.TrimSpace(agencyID) == "" {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, fmt.Sprintf(
 			"no agency_id given and region %d has no default agency id; "+
 				"set one with PATCH /api/admin/v1/regions/%d or pass agency_id",
@@ -288,7 +289,7 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		// The column is NOT NULL but not non-empty: an empty header stores
 		// fine and then ships a header-less alert to every rider reading the
 		// feed. Same reasoning as the agency_id check just below.
-		if *req.Header == "" {
+		if strings.TrimSpace(*req.Header) == "" {
 			writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header must not be empty")
 			return
 		}
@@ -298,7 +299,7 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 	if req.AgencyID != nil {
 		// The column is NOT NULL but not non-empty: an empty agency id stores
 		// fine and then produces an informed_entity no OBA app matches.
-		if *req.AgencyID == "" {
+		if strings.TrimSpace(*req.AgencyID) == "" {
 			writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "agency_id must not be empty")
 			return
 		}

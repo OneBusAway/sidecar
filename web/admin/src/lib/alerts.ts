@@ -207,7 +207,7 @@ export function buildCreatePayload(
 ): CreateAlertPayload {
 	const payload: CreateAlertPayload = {
 		agency_id: v.agencyId.trim(),
-		header: v.header,
+		header: v.header.trim(),
 		description: v.description,
 		url: v.url.trim(),
 		cause: v.cause,
@@ -242,7 +242,7 @@ export function buildPatchPayload(
 ): PatchAlertPayload {
 	const payload: PatchAlertPayload = {
 		agency_id: v.agencyId.trim(),
-		header: v.header,
+		header: v.header.trim(),
 		description: v.description,
 		url: v.url.trim(),
 		cause: v.cause,

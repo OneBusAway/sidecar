@@ -433,7 +433,7 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	if len(missing) > 0 {
 		return fmt.Errorf("alert create requires %s", strings.Join(missing, ", "))
 	}
-	if *header == "" {
+	if strings.TrimSpace(*header) == "" {
 		return errors.New("alert create: --header cannot be empty")
 	}
 
@@ -468,7 +468,7 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	if seen["agency-id"] {
 		resolvedAgencyID = *agencyID
 	}
-	if resolvedAgencyID == "" {
+	if strings.TrimSpace(resolvedAgencyID) == "" {
 		return fmt.Errorf(
 			"alert create: region %d has no default agency id.\n"+
 				"  Set one:              sidecar-admin --db <db> region set --id %d --agency-id <agency>\n"+
@@ -695,7 +695,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 	}
 
 	if seen["header"] {
-		if *header == "" {
+		if strings.TrimSpace(*header) == "" {
 			return errors.New("alert edit: --header cannot be empty")
 		}
 		patch.HeaderText = header
@@ -707,7 +707,7 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 		patch.URL = url
 	}
 	if seen["agency-id"] {
-		if *agencyID == "" {
+		if strings.TrimSpace(*agencyID) == "" {
 			return errors.New("alert edit: --agency-id cannot be empty")
 		}
 		patch.AgencyID = agencyID
