@@ -215,6 +215,7 @@ func TestAdminRegions_PatchRejections(t *testing.T) {
 		{"non-integer id", "/api/admin/v1/regions/abc", `{"timezone":"UTC"}`, http.StatusNotFound, []string{"region not found"}},
 		{"invalid timezone", "/api/admin/v1/regions/1", `{"timezone":"Mars/Olympus_Mons"}`, http.StatusBadRequest, []string{"timezone", "Mars/Olympus_Mons"}},
 		{"empty timezone", "/api/admin/v1/regions/1", `{"timezone":""}`, http.StatusBadRequest, []string{"timezone"}},
+		{"blank default agency id", "/api/admin/v1/regions/1", `{"default_agency_id":" \t"}`, http.StatusBadRequest, []string{"default_agency_id", "whitespace"}},
 		{
 			// time.LoadLocation accepts "Local" and resolves it to whatever
 			// zone the server happens to run in -- exactly the machine-local

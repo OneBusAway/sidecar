@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/regions"
@@ -125,6 +126,11 @@ func (h *adminRegionsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		// An empty value is allowed: it clears the default, after which
 		// creating an alert for this region requires an explicit agency_id.
 		agencyID = *req.DefaultAgencyID
+		if agencyID != "" && strings.TrimSpace(agencyID) == "" {
+			writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
+				`default_agency_id must not be whitespace only; send "" to clear it`)
+			return
+		}
 	}
 
 	timezone := current.Timezone
