@@ -353,6 +353,10 @@ func (r *regionRepo) UpsertFromDirectory(ctx context.Context, in []regions.Regio
 }
 
 func (r *regionRepo) SetLocalFields(ctx context.Context, id int64, in regions.LocalFields, now time.Time) error {
+	// "" clears the default. Only whitespace would look set but match no agency.
+	if in.DefaultAgencyID != "" && strings.TrimSpace(in.DefaultAgencyID) == "" {
+		return fmt.Errorf("sqlite: set local fields for region %d: default agency id must not be whitespace only", id)
+	}
 	if err := r.q.SetRegionLocalFields(ctx, gen.SetRegionLocalFieldsParams{
 		DefaultAgencyID: in.DefaultAgencyID,
 		Timezone:        in.Timezone,

@@ -253,6 +253,55 @@ func assertRegionZones(t *testing.T, stage string, db *sql.DB, want map[int64]st
 	}
 }
 
+// TestMigrateClearsBlankDefaultAgency pins migration 15: a default agency id
+// that is only whitespace becomes "", while "" and any value with a
+// non-space character are left as they were. Down changes nothing.
+func TestMigrateClearsBlankDefaultAgency(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, p := openMigrationProvider(t)
+	if _, err := p.UpTo(ctx, 14); err != nil {
+		t.Fatalf("UpTo(14): %v", err)
+	}
+	cases := []struct{ stored, want string }{
+		{" \t", ""},
+		{"\n\v\f\r ", ""},
+		{"", ""},
+		{"40", "40"},
+		{" 40 ", " 40 "},
+	}
+	for i, c := range cases {
+		if _, err := db.ExecContext(ctx, `INSERT INTO regions
+			(id, region_name, oba_base_url, default_agency_id, synced_at, created_at, updated_at)
+			VALUES (?, 'R', 'https://a.example.org/', ?, 0, 0, 0)`, i+1, c.stored); err != nil {
+			t.Fatalf("seed region %d: %v", i+1, err)
+		}
+	}
+	check := func(stage string) {
+		t.Helper()
+		for i, c := range cases {
+			var got string
+			if err := db.QueryRowContext(ctx,
+				"SELECT default_agency_id FROM regions WHERE id = ?", i+1).Scan(&got); err != nil {
+				t.Fatalf("%s: read region %d: %v", stage, i+1, err)
+			}
+			if got != c.want {
+				t.Errorf("%s: stored %q became %q, want %q", stage, c.stored, got, c.want)
+			}
+		}
+	}
+
+	if _, err := p.UpTo(ctx, 15); err != nil {
+		t.Fatalf("UpTo(15): %v", err)
+	}
+	check("after up")
+	if _, err := p.DownTo(ctx, 14); err != nil {
+		t.Fatalf("DownTo(14): %v", err)
+	}
+	check("after down")
+}
+
 // TestFeed exercises Feed through the generated Go bindings rather than by
 // hand-running SQL: an earlier review verified the FeedAlerts/FeedTranslations
 // SQL by hand and missed that a bare `LIMIT ?` mixed with an
