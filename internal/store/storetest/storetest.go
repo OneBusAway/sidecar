@@ -792,6 +792,10 @@ func testCreateRejectsInvalidWindow(t *testing.T, newStore newStoreFunc) {
 	}
 }
 
+// blankValues are the header and agency id values the repository must treat
+// as empty.
+var blankValues = []string{"", " \t"}
+
 // testCreateRejectsEmptyAgencyID asserts that Create rejects an empty
 // AgencyID rather than storing it: NewAlert.AgencyID is documented as
 // pre-resolved by the caller, and that contract must be enforced by the
@@ -802,10 +806,12 @@ func testCreateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
 	ctx := context.Background()
 	putRegion(t, regionRepo, 1)
 
-	in := newAlertIn(1, base)
-	in.AgencyID = ""
-	if _, err := repo.Create(ctx, in, base); err == nil {
-		t.Error("Create with empty AgencyID: want error, got nil")
+	for _, blank := range blankValues {
+		in := newAlertIn(1, base)
+		in.AgencyID = blank
+		if _, err := repo.Create(ctx, in, base); err == nil {
+			t.Errorf("Create with AgencyID %q: want error, got nil", blank)
+		}
 	}
 }
 
@@ -825,9 +831,10 @@ func testUpdateRejectsEmptyAgencyID(t *testing.T, newStore newStoreFunc) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	empty := ""
-	if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{AgencyID: &empty}, base.Add(time.Minute)); updateErr == nil {
-		t.Error("Update with empty AgencyID: want error, got nil")
+	for _, blank := range blankValues {
+		if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{AgencyID: &blank}, base.Add(time.Minute)); updateErr == nil {
+			t.Errorf("Update with AgencyID %q: want error, got nil", blank)
+		}
 	}
 
 	got, err := repo.Get(ctx, created.ID)
@@ -852,10 +859,12 @@ func testCreateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
 	ctx := context.Background()
 	putRegion(t, regionRepo, 1)
 
-	in := newAlertIn(1, base)
-	in.HeaderText = ""
-	if _, err := repo.Create(ctx, in, base); err == nil {
-		t.Error("Create with empty HeaderText: want error, got nil")
+	for _, blank := range blankValues {
+		in := newAlertIn(1, base)
+		in.HeaderText = blank
+		if _, err := repo.Create(ctx, in, base); err == nil {
+			t.Errorf("Create with HeaderText %q: want error, got nil", blank)
+		}
 	}
 }
 
@@ -875,9 +884,10 @@ func testUpdateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	empty := ""
-	if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &empty}, base.Add(time.Minute)); updateErr == nil {
-		t.Error("Update with empty HeaderText: want error, got nil")
+	for _, blank := range blankValues {
+		if _, updateErr := repo.Update(ctx, created.ID, alerts.Patch{HeaderText: &blank}, base.Add(time.Minute)); updateErr == nil {
+			t.Errorf("Update with HeaderText %q: want error, got nil", blank)
+		}
 	}
 
 	got, err := repo.Get(ctx, created.ID)
