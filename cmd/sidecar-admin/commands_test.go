@@ -675,6 +675,38 @@ func TestRegionSetRejectsEmptyAndLocalTimezone(t *testing.T) {
 	}
 }
 
+// TestRegionSetRejectsBlankAgencyID asserts that a whitespace-only
+// --agency-id writes nothing, while "" still clears the default.
+func TestRegionSetRejectsBlankAgencyID(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	assertAgency := func(want string) {
+		t.Helper()
+		got, err := store.Regions().Get(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.DefaultAgencyID != want {
+			t.Errorf("DefaultAgencyID = %q, want %q", got.DefaultAgencyID, want)
+		}
+	}
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+
+	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", " \t")
+	if err == nil || !strings.Contains(err.Error(), "--agency-id") {
+		t.Errorf("region set --agency-id blank: error = %v, want one naming --agency-id", err)
+	}
+	assertAgency("40")
+
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", ""); err != nil {
+		t.Fatalf("region set --agency-id \"\": %v", err)
+	}
+	assertAgency("")
+}
+
 // erroringRegionRepo satisfies regions.Repository but fails every Get with
 // something other than regions.ErrNotFound, letting a test exercise
 // alertShow's "surface anything else" branch without needing a genuinely

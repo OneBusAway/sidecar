@@ -294,6 +294,9 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 
 	newAgencyID := current.DefaultAgencyID
 	if seen["agency-id"] {
+		if *agencyID != "" && strings.TrimSpace(*agencyID) == "" {
+			return errors.New(`region set: --agency-id must not be whitespace only; pass "" to clear the default`)
+		}
 		newAgencyID = *agencyID
 	}
 
