@@ -64,9 +64,10 @@ and #58, which use it for their transactions.
 
 ## 4. Smaller items
 
-- Header guards test `== ""`, not whitespace, so a header of `"   "` still passes all
-  three surfaces. The neighbouring `agency_id` guard has the identical hole; fix both
-  together, including a `.trim()` in the SPA's payload builders.
+- **Resolved in #62.** Header guards test `== ""`, not whitespace, so a header of
+  `"   "` still passes all three surfaces. The neighbouring `agency_id` guard has the
+  identical hole; fix both together, including a `.trim()` in the SPA's payload
+  builders.
 - `internal/store/sqlite/store_test.go` — `TestMigrateCreatesAuthTables` asserts the
   four timestamp columns are `INTEGER` but not the foreign key or the indexes. The
   FK's *behavior* is pinned engine-independently by the cascade conformance subtest,
