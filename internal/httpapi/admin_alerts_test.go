@@ -747,6 +747,15 @@ func TestAdminAlerts_CreateResolvesAgency(t *testing.T) {
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest),
 			"no agency_id given", "region 2", "PATCH /api/admin/v1/regions/2", "agency_id")
 	})
+
+	t.Run("blank region default", func(t *testing.T) {
+		// Own fixture, so the blank default does not leak into other subtests.
+		blank := newAdminFixture(t)
+		object(t, blank.do(http.MethodPatch, "/api/admin/v1/regions/2", `{"default_agency_id":" \t"}`), http.StatusOK)
+		rec := blank.do(http.MethodPost, "/api/admin/v1/regions/2/alerts", minimalAlertBody("bare"))
+		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest),
+			"no agency_id given", "region 2", "PATCH /api/admin/v1/regions/2", "agency_id")
+	})
 }
 
 // TestAdminAlerts_CreateRejections covers every 4xx the create path owes the
@@ -822,6 +831,10 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 			wantStatus: http.StatusCreated,
 		},
 		{
+			name: "blank agency id", body: `{"agency_id":" \t","header":"x","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusCreated,
+		},
+		{
 			name: "malformed JSON", body: `{`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"invalid JSON"},
 		},
@@ -840,6 +853,10 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 		{
 			name: "empty header", body: `{"header":"","start_time":"2026-08-15T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"header"},
+		},
+		{
+			name: "blank header", body: `{"header":" \t","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusBadRequest, wantInError: []string{"header is required"},
 		},
 	}
 
@@ -1134,6 +1151,8 @@ func TestAdminAlerts_PatchRejections(t *testing.T) {
 		{"naive end time", target, `{"end_time":"2026-08-15T14:00:00"}`, http.StatusBadRequest, []string{"explicit offset"}},
 		{"empty agency id", target, `{"agency_id":""}`, http.StatusBadRequest, []string{"agency_id"}},
 		{"empty header", target, `{"header":""}`, http.StatusBadRequest, []string{"header"}},
+		{"blank agency id", target, `{"agency_id":" \t"}`, http.StatusBadRequest, []string{"agency_id must not be empty"}},
+		{"blank header", target, `{"header":" \t"}`, http.StatusBadRequest, []string{"header must not be empty"}},
 		{"unknown cause", target, `{"cause":"NOPE"}`, http.StatusBadRequest, []string{"unknown cause"}},
 		{"unknown effect", target, `{"effect":"NOPE"}`, http.StatusBadRequest, []string{"unknown effect"}},
 		{"unknown severity", target, `{"severity":"NOPE"}`, http.StatusBadRequest, []string{"unknown severity"}},
