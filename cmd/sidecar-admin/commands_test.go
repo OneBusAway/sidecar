@@ -229,6 +229,8 @@ func TestMissingAgencyResolutionRejected(t *testing.T) {
 	assertNoAlerts(t, store, 1)
 }
 
+// TestRegionDefaultAgencyApplied asserts that a blank --agency-id resolves
+// like an omitted one.
 func TestRegionDefaultAgencyApplied(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
@@ -237,18 +239,21 @@ func TestRegionDefaultAgencyApplied(t *testing.T) {
 		t.Fatalf("region set: %v", err)
 	}
 
-	stdout, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "H", "--start", "2026-08-15T14:00:00Z")
-	if err != nil {
-		t.Fatalf("alert create: %v", err)
-	}
-	id := parseCreatedID(t, stdout)
+	for _, extra := range [][]string{nil, {"--agency-id", ""}, {"--agency-id", " \t"}} {
+		args := append([]string{"alert", "create", "--region", "1", "--header", "H", "--start", "2026-08-15T14:00:00Z"}, extra...)
+		stdout, _, err := cli(t, dbPath, args...)
+		if err != nil {
+			t.Fatalf("alert create %q: %v", extra, err)
+		}
+		id := parseCreatedID(t, stdout)
 
-	got, err := store.Alerts().Get(context.Background(), id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.AgencyID != "77" {
-		t.Errorf("AgencyID = %q, want the region default %q", got.AgencyID, "77")
+		got, err := store.Alerts().Get(context.Background(), id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.AgencyID != "77" {
+			t.Errorf("alert create %q: AgencyID = %q, want the region default %q", extra, got.AgencyID, "77")
+		}
 	}
 }
 
@@ -330,13 +335,12 @@ func TestUnknownCauseRejected(t *testing.T) {
 	assertNoAlerts(t, store, 1)
 }
 
-// TestAlertCreateBlankHeaderOrAgencyRejected pins the CLI-level guard
+// TestAlertCreateBlankHeaderRejected pins the CLI-level guard
 // against `--header ""`: the flag is seen (so the "requires --header" check
 // does not catch it), and without this check it would reach the repository,
 // which now rejects it too, but with a bare storage-layer message rather
-// than one naming the flag the author typed. A blank --agency-id is
-// rejected by the agency resolution check.
-func TestAlertCreateBlankHeaderOrAgencyRejected(t *testing.T) {
+// than one naming the flag the author typed.
+func TestAlertCreateBlankHeaderRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
@@ -344,20 +348,14 @@ func TestAlertCreateBlankHeaderOrAgencyRejected(t *testing.T) {
 		t.Fatalf("region set: %v", err)
 	}
 
-	for _, flag := range []string{"--header", "--agency-id"} {
-		for _, blank := range []string{"", " \t"} {
-			args := []string{"alert", "create", "--region", "1", "--start", "2026-08-15T14:00:00Z", flag, blank}
-			if flag != "--header" {
-				args = append(args, "--header", "x")
-			}
-			_, _, err := cli(t, dbPath, args...)
-			if err == nil {
-				t.Errorf("alert create with %s %q: want error, got nil", flag, blank)
-				continue
-			}
-			if !strings.Contains(err.Error(), flag) {
-				t.Errorf("alert create with %s %q: error = %v, want it to name %s", flag, blank, err, flag)
-			}
+	for _, blank := range []string{"", " \t"} {
+		_, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--start", "2026-08-15T14:00:00Z", "--header", blank)
+		if err == nil {
+			t.Errorf("alert create with --header %q: want error, got nil", blank)
+			continue
+		}
+		if !strings.Contains(err.Error(), "--header") {
+			t.Errorf("alert create with --header %q: error = %v, want it to name --header", blank, err)
 		}
 	}
 	assertNoAlerts(t, store, 1)
@@ -673,6 +671,38 @@ func TestRegionSetRejectsEmptyAndLocalTimezone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRegionSetRejectsBlankAgencyID asserts that a whitespace-only
+// --agency-id writes nothing, while "" still clears the default.
+func TestRegionSetRejectsBlankAgencyID(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	assertAgency := func(want string) {
+		t.Helper()
+		got, err := store.Regions().Get(context.Background(), 1)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.DefaultAgencyID != want {
+			t.Errorf("DefaultAgencyID = %q, want %q", got.DefaultAgencyID, want)
+		}
+	}
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+
+	_, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", " \t")
+	if err == nil || !strings.Contains(err.Error(), "--agency-id") {
+		t.Errorf("region set --agency-id blank: error = %v, want one naming --agency-id", err)
+	}
+	assertAgency("40")
+
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", ""); err != nil {
+		t.Fatalf("region set --agency-id \"\": %v", err)
+	}
+	assertAgency("")
 }
 
 // erroringRegionRepo satisfies regions.Repository but fails every Get with

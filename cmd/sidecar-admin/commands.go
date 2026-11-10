@@ -294,6 +294,9 @@ func regionSet(ctx context.Context, stdin io.Reader, repo regions.Repository, no
 
 	newAgencyID := current.DefaultAgencyID
 	if seen["agency-id"] {
+		if *agencyID != "" && strings.TrimSpace(*agencyID) == "" {
+			return errors.New(`region set: --agency-id must not be whitespace only; pass "" to clear the default`)
+		}
 		newAgencyID = *agencyID
 	}
 
@@ -460,12 +463,12 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 		return fmt.Errorf("alert create: %w", winErr)
 	}
 
-	// agency_id resolves at author time: --agency-id, else the region's
-	// default. The resolved value is what gets stored, so the stored alert
-	// never changes underneath a later directory sync or region default
-	// change.
+	// agency_id resolves at author time: a non-blank --agency-id, else the
+	// region's default, as the admin API does. The resolved value is what
+	// gets stored, so the stored alert never changes underneath a later
+	// directory sync or region default change.
 	resolvedAgencyID := reg.DefaultAgencyID
-	if seen["agency-id"] {
+	if strings.TrimSpace(*agencyID) != "" {
 		resolvedAgencyID = *agencyID
 	}
 	if strings.TrimSpace(resolvedAgencyID) == "" {

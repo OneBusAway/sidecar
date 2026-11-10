@@ -51,6 +51,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("CentroidRoundTrip", func(t *testing.T) { testCentroidRoundTrip(t, newStore) })
 	t.Run("CentroidRejectsHalfSet", func(t *testing.T) { testCentroidRejectsHalfSet(t, newStore) })
 	t.Run("SetLocalFieldsWritesAllThree", func(t *testing.T) { testSetLocalFieldsWritesAllThree(t, newStore) })
+	t.Run("SetLocalFieldsRejectsBlankAgencyID", func(t *testing.T) { testSetLocalFieldsRejectsBlankAgencyID(t, newStore) })
 	t.Run("UpsertNeverDeletes", func(t *testing.T) { testUpsertNeverDeletes(t, newStore) })
 	t.Run("TranslationUpsertReplaces", func(t *testing.T) { testTranslationUpsertReplaces(t, newStore) })
 	t.Run("FeedAttachesTranslations", func(t *testing.T) { testFeedAttachesTranslations(t, newStore) })
@@ -1194,6 +1195,36 @@ func testSetLocalFieldsWritesAllThree(t *testing.T, newStore newStoreFunc) {
 	}
 	if got.OBAAPIKey != want.OBAAPIKey {
 		t.Errorf("OBAAPIKey = %q, want %q", got.OBAAPIKey, want.OBAAPIKey)
+	}
+}
+
+// testSetLocalFieldsRejectsBlankAgencyID pins that a whitespace-only default
+// agency id is refused and writes nothing, while "" still clears it.
+func testSetLocalFieldsRejectsBlankAgencyID(t *testing.T, newStore newStoreFunc) {
+	_, repo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, repo, 1)
+
+	for _, step := range []struct {
+		agency  string
+		wantErr bool
+		want    string
+	}{
+		{agency: "40", want: "40"},
+		{agency: " \t", wantErr: true, want: "40"},
+		{agency: "", want: ""},
+	} {
+		err := repo.SetLocalFields(ctx, 1, regions.LocalFields{DefaultAgencyID: step.agency}, base)
+		if (err != nil) != step.wantErr {
+			t.Errorf("SetLocalFields(%q): err = %v, want error %v", step.agency, err, step.wantErr)
+		}
+		got, getErr := repo.Get(ctx, 1)
+		if getErr != nil {
+			t.Fatalf("Get: %v", getErr)
+		}
+		if got.DefaultAgencyID != step.want {
+			t.Errorf("after SetLocalFields(%q): DefaultAgencyID = %q, want %q", step.agency, got.DefaultAgencyID, step.want)
+		}
 	}
 }
 

@@ -749,13 +749,26 @@ func TestAdminAlerts_CreateResolvesAgency(t *testing.T) {
 	})
 
 	t.Run("blank region default", func(t *testing.T) {
-		// Own fixture, so the blank default does not leak into other subtests.
-		blank := newAdminFixture(t)
-		object(t, blank.do(http.MethodPatch, "/api/admin/v1/regions/2", `{"default_agency_id":" \t"}`), http.StatusOK)
-		rec := blank.do(http.MethodPost, "/api/admin/v1/regions/2/alerts", minimalAlertBody("bare"))
+		blank := newAdminFixtureWithDeps(t, func(d *Deps) {
+			d.Regions = blankDefaultRegions{d.Regions}
+		})
+		// Region 1 stores default "1", so this 400 can only come from the wrapper.
+		rec := blank.do(http.MethodPost, "/api/admin/v1/regions/1/alerts", minimalAlertBody("blank"))
 		assertContains(t, "error", errorText(t, rec, http.StatusBadRequest),
-			"no agency_id given", "region 2", "PATCH /api/admin/v1/regions/2", "agency_id")
+			"no agency_id given", "region 1", "PATCH /api/admin/v1/regions/1", "agency_id")
 	})
+}
+
+// blankDefaultRegions reports a whitespace-only default agency id for every
+// region without storing one.
+type blankDefaultRegions struct {
+	regions.Repository
+}
+
+func (b blankDefaultRegions) Get(ctx context.Context, id int64) (regions.Region, error) {
+	r, err := b.Repository.Get(ctx, id)
+	r.DefaultAgencyID = " \t"
+	return r, err
 }
 
 // TestAdminAlerts_CreateRejections covers every 4xx the create path owes the
