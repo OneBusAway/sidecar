@@ -63,6 +63,8 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("UpdateRejectsEmptyAgencyID", func(t *testing.T) { testUpdateRejectsEmptyAgencyID(t, newStore) })
 	t.Run("CreateRejectsEmptyHeaderText", func(t *testing.T) { testCreateRejectsEmptyHeaderText(t, newStore) })
 	t.Run("UpdateRejectsEmptyHeaderText", func(t *testing.T) { testUpdateRejectsEmptyHeaderText(t, newStore) })
+	t.Run("CreateRejectsBlankDescription", func(t *testing.T) { testCreateRejectsBlankDescription(t, newStore) })
+	t.Run("UpdateRejectsBlankDescription", func(t *testing.T) { testUpdateRejectsBlankDescription(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
 	t.Run("AlertTimestampsPopulated", func(t *testing.T) { testAlertTimestampsPopulated(t, newStore) })
 	t.Run("DeleteTranslationRemovesBothFields", func(t *testing.T) { testDeleteTranslationRemovesBothFields(t, newStore) })
@@ -900,6 +902,56 @@ func testUpdateRejectsEmptyHeaderText(t *testing.T, newStore newStoreFunc) {
 	}
 }
 
+// testCreateRejectsBlankDescription pins that Create refuses a
+// whitespace-only description and stores nothing, while "" means no
+// description.
+func testCreateRejectsBlankDescription(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	in := newAlertIn(1, base)
+	in.DescriptionText = " \t"
+	if _, err := repo.Create(ctx, in, base); err == nil {
+		t.Errorf("Create with DescriptionText %q: want error, got nil", in.DescriptionText)
+	}
+	if list, err := repo.List(ctx, alerts.ListFilter{}); err != nil || len(list) != 0 {
+		t.Errorf("after a rejected Create: List = %d alerts, err %v, want none", len(list), err)
+	}
+
+	in.DescriptionText = ""
+	if a, err := repo.Create(ctx, in, base); err != nil || a.DescriptionText != "" {
+		t.Errorf(`Create with DescriptionText "": got %q, err %v, want "" and no error`, a.DescriptionText, err)
+	}
+}
+
+// testUpdateRejectsBlankDescription pins that Update refuses a
+// whitespace-only description and leaves the stored one alone, while ""
+// still clears it.
+func testUpdateRejectsBlankDescription(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	created, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	assertBlankRejectedEmptyClears(t, "Update", "DescriptionText", "Detail",
+		func(v string) error {
+			_, updateErr := repo.Update(ctx, created.ID, alerts.Patch{DescriptionText: &v}, base.Add(time.Minute))
+			return updateErr
+		},
+		func() string {
+			got, getErr := repo.Get(ctx, created.ID)
+			if getErr != nil {
+				t.Fatalf("Get: %v", getErr)
+			}
+			return got.DescriptionText
+		})
+}
+
 // testUpsertTranslationNormalizesLanguage asserts that UpsertTranslation
 // normalizes the language tag itself. The schema's UNIQUE(alert_id,
 // language, field) is case-sensitive, so a caller that forgot to normalize
@@ -1205,25 +1257,39 @@ func testSetLocalFieldsRejectsBlankAgencyID(t *testing.T, newStore newStoreFunc)
 	ctx := context.Background()
 	putRegion(t, repo, 1)
 
+	assertBlankRejectedEmptyClears(t, "SetLocalFields", "DefaultAgencyID", "40",
+		func(v string) error {
+			return repo.SetLocalFields(ctx, 1, regions.LocalFields{DefaultAgencyID: v}, base)
+		},
+		func() string {
+			got, err := repo.Get(ctx, 1)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			return got.DefaultAgencyID
+		})
+}
+
+// assertBlankRejectedEmptyClears writes value, then " \t" (refused, value
+// unchanged), then "" (accepted, cleared). op and field name the write and
+// the field in failure messages.
+func assertBlankRejectedEmptyClears(t *testing.T, op, field, value string, write func(string) error, read func() string) {
+	t.Helper()
 	for _, step := range []struct {
-		agency  string
+		in      string
 		wantErr bool
 		want    string
 	}{
-		{agency: "40", want: "40"},
-		{agency: " \t", wantErr: true, want: "40"},
-		{agency: "", want: ""},
+		{in: value, want: value},
+		{in: " \t", wantErr: true, want: value},
+		{in: "", want: ""},
 	} {
-		err := repo.SetLocalFields(ctx, 1, regions.LocalFields{DefaultAgencyID: step.agency}, base)
+		err := write(step.in)
 		if (err != nil) != step.wantErr {
-			t.Errorf("SetLocalFields(%q): err = %v, want error %v", step.agency, err, step.wantErr)
+			t.Errorf("%s(%q): err = %v, want error %v", op, step.in, err, step.wantErr)
 		}
-		got, getErr := repo.Get(ctx, 1)
-		if getErr != nil {
-			t.Fatalf("Get: %v", getErr)
-		}
-		if got.DefaultAgencyID != step.want {
-			t.Errorf("after SetLocalFields(%q): DefaultAgencyID = %q, want %q", step.agency, got.DefaultAgencyID, step.want)
+		if got := read(); got != step.want {
+			t.Errorf("after %s(%q): %s = %q, want %q", op, step.in, field, got, step.want)
 		}
 	}
 }
