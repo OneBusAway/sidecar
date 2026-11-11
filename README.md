@@ -38,7 +38,8 @@ A translation (`alert translate`) is served only while it still describes the En
 was made from. Every language in an alert's admin JSON carries `"stale": true|false`: a
 language is reported stale when any of its translated fields no longer matches the
 current English text, while the feed withholds each stale field individually -- so a
-review UI can show what riders will not see and offer retranslation.
+review UI can show what riders will not see and offer retranslation. `alert show` marks
+each stale field.
 
 ### Authoring alerts with `sidecar-admin`
 

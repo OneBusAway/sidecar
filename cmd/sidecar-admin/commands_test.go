@@ -474,18 +474,32 @@ func TestTranslateThenEditWithholdsStaleTranslation(t *testing.T) {
 		t.Fatalf("region set: %v", err)
 	}
 
-	stdout, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "Original", "--start", "2026-08-15T14:00:00Z")
+	stdout, _, err := cli(t, dbPath, "alert", "create", "--region", "1", "--header", "Original", "--description", "Detour", "--start", "2026-08-15T14:00:00Z")
 	if err != nil {
 		t.Fatalf("alert create: %v", err)
 	}
 	idStr := strconv.FormatInt(parseCreatedID(t, stdout), 10)
+	assertShowContains := func(when string, wants ...string) {
+		t.Helper()
+		shown, _, showErr := cli(t, dbPath, "alert", "show", idStr)
+		if showErr != nil {
+			t.Fatalf("alert show %s: %v", when, showErr)
+		}
+		for _, want := range wants {
+			if !strings.Contains(shown, want) {
+				t.Errorf("alert show %s = %q, want it to contain %q", when, shown, want)
+			}
+		}
+	}
 
 	if _, _, pubErr := cli(t, dbPath, "alert", "publish", idStr); pubErr != nil {
 		t.Fatalf("alert publish: %v", pubErr)
 	}
-	if _, _, trErr := cli(t, dbPath, "alert", "translate", idStr, "--language", "es", "--header", "Original ES"); trErr != nil {
+	if _, _, trErr := cli(t, dbPath, "alert", "translate", idStr, "--language", "es", "--header", "Original ES", "--description", "Detalle"); trErr != nil {
 		t.Fatalf("alert translate: %v", trErr)
 	}
+
+	assertShowContains("before the English edit", "translation[es/header]: Original ES", "translation[es/description]: Detalle")
 
 	ctx := context.Background()
 	feed, err := store.Alerts().Feed(ctx, 1, false, alerts.FeedLimit)
@@ -509,6 +523,9 @@ func TestTranslateThenEditWithholdsStaleTranslation(t *testing.T) {
 	if hasTranslation(msg2, "es") {
 		t.Fatal("stale es translation still present in feed after the English edit; want it withheld")
 	}
+
+	// Only the header changed, so only its translation is stale.
+	assertShowContains("after the English edit", "translation[es/header]: (stale; withheld from the feed) Original ES", "translation[es/description]: Detalle")
 }
 
 // TestEditNoTestSpellings exercises all five --test/--no-test spellings

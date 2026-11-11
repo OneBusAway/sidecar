@@ -615,7 +615,11 @@ func alertShow(ctx context.Context, stdout io.Writer, store alertShowStore, args
 		fmt.Fprintf(stdout, "end: (none; feed falls back to %s after start)\n", alerts.DefaultDuration)
 	}
 	for _, t := range a.Translations {
-		fmt.Fprintf(stdout, "translation[%s/%s]: %s\n", t.Language, t.Field, t.Text)
+		mark := ""
+		if a.TranslationStale(t) {
+			mark = "(stale; withheld from the feed) "
+		}
+		fmt.Fprintf(stdout, "translation[%s/%s]: %s%s\n", t.Language, t.Field, mark, t.Text)
 	}
 	return nil
 }
