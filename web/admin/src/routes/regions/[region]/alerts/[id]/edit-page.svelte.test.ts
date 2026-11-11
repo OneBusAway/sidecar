@@ -5,7 +5,8 @@
 // time and saving, the old end value stayed in the (disabled) field with the
 // checkbox still ticked, so unticking and saving again silently restored an
 // end time the server no longer had. Reverting that key leaves every node-
-// project test green, which is exactly why this file exists.
+// project test green, which is exactly why this file exists. The stale badge
+// in the translations table is markup too, so it is tested here as well.
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
@@ -184,5 +185,23 @@ describe('edit page: the form resynchronises with the server after a save', () =
 		).toBeInTheDocument();
 		// ...but the unsaved edit survives.
 		expect(headerField().value).toBe('Bridge out, both directions');
+	});
+});
+
+describe('edit page: translations table', () => {
+	it('badges a stale translation and leaves a fresh one alone', () => {
+		mount(
+			alert({
+				translations: [
+					{ language: 'es', header: 'Puente', description: null, stale: true },
+					{ language: 'fr', header: 'Pont', description: null, stale: false },
+				],
+			}),
+		);
+
+		const row = (header: string) =>
+			within(screen.getByText(header).closest('tr') as HTMLElement);
+		expect(row('Puente').getByText('Stale')).toBeInTheDocument();
+		expect(row('Pont').queryByText('Stale')).toBeNull();
 	});
 });

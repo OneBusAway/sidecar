@@ -13,6 +13,11 @@ export interface Translation {
 	 */
 	header: string | null;
 	description: string | null;
+	/**
+	 * true when the rider feed withholds at least one of these fields, because
+	 * the English text it was translated from has changed since.
+	 */
+	stale: boolean;
 }
 
 /**

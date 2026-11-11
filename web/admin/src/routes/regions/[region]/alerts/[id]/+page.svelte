@@ -461,7 +461,10 @@
 		<tbody>
 			{#each alert.translations as t (t.language)}
 				<tr>
-					<td>{t.language}</td>
+					<td>
+						{t.language}
+						{#if t.stale}<span class="badge test">Stale</span>{/if}
+					</td>
 					<td>{t.header ?? '—'}</td>
 					<td>{t.description ?? '—'}</td>
 					<td class="rowactions">
