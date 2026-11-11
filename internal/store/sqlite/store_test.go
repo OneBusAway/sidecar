@@ -65,6 +65,7 @@ func TestOpenMigrateAndRoundTrip(t *testing.T) {
 // rather than going through store.Regions()/store.Alerts(): this test file
 // is package sqlite_test (external), so it cannot reach the Store's
 // unexported db field, and Store intentionally has no public DB() accessor.
+// It also checks that the sessions indexes exist.
 func TestMigrateCreatesAuthTables(t *testing.T) {
 	t.Parallel()
 
@@ -77,12 +78,17 @@ func TestMigrateCreatesAuthTables(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	for _, table := range []string{"users", "sessions"} {
+	for _, obj := range []struct{ kind, name string }{
+		{"table", "users"},
+		{"table", "sessions"},
+		{"index", "sessions_user_idx"},
+		{"index", "sessions_expires_idx"},
+	} {
 		var n int
 		err := db.QueryRowContext(ctx,
-			"SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&n)
+			"SELECT count(*) FROM sqlite_master WHERE type=? AND name=?", obj.kind, obj.name).Scan(&n)
 		if err != nil || n != 1 {
-			t.Fatalf("table %s missing after migrate (err=%v)", table, err)
+			t.Fatalf("%s %s missing after migrate (err=%v)", obj.kind, obj.name, err)
 		}
 	}
 }
