@@ -439,6 +439,9 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	if strings.TrimSpace(*header) == "" {
 		return errors.New("alert create: --header cannot be empty")
 	}
+	if *description != "" && strings.TrimSpace(*description) == "" {
+		return errors.New(`alert create: --description must not be whitespace only; pass "" for no description`)
+	}
 
 	reg, err := store.Regions().Get(ctx, *regionID)
 	if err != nil {
@@ -708,6 +711,9 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 		patch.HeaderText = header
 	}
 	if seen["description"] {
+		if *description != "" && strings.TrimSpace(*description) == "" {
+			return errors.New(`alert edit: --description must not be whitespace only; pass "" to clear it`)
+		}
 		patch.DescriptionText = description
 	}
 	if seen["url"] {
