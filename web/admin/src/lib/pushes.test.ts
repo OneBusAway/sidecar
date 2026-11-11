@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-// $app/navigation and $app/paths only work inside a running SvelteKit client,
-// and lib/pushes imports $lib/api, which imports both. Stubbed exactly as
+// $app/navigation only works inside a running SvelteKit client,
+// and lib/pushes imports $lib/api, which imports it. Stubbed exactly as
 // api.test.ts does.
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
-vi.mock('$app/paths', () => ({
-	resolve: (path: string) => `/admin${path === '/' ? '' : path}`,
-}));
 
 import { api, ApiError } from './api';
 import {

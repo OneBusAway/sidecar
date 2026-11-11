@@ -10,9 +10,6 @@ import { isRedirect } from '@sveltejs/kit';
 
 const { whoamiMock } = vi.hoisted(() => ({ whoamiMock: vi.fn() }));
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
-vi.mock('$app/paths', () => ({
-	resolve: (p: string) => `/admin${p === '/' ? '' : p}`,
-}));
 // Only whoami is replaced. ApiError comes through as the REAL class, because
 // the load under test branches on `instanceof ApiError` -- a stand-in class
 // here would be a fixture that no production code path can produce, and the

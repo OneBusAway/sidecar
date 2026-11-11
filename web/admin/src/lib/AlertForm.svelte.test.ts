@@ -8,10 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 
-vi.mock('$app/paths', () => ({
-	resolve: (p: string) => `/admin${p === '/' ? '' : p}`,
-}));
-
 import AlertForm from './AlertForm.svelte';
 import type { Region } from './types';
 

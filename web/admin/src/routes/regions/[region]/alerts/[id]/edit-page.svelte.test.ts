@@ -21,9 +21,6 @@ vi.mock('$app/navigation', () => ({
 	goto: vi.fn(),
 	invalidateAll: invalidateAllMock,
 }));
-vi.mock('$app/paths', () => ({
-	resolve: (p: string) => `/admin${p === '/' ? '' : p}`,
-}));
 vi.mock('$lib/api', async () => {
 	const actual = await vi.importActual<typeof import('$lib/api')>('$lib/api');
 	return {
