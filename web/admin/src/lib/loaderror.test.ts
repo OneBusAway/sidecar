@@ -1,12 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { isHttpError, isRedirect, redirect } from '@sveltejs/kit';
 
-// $app/navigation and $app/paths only work inside a running SvelteKit client;
-// $lib/api pulls them in for its 401 redirect.
+// $app/navigation only works inside a running SvelteKit client;
+// $lib/api pulls it in for its 401 redirect.
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
-vi.mock('$app/paths', () => ({
-	resolve: (path: string) => `/admin${path === '/' ? '' : path}`,
-}));
 
 import { ApiError } from './api';
 import { toLoadError } from './loaderror';

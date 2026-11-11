@@ -1,15 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// $app/navigation and $app/paths only work inside a running SvelteKit client,
-// so they are stubbed. resolve() is stubbed to do exactly what the real one
-// does with `paths.base = '/admin'` (see svelte.config.js): prefix the base.
+// $app/navigation only works inside a running SvelteKit client, so it is
+// stubbed.
 const { gotoMock } = vi.hoisted(() => ({ gotoMock: vi.fn() }));
 vi.mock('$app/navigation', () => ({ goto: gotoMock }));
-vi.mock('$app/paths', () => ({
-	resolve: (path: string) => `/admin${path === '/' ? '' : path}`,
-}));
 
-// vi.mock is hoisted above these imports by Vitest, so ./api sees the stubs.
+// vi.mock is hoisted above these imports by Vitest, so ./api sees the stub.
 import { api, ApiError, regionPath, whoami } from './api';
 
 const fetchMock = vi.fn<typeof fetch>();

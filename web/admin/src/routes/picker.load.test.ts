@@ -9,13 +9,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isRedirect } from '@sveltejs/kit';
 
-vi.mock('$app/paths', () => ({
-	resolve: (p: string, params?: Record<string, string>) => {
-		const path = params ? p.replace('[region]', params.region) : p;
-		return `/admin${path === '/' ? '' : path}`;
-	},
-}));
-
 const { getMock } = vi.hoisted(() => ({ getMock: vi.fn() }));
 vi.mock('$lib/api', async () => {
 	const actual = await vi.importActual<typeof import('$lib/api')>('$lib/api');
