@@ -30,6 +30,7 @@ are real.
 
 ## 2. Stale translations are not surfaced anywhere
 
+**Resolved in 8e0ccc1 (API), #65 (CLI) and #66 (SPA).**
 `translationJSON` in `internal/httpapi/admin_alerts.go` drops `SourceSHA256`, which the
 store does return. The SPA therefore cannot know which stored translations the rider
 feed is withholding: after an English header is edited, the admin table lists the
