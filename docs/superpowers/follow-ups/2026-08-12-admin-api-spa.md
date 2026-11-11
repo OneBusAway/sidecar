@@ -78,7 +78,8 @@ and #58, which use it for their transactions.
   `internal/store/storetest/authtest.go` — `assertInstant`'s location failure message
   renders as `location = UTC, want UTC` under `TZ=UTC` when the value carries
   `time.Local`: a real failure that reads like a test bug.
-- `web/admin/src` — the hand-rolled `$app/paths` stub is copy-pasted across five test
+- **Resolved in #69.**
+  `web/admin/src` — the hand-rolled `$app/paths` stub is copy-pasted across five test
   files and one copy has `resolve('/') -> '/admin'` where the real value is
   `'/admin/'`. Harmless today (the guard never calls it), but extract one shared,
   correct stub so the invented-fixture failure mode has a single place to be right.
