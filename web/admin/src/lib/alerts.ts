@@ -208,7 +208,9 @@ export function buildCreatePayload(
 	const payload: CreateAlertPayload = {
 		agency_id: v.agencyId.trim(),
 		header: v.header.trim(),
-		description: v.description,
+		// Blank becomes '', which the server reads as no description. Other
+		// text goes as typed, so its translations' source hash holds.
+		description: v.description.trim() === '' ? '' : v.description,
 		url: v.url.trim(),
 		cause: v.cause,
 		effect: v.effect,
@@ -243,7 +245,7 @@ export function buildPatchPayload(
 	const payload: PatchAlertPayload = {
 		agency_id: v.agencyId.trim(),
 		header: v.header.trim(),
-		description: v.description,
+		description: v.description.trim() === '' ? '' : v.description,
 		url: v.url.trim(),
 		cause: v.cause,
 		effect: v.effect,
