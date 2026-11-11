@@ -82,6 +82,7 @@ and #58, which use it for their transactions.
   files and one copy has `resolve('/') -> '/admin'` where the real value is
   `'/admin/'`. Harmless today (the guard never calls it), but extract one shared,
   correct stub so the invented-fixture failure mode has a single place to be right.
-- No CI workflow exists yet. Whoever adds one must route it through `make check`, or
+- **Resolved in #16.**
+  No CI workflow exists yet. Whoever adds one must route it through `make check`, or
   run `make web` before any `go test` step: the Go suite includes an embed regression
   test that needs a populated `internal/httpapi/adminui/dist/`.
