@@ -171,11 +171,15 @@ describe('buildCreatePayload', () => {
 		expect(payload.agency_id).toBe('');
 	});
 
-	it.each([
-		['   ', ''],
-		[' Detour ', 'Detour'],
-	])('trims header %j to %j', (header, want) => {
-		expect(buildCreatePayload(values({ header }), KATHMANDU).header).toBe(want);
+	it.each<['header' | 'description', string, string]>([
+		['header', '   ', ''],
+		['header', ' Detour ', 'Detour'],
+		['description', '   ', ''],
+		['description', ' Detour\n', ' Detour\n'],
+	])('sends %s %j as %j', (field, input, want) => {
+		expect(
+			buildCreatePayload(values({ [field]: input }), KATHMANDU)[field],
+		).toBe(want);
 	});
 });
 
@@ -213,11 +217,15 @@ describe('buildPatchPayload', () => {
 		expect('clear_end_time' in payload).toBe(false);
 	});
 
-	it.each([
-		['   ', ''],
-		[' Detour ', 'Detour'],
-	])('trims header %j to %j', (header, want) => {
-		expect(buildPatchPayload(values({ header }), KATHMANDU).header).toBe(want);
+	it.each<['header' | 'description', string, string]>([
+		['header', '   ', ''],
+		['header', ' Detour ', 'Detour'],
+		['description', '   ', ''],
+		['description', ' Detour\n', ' Detour\n'],
+	])('sends %s %j as %j', (field, input, want) => {
+		expect(
+			buildPatchPayload(values({ [field]: input }), KATHMANDU)[field],
+		).toBe(want);
 	});
 });
 

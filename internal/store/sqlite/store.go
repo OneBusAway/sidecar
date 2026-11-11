@@ -478,6 +478,10 @@ func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Tim
 	if strings.TrimSpace(in.HeaderText) == "" {
 		return alerts.Alert{}, errors.New("sqlite: create alert: header text must not be empty")
 	}
+	// "" means no description. Only whitespace would look set but say nothing.
+	if in.DescriptionText != "" && strings.TrimSpace(in.DescriptionText) == "" {
+		return alerts.Alert{}, errors.New("sqlite: create alert: description must not be whitespace only")
+	}
 	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
 		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
 	}
@@ -597,6 +601,11 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 	// already-published alert riders are reading right now.
 	if strings.TrimSpace(current.HeaderText) == "" {
 		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: header text must not be empty", id)
+	}
+
+	// Same rule Create enforces (see the comment there).
+	if current.DescriptionText != "" && strings.TrimSpace(current.DescriptionText) == "" {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: description must not be whitespace only", id)
 	}
 
 	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {

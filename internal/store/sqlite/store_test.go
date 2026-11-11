@@ -259,53 +259,85 @@ func assertRegionZones(t *testing.T, stage string, db *sql.DB, want map[int64]st
 	}
 }
 
-// TestMigrateClearsBlankDefaultAgency pins migration 15: a default agency id
-// that is only whitespace becomes "", while "" and any value with a
-// non-space character are left as they were. Down changes nothing.
-func TestMigrateClearsBlankDefaultAgency(t *testing.T) {
+// TestMigrateClearsBlankText pins migrations 15 and 16: a value that is only
+// whitespace becomes "", while "" and any value with a non-space character
+// are left as they were. Down changes nothing.
+func TestMigrateClearsBlankText(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	db, p := openMigrationProvider(t)
-	if _, err := p.UpTo(ctx, 14); err != nil {
-		t.Fatalf("UpTo(14): %v", err)
-	}
 	cases := []struct{ stored, want string }{
 		{" \t", ""},
+		{"\n", ""},
 		{"\n\v\f\r ", ""},
 		{"", ""},
 		{"40", "40"},
 		{" 40 ", " 40 "},
 	}
-	for i, c := range cases {
-		if _, err := db.ExecContext(ctx, `INSERT INTO regions
-			(id, region_name, oba_base_url, default_agency_id, synced_at, created_at, updated_at)
-			VALUES (?, 'R', 'https://a.example.org/', ?, 0, 0, 0)`, i+1, c.stored); err != nil {
-			t.Fatalf("seed region %d: %v", i+1, err)
-		}
-	}
-	check := func(stage string) {
-		t.Helper()
-		for i, c := range cases {
-			var got string
-			if err := db.QueryRowContext(ctx,
-				"SELECT default_agency_id FROM regions WHERE id = ?", i+1).Scan(&got); err != nil {
-				t.Fatalf("%s: read region %d: %v", stage, i+1, err)
-			}
-			if got != c.want {
-				t.Errorf("%s: stored %q became %q, want %q", stage, c.stored, got, c.want)
-			}
-		}
-	}
+	for _, m := range []struct {
+		name    string
+		version int64
+		setup   string // run once before seeding
+		seed    string // takes (id, value)
+		read    string // takes id
+	}{
+		{
+			name: "region default agency", version: 15,
+			seed: `INSERT INTO regions
+				(id, region_name, oba_base_url, default_agency_id, synced_at, created_at, updated_at)
+				VALUES (?, 'R', 'https://a.example.org/', ?, 0, 0, 0)`,
+			read: "SELECT default_agency_id FROM regions WHERE id = ?",
+		},
+		{
+			name: "alert description", version: 16,
+			setup: `INSERT INTO regions (id, region_name, oba_base_url, synced_at, created_at, updated_at)
+				VALUES (1, 'R', 'https://a.example.org/', 0, 0, 0)`,
+			seed: `INSERT INTO alerts
+				(id, region_id, agency_id, header_text, description_text, start_time, created_at, updated_at)
+				VALUES (?, 1, '40', 'h', ?, 0, 0, 0)`,
+			read: "SELECT description_text FROM alerts WHERE id = ?",
+		},
+	} {
+		t.Run(m.name, func(t *testing.T) {
+			t.Parallel()
 
-	if _, err := p.UpTo(ctx, 15); err != nil {
-		t.Fatalf("UpTo(15): %v", err)
+			ctx := context.Background()
+			db, p := openMigrationProvider(t)
+			if _, err := p.UpTo(ctx, m.version-1); err != nil {
+				t.Fatalf("UpTo(%d): %v", m.version-1, err)
+			}
+			if m.setup != "" {
+				if _, err := db.ExecContext(ctx, m.setup); err != nil {
+					t.Fatalf("setup: %v", err)
+				}
+			}
+			for i, c := range cases {
+				if _, err := db.ExecContext(ctx, m.seed, i+1, c.stored); err != nil {
+					t.Fatalf("seed row %d: %v", i+1, err)
+				}
+			}
+			check := func(stage string) {
+				t.Helper()
+				for i, c := range cases {
+					var got string
+					if err := db.QueryRowContext(ctx, m.read, i+1).Scan(&got); err != nil {
+						t.Fatalf("%s: read row %d: %v", stage, i+1, err)
+					}
+					if got != c.want {
+						t.Errorf("%s: stored %q became %q, want %q", stage, c.stored, got, c.want)
+					}
+				}
+			}
+
+			if _, err := p.UpTo(ctx, m.version); err != nil {
+				t.Fatalf("UpTo(%d): %v", m.version, err)
+			}
+			check("after up")
+			if _, err := p.DownTo(ctx, m.version-1); err != nil {
+				t.Fatalf("DownTo(%d): %v", m.version-1, err)
+			}
+			check("after down")
+		})
 	}
-	check("after up")
-	if _, err := p.DownTo(ctx, 14); err != nil {
-		t.Fatalf("DownTo(14): %v", err)
-	}
-	check("after down")
 }
 
 // TestFeed exercises Feed through the generated Go bindings rather than by

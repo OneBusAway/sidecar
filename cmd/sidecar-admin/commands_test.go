@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -397,6 +398,53 @@ func TestAlertEditBlankHeaderOrAgencyRejected(t *testing.T) {
 	if got.HeaderText != "Original" || got.AgencyID != "40" {
 		t.Errorf("after rejected edits: header = %q, agency = %q, want unchanged %q, %q",
 			got.HeaderText, got.AgencyID, "Original", "40")
+	}
+}
+
+// TestAlertDescriptionRejectsBlank asserts that a whitespace-only
+// --description writes nothing on alert create or alert edit, while ""
+// still clears it.
+func TestAlertDescriptionRejectsBlank(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 1)
+	if _, _, err := cli(t, dbPath, "region", "set", "--id", "1", "--agency-id", "40", "--timezone", "UTC"); err != nil {
+		t.Fatalf("region set: %v", err)
+	}
+	create := []string{"alert", "create", "--region", "1", "--header", "x", "--start", "2026-08-15T14:00:00Z"}
+	stdout, _, err := cli(t, dbPath, create...)
+	if err != nil {
+		t.Fatalf("alert create: %v", err)
+	}
+	edit := []string{"alert", "edit", strconv.FormatInt(parseCreatedID(t, stdout), 10)}
+
+	for _, step := range []struct {
+		cmd     []string
+		value   string
+		wantErr bool
+		want    string // the one alert's description afterwards
+	}{
+		{cmd: create, value: " \t", wantErr: true, want: ""},
+		{cmd: edit, value: "Detail", want: "Detail"},
+		{cmd: edit, value: " \t", wantErr: true, want: "Detail"},
+		{cmd: edit, value: "", want: ""},
+	} {
+		name := strings.Join(step.cmd[:2], " ")
+		_, _, err := cli(t, dbPath, slices.Concat(step.cmd, []string{"--description", step.value})...)
+		if (err != nil) != step.wantErr {
+			t.Errorf("%s --description %q: err = %v, want error %v", name, step.value, err, step.wantErr)
+		} else if err != nil && !strings.Contains(err.Error(), "--description") {
+			t.Errorf("%s --description %q: error = %v, want one naming --description", name, step.value, err)
+		}
+		list, listErr := store.Alerts().List(context.Background(), alerts.ListFilter{})
+		if listErr != nil {
+			t.Fatalf("List: %v", listErr)
+		}
+		if len(list) != 1 {
+			t.Errorf("after %s --description %q: %d alerts, want 1", name, step.value, len(list))
+		} else if got := list[0].DescriptionText; got != step.want {
+			t.Errorf("after %s --description %q: description = %q, want %q", name, step.value, got, step.want)
+		}
 	}
 }
 
