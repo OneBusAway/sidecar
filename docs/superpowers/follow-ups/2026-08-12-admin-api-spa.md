@@ -68,11 +68,13 @@ and #58, which use it for their transactions.
   `"   "` still passes all three surfaces. The neighbouring `agency_id` guard has the
   identical hole; fix both together, including a `.trim()` in the SPA's payload
   builders.
-- `internal/store/sqlite/store_test.go` — `TestMigrateCreatesAuthTables` asserts the
+- **Resolved in #67.**
+  `internal/store/sqlite/store_test.go` — `TestMigrateCreatesAuthTables` asserts the
   four timestamp columns are `INTEGER` but not the foreign key or the indexes. The
   FK's *behavior* is pinned engine-independently by the cascade conformance subtest,
   so only index existence is unasserted.
-- `internal/store/storetest/authtest.go` — `assertInstant`'s location failure message
+- **Resolved in #67.**
+  `internal/store/storetest/authtest.go` — `assertInstant`'s location failure message
   renders as `location = UTC, want UTC` under `TZ=UTC` when the value carries
   `time.Local`: a real failure that reads like a test bug.
 - `web/admin/src` — the hand-rolled `$app/paths` stub is copy-pasted across five test

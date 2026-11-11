@@ -84,7 +84,7 @@ func assertInstant(t *testing.T, label string, got, want time.Time) {
 		t.Errorf("%s = %v (unix %d), want %v (unix %d)", label, got, got.Unix(), want, want.Unix())
 	}
 	if got.Location() != time.UTC {
-		t.Errorf("%s location = %v, want UTC", label, got.Location())
+		t.Errorf("%s location = %v, want time.UTC (time.Local also prints as UTC under TZ=UTC)", label, got.Location())
 	}
 }
 
