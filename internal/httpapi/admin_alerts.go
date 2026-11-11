@@ -177,6 +177,11 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header is required")
 		return
 	}
+	if req.Description != "" && strings.TrimSpace(req.Description) == "" {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
+			`description must not be whitespace only; send "" for no description`)
+		return
+	}
 
 	ctx := r.Context()
 	startTime, err := parseInstantJSON(req.StartTime, region)
@@ -304,6 +309,12 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		patch.AgencyID = req.AgencyID
+	}
+
+	if req.Description != nil && *req.Description != "" && strings.TrimSpace(*req.Description) == "" {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
+			`description must not be whitespace only; send "" to clear it`)
+		return
 	}
 
 	if req.StartTime != nil || req.EndTime != nil {

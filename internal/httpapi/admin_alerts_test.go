@@ -871,6 +871,14 @@ func TestAdminAlerts_CreateRejections(t *testing.T) {
 			name: "blank header", body: `{"header":" \t","start_time":"2026-08-15T14:00:00-07:00"}`,
 			wantStatus: http.StatusBadRequest, wantInError: []string{"header is required"},
 		},
+		{
+			name: "blank description", body: `{"header":"x","description":" \t","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusBadRequest, wantInError: []string{"description", "whitespace"},
+		},
+		{
+			name: "empty description", body: `{"header":"x","description":"","start_time":"2026-08-15T14:00:00-07:00"}`,
+			wantStatus: http.StatusCreated,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1166,6 +1174,7 @@ func TestAdminAlerts_PatchRejections(t *testing.T) {
 		{"empty header", target, `{"header":""}`, http.StatusBadRequest, []string{"header"}},
 		{"blank agency id", target, `{"agency_id":" \t"}`, http.StatusBadRequest, []string{"agency_id must not be empty"}},
 		{"blank header", target, `{"header":" \t"}`, http.StatusBadRequest, []string{"header must not be empty"}},
+		{"blank description", target, `{"description":" \t"}`, http.StatusBadRequest, []string{"description", "whitespace"}},
 		{"unknown cause", target, `{"cause":"NOPE"}`, http.StatusBadRequest, []string{"unknown cause"}},
 		{"unknown effect", target, `{"effect":"NOPE"}`, http.StatusBadRequest, []string{"unknown effect"}},
 		{"unknown severity", target, `{"severity":"NOPE"}`, http.StatusBadRequest, []string{"unknown severity"}},
