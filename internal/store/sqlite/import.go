@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -110,9 +111,14 @@ type importer struct {
 func (im *importer) alerts(doc *export.Document) error {
 	for i, a := range doc.Alerts {
 		p := im.prepared.alerts[i]
+		// Only whitespace says nothing, so import it as no description.
+		description := a.DescriptionText
+		if strings.TrimSpace(description) == "" {
+			description = ""
+		}
 		n, err := im.q.ImportAlert(im.ctx, gen.ImportAlertParams{
 			ID: a.ID, RegionID: im.region, AgencyID: a.AgencyID,
-			HeaderText: a.HeaderText, DescriptionText: a.DescriptionText, Url: a.URL,
+			HeaderText: a.HeaderText, DescriptionText: description, Url: a.URL,
 			Cause: p.cause, Effect: p.effect, SeverityLevel: p.severity,
 			StartTime: a.StartTime.Unix(), EndTime: timeToNullUnix(a.EndTime),
 			Published: a.Published, IsTest: a.IsTest,
@@ -147,7 +153,8 @@ func (im *importer) translations(a export.Alert) error {
 			{alerts.FieldHeader, t.HeaderText, firstNonEmpty(t.SourceHeader, a.HeaderText)},
 			{alerts.FieldDescription, t.DescriptionText, firstNonEmpty(t.SourceDescription, a.DescriptionText)},
 		} {
-			if f.text == "" {
+			// Blank text is no translation, like an absent field.
+			if strings.TrimSpace(f.text) == "" {
 				continue
 			}
 			n, err := im.q.ImportAlertTranslation(im.ctx, gen.ImportAlertTranslationParams{

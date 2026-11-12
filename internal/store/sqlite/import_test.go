@@ -253,6 +253,9 @@ func TestImport_SecondaryRows(t *testing.T) {
 	store := sqlitetest.Open(t)
 	seedImportRegion(t, store)
 	doc := importDoc()
+	doc.Alerts[0].DescriptionText = " \t"
+	doc.Alerts[0].Translations = append(doc.Alerts[0].Translations,
+		export.AlertTranslation{Language: "de", HeaderText: " \t", DescriptionText: "Nehmen Sie die 43."})
 	doc.GhostBusReports = append(doc.GhostBusReports,
 		export.GhostBusReport{PublicID: "gb-pending", UserIdentifier: "u2", TripIdentifier: "1_t2", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "pending", Snapshot: json.RawMessage(`{"ignored":true}`)},
 		export.GhostBusReport{PublicID: "gb-gone", UserIdentifier: "u3", TripIdentifier: "1_t3", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "unavailable"},
@@ -263,6 +266,12 @@ func TestImport_SecondaryRows(t *testing.T) {
 	study, err := store.Surveys().GetStudy(ctx, 7)
 	if err != nil || !study.CreatedAt.Equal(importBase) {
 		t.Fatalf("zero created_at should fall back to now: %v %v", err, study.CreatedAt)
+	}
+	// Blank text imports as none: no description, and no de header row
+	// beside es header, es description, and de description.
+	alert, err := store.Alerts().Get(ctx, 4242)
+	if err != nil || alert.DescriptionText != "" || len(alert.Translations) != 3 {
+		t.Fatalf("blank text should import as none: description %q, translations %+v, err %v", alert.DescriptionText, alert.Translations, err)
 	}
 	pending, err := store.GhostBus().ListPendingSnapshots(ctx, 10)
 	if err != nil || len(pending) != 1 || pending[0].PublicID != "gb-pending" || pending[0].SnapshotJSON != "" {
