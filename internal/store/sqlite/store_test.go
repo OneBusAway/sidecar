@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
@@ -259,13 +260,16 @@ func assertRegionZones(t *testing.T, stage string, db *sql.DB, want map[int64]st
 	}
 }
 
-// TestMigrateClearsBlankText pins migrations 15 and 16: a value that is only
-// whitespace becomes "", while "" and any value with a non-space character
-// are left as they were. Down changes nothing.
+// TestMigrateClearsBlankText pins migrations 15, 16 and 17: a value that is
+// only whitespace becomes "", while "" and any value with a non-space
+// character are left as they were. 15 and 16 clear ASCII whitespace; 17 also
+// clears the Unicode spaces strings.TrimSpace strips, and deletes any alert
+// translation whose text is blank. Down changes nothing.
 func TestMigrateClearsBlankText(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct{ stored, want string }{
+	type textCase struct{ stored, want string }
+	asciiCases := []textCase{
 		{" \t", ""},
 		{"\n", ""},
 		{"\n\v\f\r ", ""},
@@ -273,28 +277,62 @@ func TestMigrateClearsBlankText(t *testing.T) {
 		{"40", "40"},
 		{" 40 ", " 40 "},
 	}
+	unicodeCases := []textCase{
+		{"\u00a0", ""},
+		{"\u0085", ""},
+		{"\u3000 \t", ""},
+		{allSpaces(), ""},
+		{"\u00a0x\u00a0", "\u00a0x\u00a0"},
+		{"\u200b", "\u200b"},
+		{"", ""},
+	}
+	translationCases := []textCase{
+		{"", "(deleted)"},
+		{" \t", "(deleted)"},
+		{"\n\v\f\r ", "(deleted)"},
+		{"\u00a0", "(deleted)"},
+		{allSpaces(), "(deleted)"},
+		{"hola", "hola"},
+		{" hola ", " hola "},
+		{"\u200b", "\u200b"},
+	}
+	const (
+		regionSeed = `INSERT INTO regions
+			(id, region_name, oba_base_url, default_agency_id, synced_at, created_at, updated_at)
+			VALUES (?, 'R', 'https://a.example.org/', ?, 0, 0, 0)`
+		regionRead  = "SELECT default_agency_id FROM regions WHERE id = ?"
+		regionSetup = `INSERT INTO regions (id, region_name, oba_base_url, synced_at, created_at, updated_at)
+			VALUES (1, 'R', 'https://a.example.org/', 0, 0, 0)`
+		alertSeed = `INSERT INTO alerts
+			(id, region_id, agency_id, header_text, description_text, start_time, created_at, updated_at)
+			VALUES (?, 1, '40', 'h', ?, 0, 0, 0)`
+		alertRead = "SELECT description_text FROM alerts WHERE id = ?"
+		// The alert the translations hang off; each row gets its own
+		// language so the (alert, language, field) key stays unique.
+		translationSetup = regionSetup + `;
+			INSERT INTO alerts
+			(id, region_id, agency_id, header_text, description_text, start_time, created_at, updated_at)
+			VALUES (1, 1, '40', 'h', '', 0, 0, 0)`
+		translationSeed = `INSERT INTO alert_translations
+			(id, alert_id, language, field, text, source_sha256, created_at, updated_at)
+			VALUES (?1, 1, 'l' || ?1, 'header', ?2, '', 0, 0)`
+		translationRead = "SELECT coalesce((SELECT text FROM alert_translations WHERE id = ?), '(deleted)')"
+	)
 	for _, m := range []struct {
 		name    string
 		version int64
 		setup   string // run once before seeding
 		seed    string // takes (id, value)
 		read    string // takes id
+		cases   []textCase
 	}{
+		{name: "region default agency", version: 15, seed: regionSeed, read: regionRead, cases: asciiCases},
+		{name: "alert description", version: 16, setup: regionSetup, seed: alertSeed, read: alertRead, cases: asciiCases},
+		{name: "region default agency unicode", version: 17, seed: regionSeed, read: regionRead, cases: unicodeCases},
+		{name: "alert description unicode", version: 17, setup: regionSetup, seed: alertSeed, read: alertRead, cases: unicodeCases},
 		{
-			name: "region default agency", version: 15,
-			seed: `INSERT INTO regions
-				(id, region_name, oba_base_url, default_agency_id, synced_at, created_at, updated_at)
-				VALUES (?, 'R', 'https://a.example.org/', ?, 0, 0, 0)`,
-			read: "SELECT default_agency_id FROM regions WHERE id = ?",
-		},
-		{
-			name: "alert description", version: 16,
-			setup: `INSERT INTO regions (id, region_name, oba_base_url, synced_at, created_at, updated_at)
-				VALUES (1, 'R', 'https://a.example.org/', 0, 0, 0)`,
-			seed: `INSERT INTO alerts
-				(id, region_id, agency_id, header_text, description_text, start_time, created_at, updated_at)
-				VALUES (?, 1, '40', 'h', ?, 0, 0, 0)`,
-			read: "SELECT description_text FROM alerts WHERE id = ?",
+			name: "alert translation", version: 17, setup: translationSetup,
+			seed: translationSeed, read: translationRead, cases: translationCases,
 		},
 	} {
 		t.Run(m.name, func(t *testing.T) {
@@ -310,14 +348,14 @@ func TestMigrateClearsBlankText(t *testing.T) {
 					t.Fatalf("setup: %v", err)
 				}
 			}
-			for i, c := range cases {
+			for i, c := range m.cases {
 				if _, err := db.ExecContext(ctx, m.seed, i+1, c.stored); err != nil {
 					t.Fatalf("seed row %d: %v", i+1, err)
 				}
 			}
 			check := func(stage string) {
 				t.Helper()
-				for i, c := range cases {
+				for i, c := range m.cases {
 					var got string
 					if err := db.QueryRowContext(ctx, m.read, i+1).Scan(&got); err != nil {
 						t.Fatalf("%s: read row %d: %v", stage, i+1, err)
@@ -338,6 +376,18 @@ func TestMigrateClearsBlankText(t *testing.T) {
 			check("after down")
 		})
 	}
+}
+
+// allSpaces returns every rune unicode.IsSpace reports, in one string: the
+// full set strings.TrimSpace strips.
+func allSpaces() string {
+	var b strings.Builder
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // TestFeed exercises Feed through the generated Go bindings rather than by

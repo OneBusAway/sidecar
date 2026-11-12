@@ -459,28 +459,40 @@ func translationFromRow(t gen.AlertTranslation) alerts.Translation {
 	}
 }
 
+// validateAlertText holds the text checks Create and Update share, so the
+// two cannot drift apart. Update runs it on the merged row.
+//
+// AgencyID is documented as pre-resolved by the caller (NewAlert), but that
+// contract was enforced only by comment: the column is NOT NULL but not
+// non-empty, so a caller that skips the resolve step (an HTTP admin API, a
+// bulk importer) would silently store an alert no app can match by agency.
+//
+// HeaderText is the one piece of text riders cannot do without:
+// alerts.BuildFeed passes it straight through to the feed's
+// alert_header_text with no fallback, so an empty value ships a header-less
+// alert.
+//
+// DescriptionText "" means no description. Only whitespace would look set but
+// say nothing.
+//
+// Enforcing these here, rather than trusting every caller to have checked
+// already, protects every caller of this Repository.
+func validateAlertText(agencyID, header, description string) error {
+	if strings.TrimSpace(agencyID) == "" {
+		return errors.New("agency id must not be empty")
+	}
+	if strings.TrimSpace(header) == "" {
+		return errors.New("header text must not be empty")
+	}
+	if description != "" && strings.TrimSpace(description) == "" {
+		return errors.New("description must not be whitespace only")
+	}
+	return nil
+}
+
 func (r *alertRepo) Create(ctx context.Context, in alerts.NewAlert, now time.Time) (alerts.Alert, error) {
-	// AgencyID is documented as pre-resolved by the caller (NewAlert), but
-	// that contract was enforced only by comment: the column is NOT NULL but
-	// not non-empty, so a caller that skips the resolve step (an HTTP admin
-	// API, a bulk importer) would silently store an alert no app can match by
-	// agency. Enforcing it here, rather than only in the CLI, protects every
-	// caller of this Repository.
-	if strings.TrimSpace(in.AgencyID) == "" {
-		return alerts.Alert{}, errors.New("sqlite: create alert: agency id must not be empty")
-	}
-	// HeaderText is the one piece of text riders cannot do without:
-	// alerts.BuildFeed passes it straight through to the feed's
-	// alert_header_text with no fallback, so an empty value ships a
-	// header-less alert. The column is NOT NULL but not non-empty; enforcing
-	// it here, rather than trusting every caller to have checked already,
-	// protects every caller of this Repository.
-	if strings.TrimSpace(in.HeaderText) == "" {
-		return alerts.Alert{}, errors.New("sqlite: create alert: header text must not be empty")
-	}
-	// "" means no description. Only whitespace would look set but say nothing.
-	if in.DescriptionText != "" && strings.TrimSpace(in.DescriptionText) == "" {
-		return alerts.Alert{}, errors.New("sqlite: create alert: description must not be whitespace only")
+	if err := validateAlertText(in.AgencyID, in.HeaderText, in.DescriptionText); err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
 	}
 	if err := alerts.ValidateWindow(in.StartTime, in.EndTime, now); err != nil {
 		return alerts.Alert{}, fmt.Errorf("sqlite: create alert: %w", err)
@@ -587,25 +599,13 @@ func (r *alertRepo) Update(ctx context.Context, id int64, p alerts.Patch, now ti
 		current.IsTest = *p.IsTest
 	}
 
-	// Same invariant Create enforces (see the comment there): the column is
-	// NOT NULL but not non-empty, so without this check Patch{AgencyID: &""}
-	// would succeed and write agency_id = '', producing an
-	// informed_entity{agency_id:""} in the feed that no OBA app matches.
-	if strings.TrimSpace(current.AgencyID) == "" {
-		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: agency id must not be empty", id)
-	}
-
-	// Same invariant Create enforces (see the comment there): alerts.BuildFeed
-	// passes HeaderText straight through with no fallback, so without this
-	// check Patch{HeaderText: &""} would succeed and blank the header of an
-	// already-published alert riders are reading right now.
-	if strings.TrimSpace(current.HeaderText) == "" {
-		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: header text must not be empty", id)
-	}
-
-	// Same rule Create enforces (see the comment there).
-	if current.DescriptionText != "" && strings.TrimSpace(current.DescriptionText) == "" {
-		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: description must not be whitespace only", id)
+	// Checked on the merged row, not the patch: without this,
+	// Patch{AgencyID: &""} would write agency_id = '', producing an
+	// informed_entity{agency_id:""} in the feed that no OBA app matches, and
+	// Patch{HeaderText: &""} would blank the header of an already-published
+	// alert riders are reading right now.
+	if err = validateAlertText(current.AgencyID, current.HeaderText, current.DescriptionText); err != nil {
+		return alerts.Alert{}, fmt.Errorf("sqlite: update alert %d: %w", id, err)
 	}
 
 	if err = alerts.ValidateWindow(unixToTime(current.StartTime), nullUnixToTime(current.EndTime), now); err != nil {
