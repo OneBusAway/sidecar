@@ -198,7 +198,10 @@ describe('edit page: translations table', () => {
 
 		const row = (header: string) =>
 			within(screen.getByText(header).closest('tr') as HTMLElement);
-		expect(row('Puente').getByText('Stale')).toBeInTheDocument();
+		const stale = row('Puente').getByText('Stale');
+		expect(stale).toBeInTheDocument();
+		expect(stale).toHaveClass('stale');
+		expect(stale).not.toHaveClass('test');
 		expect(row('Pont').queryByText('Stale')).toBeNull();
 	});
 });
