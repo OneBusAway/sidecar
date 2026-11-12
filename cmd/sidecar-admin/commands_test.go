@@ -362,9 +362,10 @@ func TestAlertCreateBlankHeaderRejected(t *testing.T) {
 	assertNoAlerts(t, store, 1)
 }
 
-// TestAlertEditBlankHeaderOrAgencyRejected pins the CLI-level guards against
-// a blank --header or --agency-id changing an already-published alert.
-func TestAlertEditBlankHeaderOrAgencyRejected(t *testing.T) {
+// TestAlertEditOrTranslateBlankFlagRejected pins the CLI-level guards
+// against a blank --header or --agency-id on alert edit, or a blank
+// --header or --description on alert translate, changing an alert.
+func TestAlertEditOrTranslateBlankFlagRejected(t *testing.T) {
 	t.Parallel()
 	dbPath, store := newDB(t)
 	seedRegion(t, store.Regions(), 1)
@@ -377,16 +378,25 @@ func TestAlertEditBlankHeaderOrAgencyRejected(t *testing.T) {
 		t.Fatalf("alert create: %v", err)
 	}
 	id := parseCreatedID(t, stdout)
+	edit := []string{"alert", "edit", strconv.FormatInt(id, 10)}
+	translate := []string{"alert", "translate", strconv.FormatInt(id, 10), "--language", "es"}
 
-	for _, flag := range []string{"--header", "--agency-id"} {
+	for _, c := range []struct {
+		cmd  []string
+		flag string
+	}{
+		{edit, "--header"}, {edit, "--agency-id"},
+		{translate, "--header"}, {translate, "--description"},
+	} {
+		name := strings.Join(c.cmd[:2], " ")
 		for _, blank := range []string{"", " \t"} {
-			_, _, editErr := cli(t, dbPath, "alert", "edit", strconv.FormatInt(id, 10), flag, blank)
+			_, _, editErr := cli(t, dbPath, slices.Concat(c.cmd, []string{c.flag, blank})...)
 			if editErr == nil {
-				t.Errorf("alert edit with %s %q: want error, got nil", flag, blank)
+				t.Errorf("%s with %s %q: want error, got nil", name, c.flag, blank)
 				continue
 			}
-			if !strings.Contains(editErr.Error(), flag) {
-				t.Errorf("alert edit with %s %q: error = %v, want it to name %s", flag, blank, editErr, flag)
+			if !strings.Contains(editErr.Error(), c.flag) {
+				t.Errorf("%s with %s %q: error = %v, want it to name %s", name, c.flag, blank, editErr, c.flag)
 			}
 		}
 	}
@@ -395,9 +405,9 @@ func TestAlertEditBlankHeaderOrAgencyRejected(t *testing.T) {
 	if gerr != nil {
 		t.Fatalf("Get: %v", gerr)
 	}
-	if got.HeaderText != "Original" || got.AgencyID != "40" {
-		t.Errorf("after rejected edits: header = %q, agency = %q, want unchanged %q, %q",
-			got.HeaderText, got.AgencyID, "Original", "40")
+	if got.HeaderText != "Original" || got.AgencyID != "40" || len(got.Translations) != 0 {
+		t.Errorf("after rejected edits: header = %q, agency = %q, translations = %+v, want unchanged %q, %q and none",
+			got.HeaderText, got.AgencyID, got.Translations, "Original", "40")
 	}
 }
 

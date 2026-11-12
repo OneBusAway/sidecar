@@ -1410,23 +1410,20 @@ func TestAdminAlerts_Translations(t *testing.T) {
 		}
 	})
 
-	t.Run("an empty string is a real translation, not an omission", func(t *testing.T) {
-		got := object(t, f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/pt"), `{"description":""}`), http.StatusOK)
-		var found bool
-		for _, tr := range translationsOf(t, got) {
-			if str(t, tr, "language") != "pt" {
-				continue
+	t.Run("a blank field is a 400 and writes nothing", func(t *testing.T) {
+		for _, c := range []struct{ body, field string }{
+			{`{"header":""}`, "header"},
+			{`{"description":" \t"}`, "description"},
+			{`{"header":"ok","description":""}`, "description"},
+		} {
+			rec := f.do(http.MethodPut, alertPath(regionPuget, id, "/translations/pt"), c.body)
+			assertContains(t, c.body, errorText(t, rec, http.StatusBadRequest), c.field+" must not be empty")
+			got := object(t, f.do(http.MethodGet, alertPath(regionPuget, id, ""), ""), http.StatusOK)
+			for _, tr := range translationsOf(t, got) {
+				if str(t, tr, "language") == "pt" {
+					t.Errorf("%s stored a pt translation: %v", c.body, tr)
+				}
 			}
-			found = true
-			if tr["description"] == nil {
-				t.Error("pt description = null, want the empty string that was sent")
-			}
-			if tr["header"] != nil {
-				t.Errorf("pt header = %v, want null", tr["header"])
-			}
-		}
-		if !found {
-			t.Error("no pt translation stored")
 		}
 	})
 
