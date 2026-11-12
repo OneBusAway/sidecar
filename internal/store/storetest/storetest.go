@@ -66,6 +66,7 @@ func RunAlertRepository(t *testing.T, newStore newStoreFunc) {
 	t.Run("CreateRejectsBlankDescription", func(t *testing.T) { testCreateRejectsBlankDescription(t, newStore) })
 	t.Run("UpdateRejectsBlankDescription", func(t *testing.T) { testUpdateRejectsBlankDescription(t, newStore) })
 	t.Run("UpsertTranslationNormalizesLanguage", func(t *testing.T) { testUpsertTranslationNormalizesLanguage(t, newStore) })
+	t.Run("UpsertTranslationRejectsBlank", func(t *testing.T) { testUpsertTranslationRejectsBlank(t, newStore) })
 	t.Run("AlertTimestampsPopulated", func(t *testing.T) { testAlertTimestampsPopulated(t, newStore) })
 	t.Run("DeleteTranslationRemovesBothFields", func(t *testing.T) { testDeleteTranslationRemovesBothFields(t, newStore) })
 }
@@ -795,8 +796,8 @@ func testCreateRejectsInvalidWindow(t *testing.T, newStore newStoreFunc) {
 	}
 }
 
-// blankValues are the header and agency id values the repository must treat
-// as empty.
+// blankValues are the header, agency id, and translation values the
+// repository must treat as empty.
 var blankValues = []string{"", " \t"}
 
 // testCreateRejectsEmptyAgencyID asserts that Create rejects an empty
@@ -998,6 +999,34 @@ func testUpsertTranslationNormalizesLanguage(t *testing.T, newStore newStoreFunc
 	}
 	if matches[0].Text != "Segundo" {
 		t.Errorf("Text = %q, want %q (second upsert should win)", matches[0].Text, "Segundo")
+	}
+}
+
+// testUpsertTranslationRejectsBlank pins that UpsertTranslation refuses a
+// header or description that is empty or only whitespace and stores
+// nothing for it.
+func testUpsertTranslationRejectsBlank(t *testing.T, newStore newStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putRegion(t, regionRepo, 1)
+
+	a, err := repo.Create(ctx, newAlertIn(1, base), base)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, field := range []alerts.Field{alerts.FieldHeader, alerts.FieldDescription} {
+		for _, blank := range blankValues {
+			tr := alerts.Translation{Language: "es", Field: field, Text: blank, SourceSHA256: alerts.SourceHash("Alert")}
+			if upsertErr := repo.UpsertTranslation(ctx, a.ID, tr, base); upsertErr == nil {
+				t.Errorf("UpsertTranslation(%s %q): want error, got nil", field, blank)
+			}
+		}
+	}
+
+	got, err := repo.Get(ctx, a.ID)
+	if err != nil || len(got.Translations) != 0 {
+		t.Errorf("after rejected upserts: translations %+v, err %v, want none", got.Translations, err)
 	}
 }
 

@@ -738,6 +738,10 @@ func (r *alertRepo) Feed(ctx context.Context, regionID int64, includeTest bool, 
 // that never knew to) would insert "ES" alongside an existing "es" -- two
 // live rows for one language that the feed would both emit.
 func (r *alertRepo) UpsertTranslation(ctx context.Context, alertID int64, t alerts.Translation, now time.Time) error {
+	// A blank translation would go out in the feed as blank text.
+	if strings.TrimSpace(t.Text) == "" {
+		return fmt.Errorf("sqlite: upsert translation for alert %d: %s must not be empty", alertID, t.Field)
+	}
 	ts := now.Unix()
 	if err := r.q.UpsertAlertTranslation(ctx, gen.UpsertAlertTranslationParams{
 		AlertID:      alertID,
