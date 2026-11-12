@@ -101,7 +101,7 @@ type patchAlertRequest struct {
 
 // translationRequest is the PUT /alerts/{id}/translations/{lang} body. Both
 // fields are pointers: an absent field leaves that field's translation alone,
-// while an empty string is a real (if empty) translation.
+// while a blank one is rejected.
 type translationRequest struct {
 	Header      *string `json:"header"`
 	Description *string `json:"description"`
@@ -440,6 +440,15 @@ func (h *adminAlertsHandler) putTranslation(w http.ResponseWriter, r *http.Reque
 	}
 	if req.Header == nil && req.Description == nil {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "provide header and/or description")
+		return
+	}
+	// Checked before any write, so a blank field leaves the other one unsaved.
+	if req.Header != nil && strings.TrimSpace(*req.Header) == "" {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "header must not be empty")
+		return
+	}
+	if req.Description != nil && strings.TrimSpace(*req.Description) == "" {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, "description must not be empty")
 		return
 	}
 
