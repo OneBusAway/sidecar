@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// $app/navigation only works inside a running SvelteKit client, so it is
-// stubbed.
+// The 401 path calls goto, which throws outside a browser build.
+// The stub lets these tests take that path and check the redirect.
 const { gotoMock } = vi.hoisted(() => ({ gotoMock: vi.fn() }));
 vi.mock('$app/navigation', () => ({ goto: gotoMock }));
 
