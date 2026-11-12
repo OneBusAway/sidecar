@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -268,10 +269,15 @@ func TestImport_SecondaryRows(t *testing.T) {
 		t.Fatalf("zero created_at should fall back to now: %v %v", err, study.CreatedAt)
 	}
 	// Blank text imports as none: no description, and no de header row
-	// beside es header, es description, and de description.
+	// beside es header, es description, and de description. The de
+	// description has no source_description, so it is hashed against the
+	// stored "" and is not stale.
 	alert, err := store.Alerts().Get(ctx, 4242)
-	if err != nil || alert.DescriptionText != "" || len(alert.Translations) != 3 {
-		t.Fatalf("blank text should import as none: description %q, translations %+v, err %v", alert.DescriptionText, alert.Translations, err)
+	de := slices.IndexFunc(alert.Translations, func(tr alerts.Translation) bool {
+		return tr.Language == "de" && tr.Field == alerts.FieldDescription
+	})
+	if err != nil || alert.DescriptionText != "" || len(alert.Translations) != 3 || de < 0 || alert.TranslationStale(alert.Translations[de]) {
+		t.Fatalf("blank text should import as none, de description fresh: description %q, translations %+v, err %v", alert.DescriptionText, alert.Translations, err)
 	}
 	pending, err := store.GhostBus().ListPendingSnapshots(ctx, 10)
 	if err != nil || len(pending) != 1 || pending[0].PublicID != "gb-pending" || pending[0].SnapshotJSON != "" {

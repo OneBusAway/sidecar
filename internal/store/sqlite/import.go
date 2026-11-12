@@ -112,13 +112,13 @@ func (im *importer) alerts(doc *export.Document) error {
 	for i, a := range doc.Alerts {
 		p := im.prepared.alerts[i]
 		// Only whitespace says nothing, so import it as no description.
-		description := a.DescriptionText
-		if strings.TrimSpace(description) == "" {
-			description = ""
+		// a is a copy, and translations hashes against this stored value.
+		if strings.TrimSpace(a.DescriptionText) == "" {
+			a.DescriptionText = ""
 		}
 		n, err := im.q.ImportAlert(im.ctx, gen.ImportAlertParams{
 			ID: a.ID, RegionID: im.region, AgencyID: a.AgencyID,
-			HeaderText: a.HeaderText, DescriptionText: description, Url: a.URL,
+			HeaderText: a.HeaderText, DescriptionText: a.DescriptionText, Url: a.URL,
 			Cause: p.cause, Effect: p.effect, SeverityLevel: p.severity,
 			StartTime: a.StartTime.Unix(), EndTime: timeToNullUnix(a.EndTime),
 			Published: a.Published, IsTest: a.IsTest,
