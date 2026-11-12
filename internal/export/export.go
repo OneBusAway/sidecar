@@ -230,7 +230,7 @@ func (k keySet) add(kind string, key any) error {
 func (d *Document) validateAlerts() error {
 	ids := keySet{}
 	for _, a := range d.Alerts {
-		if a.ID <= 0 || a.HeaderText == "" || a.StartTime.IsZero() {
+		if a.ID <= 0 || strings.TrimSpace(a.HeaderText) == "" || a.StartTime.IsZero() {
 			return fmt.Errorf("export: alert %d needs a positive id, header_text, and start_time", a.ID)
 		}
 		if err := ids.add("alert", a.ID); err != nil {

@@ -319,6 +319,7 @@ func TestImport_ValidatesBeforeWriting(t *testing.T) {
 
 	cases := map[string]func(*export.Document){
 		"bad cause":           func(d *export.Document) { d.Alerts[0].Cause = "GREMLINS" },
+		"blank header":        func(d *export.Document) { d.Alerts[0].HeaderText = " \t" },
 		"english translation": func(d *export.Document) { d.Alerts[0].Translations[0].Language = "en" },
 		"one-sided window":    func(d *export.Document) { d.Studies[0].Surveys[0].StartTime = &importBase },
 		"radio without options": func(d *export.Document) {
