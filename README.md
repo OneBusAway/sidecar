@@ -909,6 +909,8 @@ question ids the apps persist locally must not change under riders -- and
 every row is checked with the domain packages' own rules (enum names,
 question content, answer shape, time windows; not the HTTP layer's length
 caps) before anything is written, so a bad row rejects the whole document.
+An alert header that is only whitespace counts as missing, while a
+description or translation that is only whitespace imports as none.
 Rows that already exist under this region (same id, public id, or
 region+token) are skipped and counted, which makes the migration two runs
 of the same command: a bulk import the day before the region's
