@@ -828,6 +828,12 @@ func alertTranslate(ctx context.Context, store *sqlite.Store, now time.Time, arg
 	if !seen["header"] && !seen["description"] {
 		return errors.New("alert translate requires --header and/or --description")
 	}
+	if seen["header"] && strings.TrimSpace(*header) == "" {
+		return errors.New("alert translate: --header cannot be empty")
+	}
+	if seen["description"] && strings.TrimSpace(*description) == "" {
+		return errors.New("alert translate: --description cannot be empty")
+	}
 
 	current, err := store.Alerts().Get(ctx, id)
 	if err != nil {
