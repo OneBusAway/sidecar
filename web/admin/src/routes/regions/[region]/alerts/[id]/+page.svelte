@@ -463,7 +463,7 @@
 				<tr>
 					<td>
 						{t.language}
-						{#if t.stale}<span class="badge test">Stale</span>{/if}
+						{#if t.stale}<span class="badge stale">Stale</span>{/if}
 					</td>
 					<td>{t.header ?? '—'}</td>
 					<td>{t.description ?? '—'}</td>
@@ -538,6 +538,12 @@
 	.badge.test {
 		background: #fdecc8;
 		color: #6b4b00;
+	}
+
+	.badge.stale {
+		background: transparent;
+		color: #6b4b00;
+		box-shadow: inset 0 0 0 1px #6b4b00;
 	}
 
 	.meta {
