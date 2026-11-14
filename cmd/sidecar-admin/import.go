@@ -14,6 +14,68 @@ import (
 	"github.com/OneBusAway/sidecar/internal/store/sqlite"
 )
 
+// maxImportBytes caps the export document the CLI will read. A region's
+// export is mostly rider rows of a few hundred bytes each, so even a large
+// region with tens of thousands of survey responses and ghost bus reports
+// stays in the tens of MB; 256 MiB leaves an order of magnitude of room
+// while still refusing a runaway or hostile input before it exhausts the
+// host's memory.
+const maxImportBytes = 256 << 20
+
+// errDocumentTooLarge is what cappedReader returns past its limit.
+var errDocumentTooLarge = errors.New("document is too large")
+
+// cappedReader reads at most n bytes and then fails with
+// errDocumentTooLarge rather than a plain EOF, so an oversized document is
+// reported as such and not as truncated JSON.
+type cappedReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.n <= 0 {
+		// One more byte would exceed the cap: probe for it.
+		var one [1]byte
+		n, err := c.r.Read(one[:])
+		if n > 0 {
+			return 0, errDocumentTooLarge
+		}
+		if err == nil {
+			err = io.EOF // a zero-byte read with no error: treat as the end
+		}
+		return 0, err
+	}
+	if int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	n, err := c.r.Read(p)
+	c.n -= int64(n)
+	return n, err
+}
+
+// decodeDocument reads exactly one export document of at most limit bytes.
+func decodeDocument(r io.Reader, source string, limit int64) (export.Document, error) {
+	var doc export.Document
+	dec := json.NewDecoder(&cappedReader{r: r, n: limit})
+	dec.DisallowUnknownFields()
+	if decodeErr := dec.Decode(&doc); decodeErr != nil {
+		if errors.Is(decodeErr, errDocumentTooLarge) {
+			return doc, fmt.Errorf("import: %s: document is larger than %d bytes", source, limit)
+		}
+		return doc, fmt.Errorf("import: %s: %w", source, decodeErr)
+	}
+	// One document per input: a second JSON value would otherwise be read
+	// past silently and never imported.
+	if _, trailingErr := dec.Token(); !errors.Is(trailingErr, io.EOF) {
+		if errors.Is(trailingErr, errDocumentTooLarge) {
+			return doc, fmt.Errorf("import: %s: document is larger than %d bytes", source, limit)
+		}
+		return doc, fmt.Errorf("import: %s: unexpected content after the document", source)
+	}
+	return doc, nil
+}
+
 // runImport loads an export document (internal/export; produced by
 // OBACloud's `rake sidecar:export`) into this database. Rows that already
 // exist are skipped, so the same command applied to a later export of the
@@ -47,16 +109,9 @@ func runImport(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sq
 		r = f
 		source = *file
 	}
-	var doc export.Document
-	dec := json.NewDecoder(r)
-	dec.DisallowUnknownFields()
-	if decodeErr := dec.Decode(&doc); decodeErr != nil {
-		return fmt.Errorf("import: %s: %w", source, decodeErr)
-	}
-	// One document per input: a second JSON value would otherwise be read
-	// past silently and never imported.
-	if _, trailingErr := dec.Token(); !errors.Is(trailingErr, io.EOF) {
-		return fmt.Errorf("import: %s: unexpected content after the document", source)
+	doc, err := decodeDocument(r, source, maxImportBytes)
+	if err != nil {
+		return err
 	}
 	doc.IDFloor = *idFloor
 	if *dryRun {

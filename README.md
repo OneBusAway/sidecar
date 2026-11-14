@@ -913,10 +913,19 @@ cat export.json | render ssh sidecar -- sidecar-admin --db /data/sidecar.db impo
 Ids are preserved -- the feed's `Alert_<id>` entity ids and the survey and
 question ids the apps persist locally must not change under riders -- and
 every row is checked with the domain packages' own rules (enum names,
-question content, answer shape, time windows; not the HTTP layer's length
-caps) before anything is written, so a bad row rejects the whole document.
-An alert header or agency id that is only whitespace counts as missing,
-while a description or translation that is only whitespace imports as none.
+question content, answer shape, time windows, alert urls) and the rider
+API's own limits (255-byte user, trip, route, stop, and vehicle
+identifiers, 4096-byte push tokens, a 255-byte test-device description,
+1000-character ghost bus comments, latitude within +/-90 and longitude
+within +/-180, the 5/10/15/20/30 wait-duration choices, URL-safe public ids
+of at most 64 characters, a captured snapshot that is a JSON object of at
+most 64 KiB) before anything is written, so a bad row rejects the whole
+document with an error naming it -- fix or delete it in OBACloud and
+re-export. OBACloud validates nearly all of these itself, so a real export
+should not trip them. An alert header or agency id that is only whitespace
+counts as missing, while a description or translation that is only
+whitespace imports as none, and a non-test device's description is dropped
+(the registration API keeps none). The document itself is capped at 256 MiB.
 Rows that already exist under this region (same id, public id, or
 region+token) are skipped and counted, which makes the migration two runs
 of the same command: a bulk import the day before the region's

@@ -13,6 +13,7 @@ package export
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -246,6 +247,13 @@ func (d *Document) Validate() error {
 	return nil
 }
 
+// publicIDPattern is the shape of a survey response or ghost bus report
+// public id: OBACloud mints 20 hex characters, this server 22 URL-safe
+// base64 ones. Either appears as a path segment (a survey amend URL, an
+// admin link), so anything outside the URL-safe alphabet or past 64
+// characters is not a public id either side ever minted.
+var publicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // keySet rejects a repeated persisted key.
 type keySet map[string]struct{}
 
@@ -340,6 +348,9 @@ func (d *Document) validateResponses() error {
 		if r.SurveyID <= 0 || r.PublicID == "" || r.UserIdentifier == "" {
 			return fmt.Errorf("export: survey response %q needs survey_id, public_id, and user_identifier", r.PublicID)
 		}
+		if !publicIDPattern.MatchString(r.PublicID) {
+			return fmt.Errorf("export: survey response %.80q: public_id must be 1-64 URL-safe characters", r.PublicID)
+		}
 		// A response can name a survey an earlier run migrated, so its
 		// survey_id is held to the floor on its own.
 		if err := d.checkFloor(fmt.Sprintf("survey response %q survey", r.PublicID), r.SurveyID); err != nil {
@@ -370,6 +381,9 @@ func (d *Document) validateReports() error {
 	for _, g := range d.GhostBusReports {
 		if g.PublicID == "" || g.UserIdentifier == "" || g.TripIdentifier == "" {
 			return fmt.Errorf("export: ghost bus report %q needs public_id, user_identifier, and trip_identifier", g.PublicID)
+		}
+		if !publicIDPattern.MatchString(g.PublicID) {
+			return fmt.Errorf("export: ghost bus report %.80q: public_id must be 1-64 URL-safe characters", g.PublicID)
 		}
 		if err := ids.add("ghost bus report", g.PublicID); err != nil {
 			return err

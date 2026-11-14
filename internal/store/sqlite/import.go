@@ -56,10 +56,11 @@ func (s *Store) ValidateImport(ctx context.Context, doc *export.Document, now ti
 // transaction opens; anything the database itself rejects -- a foreign
 // key, a CHECK, a second UNIQUE such as a question's position -- rolls the
 // whole transaction back, so a bad document never leaves a partial import.
-// Enum names, question content, answer shape, and time windows are
-// re-validated with the domain packages' own rules; the HTTP layer's
-// length caps and locale normalization are not, on the assumption the
-// source enforced them.
+// Enum names, question content, answer shape, time windows, alert urls,
+// and the HTTP layer's rider-state rules (validateRiderRows: length caps,
+// coordinate ranges, wait-duration choices, snapshot shape) are
+// re-validated with the domain packages' own rules. Locales are stored raw,
+// as the registration API stores them.
 func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time) (export.Summary, error) {
 	var sum export.Summary
 	prepared, err := prepareImport(doc, now)
@@ -266,6 +267,12 @@ func (im *importer) responses(doc *export.Document) error {
 // this region's own earlier row (or the device re-registering directly).
 func (im *importer) registrations(doc *export.Document) error {
 	for _, p := range doc.PushRegistrations {
+		// Non-test rows carry no description (spec section 4; the
+		// registration API ignores one), so a legacy one is dropped rather
+		// than failing the document.
+		if !p.TestDevice {
+			p.Description = ""
+		}
 		n, err := im.q.ImportPushRegistration(im.ctx, gen.ImportPushRegistrationParams{
 			RegionID: im.region, Token: p.Token, OperatingSystem: p.OperatingSystem,
 			ApnsSandbox: p.APNSSandbox, Locale: p.Locale, TestDevice: p.TestDevice, Description: p.Description,
@@ -364,6 +371,9 @@ func prepareImport(doc *export.Document, now time.Time) (preparedImport, error) 
 		answers:   make([]string, len(doc.SurveyResponses)),
 	}
 	if err := doc.Validate(); err != nil {
+		return p, err
+	}
+	if err := validateRiderRows(doc); err != nil {
 		return p, err
 	}
 	for _, step := range []func(*export.Document) error{

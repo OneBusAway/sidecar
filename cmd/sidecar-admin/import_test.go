@@ -142,3 +142,26 @@ func TestImportCommand_IDFloor(t *testing.T) {
 		t.Fatalf("raised floor: %v", err)
 	}
 }
+
+// TestDecodeDocument_SizeCap (SC-15): the document reader is bounded, so a
+// runaway or hostile input fails with a clear message instead of growing
+// the CLI's memory without limit. The production cap is generous: a large
+// region's export runs to tens of MB.
+func TestDecodeDocument_SizeCap(t *testing.T) {
+	t.Parallel()
+	if maxImportBytes < 128<<20 {
+		t.Fatalf("maxImportBytes = %d; production exports with many thousands of rider rows need room", maxImportBytes)
+	}
+	doc := export.Document{Format: export.Format, RegionID: 1, Alerts: []export.Alert{{ID: 1, AgencyID: "1", HeaderText: strings.Repeat("h", 4000)}}}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, capErr := decodeDocument(bytes.NewReader(b), "doc", int64(len(b))); capErr != nil {
+		t.Fatalf("document of exactly the cap: %v", capErr)
+	}
+	_, err = decodeDocument(bytes.NewReader(b), "doc", int64(len(b))-1)
+	if err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("over-cap document: err %v, want a size error", err)
+	}
+}

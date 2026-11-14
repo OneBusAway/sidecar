@@ -26,6 +26,10 @@ const (
 	MaxQuestionTypeBytes  = 64
 )
 
+// MaxIdentifierLen caps a response's user_identifier and stop_identifier in
+// bytes (design spec sections 2.5, 2.7); the rider API and import share it.
+const MaxIdentifierLen = 255
+
 // ParseAnswers decodes the responses parameter: a string holding a JSON
 // array of objects (spec §7.2). Structure is strict -- anything that is not
 // an array of objects each carrying an integral question_id is
