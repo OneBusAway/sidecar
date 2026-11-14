@@ -545,14 +545,17 @@ export SIDECAR_APNS_TOPIC=org.onebusaway.iphone
 
 # Shared secret gorush must send on the feedback webhook, as either
 # `Authorization: Bearer <secret>` or a bare `Authorization: <secret>`.
-# Leave it unset only if your gorush cannot send a header: the webhook then
-# stays open (and rate limited), and should be restricted at the proxy.
-# gorush splits its header setting on ':', so the value must contain no ':'
-# or whitespace; the server refuses to start otherwise.
+# Required whenever SIDECAR_GORUSH_URL is set: the server refuses to start
+# with gorush configured and no secret, unless you opt in to an open
+# webhook with SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true (local
+# experiments and test harnesses only; it is then rate limited and should
+# be restricted at the proxy). gorush splits its header setting on ':', so
+# the value must contain no ':' or whitespace; the server refuses to start
+# otherwise.
 export SIDECAR_GORUSH_WEBHOOK_SECRET=...
 ```
 
-(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url`/`--apns-topic`/`--gorush-webhook-secret` are the equivalent `sidecar` flags.)
+(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url`/`--apns-topic`/`--gorush-webhook-secret`/`--allow-unauthenticated-gorush-webhook` are the equivalent `sidecar` flags.)
 
 A region can also carry its own OneBusAway REST API key, overriding
 `SIDECAR_OBA_API_KEY` for that region alone -- set it the same way as the other
@@ -939,9 +942,11 @@ a payload carrying a `notif_id` of `alertpush:<push id>` increments that
 push's `failed_count` and records the token's hash, whether or not the
 failure reason is a terminal one (see *Sending alerts as push notifications*).
 
-Without the secret the endpoint still works, but is rate limited per client
-IP as an abuse ceiling and should be restricted to the gorush host at the
-proxy. A dropped prune is not lost data: the token is cleaned up by the
+The server will not start with `SIDECAR_GORUSH_URL` set and no secret
+unless `--allow-unauthenticated-gorush-webhook`
+(`SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true`) says to. Without the
+secret the endpoint still works, but is rate limited per client IP as an
+abuse ceiling and should be restricted to the gorush host at the proxy. A dropped prune is not lost data: the token is cleaned up by the
 180-day sweep, or by the next failure gorush reports. The push accounting is
 the one thing an open webhook lets an anonymous caller *write*: someone who
 guesses a `notif_id` can inflate a push's failure counters. What bounds that
@@ -950,6 +955,11 @@ report -- the rows hold a counter and token hashes, nothing reads either back
 to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
+
+Either way the accounting is bounded: a push never records more failures
+than the `device_count` it was sent to, feedback for a push that completed
+more than 24 hours earlier is ignored, and each stored failure reason is
+cut to 120 characters with control characters removed.
 
 #### Staging
 
@@ -1379,7 +1389,7 @@ phone -- is the compose stack, which runs the sidecar beside
 [gorush](https://github.com/appleboy/gorush) exactly as production does.
 
 ```sh
-cp .env.example .env    # fill in the webhook secret and your APNs key
+cp .env.example .env    # set a real webhook secret (openssl rand -hex 32) and your APNs key
 make up                 # builds the image, starts sidecar + gorush
 deploy/smoke.sh         # /healthz, /admin, and the alerts feed
 make admin ARGS="region set --id 1 --agency-id 1 --timezone America/Los_Angeles"
@@ -1434,7 +1444,7 @@ GORUSH_IOS_KEY_ID=XXXXXXXXXX     # 10 chars, the key's ID
 GORUSH_IOS_TEAM_ID=XXXXXXXXXX    # 10 chars, your team ID
 # sidecar
 SIDECAR_APNS_TOPIC=org.onebusaway.iphone   # the EXACT bundle id of the build on the phone
-SIDECAR_GORUSH_WEBHOOK_SECRET=...          # openssl rand -hex 32  (needed only for the prune half)
+SIDECAR_GORUSH_WEBHOOK_SECRET=...          # openssl rand -hex 32  (required with gorush; .env.example ships a local-only placeholder)
 ```
 
 The topic must be the bundle id of the build actually installed on the

@@ -32,7 +32,7 @@ Single test: `go test ./internal/httpapi -run 'TestName/Subtest'`. Go tests need
 
 Frontend (`web/admin`): `npm run check` (svelte-check), `npm run lint` (prettier + eslint), `npm run test:unit` (vitest), `npm run dev`.
 
-Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and real env vars win. Keys: `SIDECAR_DB`, `SIDECAR_OBA_API_KEY`, `SIDECAR_PIRATE_WEATHER_KEY`, `SIDECAR_GORUSH_URL`, `SIDECAR_GORUSH_WEBHOOK_SECRET`, `SIDECAR_APNS_TOPIC` (each also a flag). `*.db` files are gitignored.
+Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and real env vars win. Keys: `SIDECAR_DB`, `SIDECAR_OBA_API_KEY`, `SIDECAR_PIRATE_WEATHER_KEY`, `SIDECAR_GORUSH_URL`, `SIDECAR_GORUSH_WEBHOOK_SECRET` (required when `SIDECAR_GORUSH_URL` is set, unless `SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true`), `SIDECAR_APNS_TOPIC` (each also a flag). `*.db` files are gitignored.
 
 ## Architecture
 

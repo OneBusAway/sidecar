@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Fan-out constants (design spec §2.3, §2.4, §2.6, §2.7).
@@ -30,6 +32,14 @@ const (
 	// StuckAfter is how long a sending row may go untouched before the
 	// dispatcher reclaims it (a crashed worker's work re-runs, spec §12).
 	StuckAfter = 15 * time.Minute
+	// FeedbackWindow is how long after a push completes that gorush feedback
+	// still counts against it (SC-11). Real bounces arrive within minutes;
+	// anything later is a replay or a forgery, and counting it would let an
+	// old push's report be rewritten indefinitely.
+	FeedbackWindow = 24 * time.Hour
+	// MaxFailureReasonRunes caps a feedback failure reason (SC-11). gorush's
+	// reasons are short APNs/FCM codes; the cap only bites on a forged body.
+	MaxFailureReasonRunes = 120
 	// EnglishKey is the Messages key for the alert's own text.
 	EnglishKey = "en"
 	// NotifIDPrefix prefixes the gorush notif_id stamped on every batch so
@@ -182,6 +192,11 @@ type Repository interface {
 	AdvanceCursor(ctx context.Context, id, prevCursor, newCursor, submitted int64, now time.Time) (bool, error)
 	// RecordFailure stores one (push, sha256(token)) failure and increments
 	// failed_count; a replay of the same token is ignored and returns false.
+	// So is any failure that would take failed_count past device_count, and
+	// any failure for a push that completed more than FeedbackWindow before
+	// now (SC-11): this is the one write an outside caller (the gorush
+	// webhook) makes here, and the report must stay bounded by the send it
+	// describes. An unknown push id is still an error.
 	// The token itself is never stored (design spec §2.8). `now` timestamps
 	// the failure row only: updated_at belongs to the dispatcher's stuck
 	// clock and asynchronous webhook feedback must not reset it (§2.6).
@@ -216,4 +231,23 @@ func ParseNotifID(s string) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// CleanFailureReason is the form of a feedback failure reason that may be
+// stored and shown to operators (SC-11): control and non-printing runes
+// removed, surrounding space trimmed, and cut to MaxFailureReasonRunes.
+func CleanFailureReason(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n == MaxFailureReasonRunes {
+			break
+		}
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }

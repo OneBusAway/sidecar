@@ -610,3 +610,33 @@ func TestRun_AdminSessionFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestRun_GorushWithoutWebhookSecretFailsClosed pins SC-11: with gorush
+// configured, the feedback webhook deletes registrations and writes push
+// accounting on whatever it is sent, so booting without its shared secret
+// is refused unless the operator opts in to an open webhook explicitly.
+func TestRun_GorushWithoutWebhookSecretFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	run1 := func(args ...string) error { return run(&bytes.Buffer{}, &bytes.Buffer{}, args) }
+
+	// --log-format=yaml is a backstop: if the check is missing, run fails on
+	// it instead of booting a server that would hang the test.
+	err := run1("--gorush-url=http://127.0.0.1:1", "--log-format=yaml")
+	if err == nil || !strings.Contains(err.Error(), "--gorush-webhook-secret") ||
+		!strings.Contains(err.Error(), "--allow-unauthenticated-gorush-webhook") {
+		t.Fatalf("gorush without a webhook secret: err = %v, want a refusal naming the secret and the opt-in", err)
+	}
+	// Each accepted configuration gets past the check and stops at the
+	// deliberately bad --log-format that follows it, so nothing binds.
+	for name, args := range map[string][]string{
+		"secret set":         {"--gorush-url=http://127.0.0.1:1", "--gorush-webhook-secret=s3cret"},
+		"explicit opt-in":    {"--gorush-url=http://127.0.0.1:1", "--allow-unauthenticated-gorush-webhook"},
+		"no gorush, no hook": {},
+	} {
+		err := run1(append(args, "--log-format=yaml")...)
+		if err == nil || !strings.Contains(err.Error(), "log-format") {
+			t.Errorf("%s: err = %v, want it to reach the log-format check", name, err)
+		}
+	}
+}
