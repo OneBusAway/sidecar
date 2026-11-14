@@ -858,6 +858,12 @@ JSON (§2.2 exception):
 - `test_mode: "1"` routes to Stripe test keys, letting app builds exercise the flow
   against production infrastructure.
 - Stripe errors → `500` with empty body.
+- Every request creates Stripe objects on an unauthenticated route, which makes it a
+  card-testing target. Implementations SHOULD reject (`400`, before calling Stripe)
+  amounts outside a sane range and malformed emails, and SHOULD bound volume per client
+  and server-wide. The reference: `100`–`1000000` cents, one bare RFC 5322 address of at
+  most 254 bytes, a name of at most 255 bytes, 10/minute per client address, and 500
+  valid requests per day server-wide (`429`).
 
 This service is **optional**: a sidecar that doesn't take donations simply doesn't
 implement it, and the apps hide the donations UI for regions that don't advertise it.

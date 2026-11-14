@@ -72,6 +72,10 @@ type Deps struct {
 	// DonationLimiter is the per-source throttle on donation requests.
 	// NewRouter defaults it (10/minute).
 	DonationLimiter *ratelimit.Limiter
+	// DonationDailyLimiter is the server-wide daily cap on donation
+	// requests that pass validation (SC-04). NewRouter defaults it
+	// (500/day); every caller shares one bucket.
+	DonationDailyLimiter *ratelimit.Limiter
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -374,6 +378,9 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Donations != nil {
 		if deps.DonationLimiter == nil {
 			deps.DonationLimiter = ratelimit.New(donationsPerMinute, time.Minute)
+		}
+		if deps.DonationDailyLimiter == nil {
+			deps.DonationDailyLimiter = ratelimit.New(donationsPerDay, 24*time.Hour)
 		}
 		dh := &donationsHandler{deps: deps}
 		mux.HandleFunc("POST /api/v1/payment_intents", throttleByIP(deps.DonationLimiter, deps, dh.create))

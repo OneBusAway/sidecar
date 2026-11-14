@@ -613,7 +613,16 @@ since the route is unauthenticated and a recurring response hands the
 caller that customer's id and an ephemeral key to its saved payment
 methods. A Stripe failure is a `500` with an empty
 body, which is what the shipped apps expect; a malformed request is a
-`400`. The endpoint is throttled at 10/minute per client address.
+`400`. A request is also a `400`, before any Stripe call, when the amount
+is outside $1–$10,000 (`100`–`1000000` cents), the email is not exactly one
+bare address of at most 254 bytes, or the name is over 255 bytes: every
+request creates Stripe objects, and cents-sized charges are how stolen
+cards get tested. The endpoint is throttled at 10/minute per client
+address, and requests that pass validation share one server-wide bucket of
+500 per day (`429` past it, logged as `donation refused: server-wide daily
+cap reached`) so a run spread over many addresses is bounded too. No
+Stripe idempotency key is sent: each tap is a distinct donation, so a key
+would only dedupe a client's own retries, not abuse.
 
 ## Admin UI
 

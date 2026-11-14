@@ -407,9 +407,14 @@ paths:
           description: >
             Malformed JSON body sent with a JSON content type. (A malformed
             body sent without one reaches the handler's own parse and 500s
-            in the reference.)
+            in the reference.) Also an amount outside 100–1000000 cents, an
+            email that is not one bare address of at most 254 bytes, or a
+            name over 255 bytes; no Stripe object is created.
         '429':
-          description: Rate limited (10/minute per client address in this implementation; the reference had no throttle here).
+          description: >
+            Rate limited: 10/minute per client address, or the server-wide
+            cap of 500 valid requests per day is spent (this implementation;
+            the reference had no throttle here). Empty body.
         '500':
           description: Stripe error. Empty body. Clients treat any non-200 as a failed donation attempt.
 
@@ -1404,16 +1409,20 @@ components:
       properties:
         donation_amount_in_cents:
           type: integer
-          minimum: 1
+          minimum: 100
+          maximum: 1000000
+          description: US cents; outside 100–1000000 is a 400 before any Stripe call.
         donation_frequency:
           type: string
           description: '`recurring` creates a monthly subscription; any other value (or absent) is a one-time donation.'
           examples: ["one_time", "recurring"]
         name:
           type: string
+          maxLength: 255
         email:
           type: string
           format: email
+          maxLength: 254
           description: Stripe customer identity (found-or-created) and receipt address.
         test_mode:
           type: string
