@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -104,8 +105,24 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst 
 		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
+	// A body is exactly one JSON value (SC-28). Decode stops after the first
+	// value and leaves the rest unread, so without this `{"a":1}{"a":2}`
+	// would be accepted as the first object -- a parser disagreement with
+	// anything in front of the sidecar that reads the last one. Trailing
+	// whitespace is consumed by the decoder and still ends in io.EOF.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return errBodyTooLarge
+		}
+		return errTrailingJSON
+	}
 	return nil
 }
+
+// errTrailingJSON is the caller-safe message for a body that carries more
+// than one JSON value.
+var errTrailingJSON = errors.New("invalid JSON body: unexpected data after the JSON value")
 
 // writeServerError logs op against the region id and writes a bare, empty
 // 500. Every {regionId} feed handler shares this one function for the same

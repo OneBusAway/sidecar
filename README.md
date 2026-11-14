@@ -637,6 +637,13 @@ compatibility shim for the old shape -- a bookmark to `/admin/alerts/42`
 from before this change shows the SPA's ordinary not-found page rather than
 redirecting.
 
+### Admin API hardening
+
+- **One JSON value per body.** Every JSON body on `/api/admin/v1` (and the
+  gorush webhook and the donations endpoint) must be exactly one JSON value;
+  trailing data after it -- a second object, stray bytes -- is a `400`.
+  Trailing whitespace is fine.
+
 ### Region API keys and service principals
 
 The admin API above is session-authenticated when a browser is driving it,
