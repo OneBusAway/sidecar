@@ -364,3 +364,33 @@ func TestNewRouter_VehiclesAndWeatherRequireRegions(t *testing.T) {
 		})
 	}
 }
+
+// Rails serves vehicles with a ".json" suffix too (format defaults to json),
+// and its redirect preserves the full path.
+func TestVehiclesJSONAliasMatchesBare(t *testing.T) {
+	regs := newTestRegions(t, regions.Region{ID: 1, Name: "R", OBABaseURL: "https://x/", OBAAPIKey: "k", Active: true})
+	srv := newVehiclesTestServer(t, &fakeOBA{fleet: []obaapi.Vehicle{
+		{AgencyID: "1", AgencyName: "Metro Transit", VehicleID: "1_4361"},
+	}}, regs)
+
+	for _, q := range []string{"?query=436", "?query=4"} {
+		get := func(path string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
+			return rec
+		}
+		bare := get("/api/v1/regions/1/vehicles" + q)
+		alias := get("/api/v1/regions/1/vehicles.json" + q)
+		if bare.Code != http.StatusOK || alias.Code != bare.Code {
+			t.Fatalf("%s: status bare=%d alias=%d, want 200", q, bare.Code, alias.Code)
+		}
+		if bare.Body.String() != alias.Body.String() {
+			t.Errorf("%s: alias body differs from bare", q)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/99/vehicles.json?query=436", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown region alias status = %d, want 404", rec.Code)
+	}
+}
