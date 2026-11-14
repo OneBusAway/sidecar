@@ -693,6 +693,20 @@ redirecting.
   it can mint a push-scoped key for any region (see below), so store it
   like a root credential and revoke it (`sidecar-admin principal revoke`)
   if it may have leaked.
+- **Security headers.** Every response under `/admin` and `/api/admin/`
+  -- including `401`s, `404`s and `405`s -- carries
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, a Content-Security-Policy, and, when the request
+  arrived over HTTPS, `Strict-Transport-Security: max-age=31536000` (never
+  over plain HTTP, so local development is unaffected). Admin JSON and CSV
+  are `Cache-Control: no-store`, and their CSP is `default-src 'none'`. The
+  SPA's CSP is `'self'`-only with no `'unsafe-inline'`: SvelteKit's inline
+  bootstrap script is allowed by its SHA-256, and the route announcer's
+  fixed `style` attribute by its hash under `'unsafe-hashes'`, both computed
+  at boot from the embedded build, so a rebuild cannot fall out of step.
+  `web/admin/src/app.html` therefore must not carry inline styles or event
+  handlers; `go test ./internal/httpapi/adminui` (part of `make check`)
+  fails if the built SPA does. Rider-facing routes are unchanged.
 - **One JSON value per body.** Every JSON body on `/api/admin/v1` (and the
   gorush webhook and the donations endpoint) must be exactly one JSON value;
   trailing data after it -- a second object, stray bytes -- is a `400`.

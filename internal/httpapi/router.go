@@ -430,7 +430,7 @@ func NewRouter(deps Deps) http.Handler {
 		}
 		registerAdminRoutes(mux, deps)
 	}
-	return requestLog(deps, mux)
+	return requestLog(deps, securityHeaders(deps.AdminUI, mux))
 }
 
 // adminRoute is one admin API route plus the middleware it must carry.
