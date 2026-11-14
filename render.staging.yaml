@@ -99,7 +99,10 @@ services:
     name: gorush-staging
     runtime: image
     image:
-      url: docker.io/appleboy/gorush:1.22.0
+      # appleboy/gorush:1.22.0, pinned by digest (multi-arch index) so a
+      # moved tag cannot change what runs; Render takes a digest in place of
+      # a tag. Bump with `docker buildx imagetools inspect appleboy/gorush:<tag>`.
+      url: docker.io/appleboy/gorush@sha256:2bc21bc98c2253f2d14b4aeb614ec89b72188b2e885d58490ac712cb85a9b8bd
     plan: starter
     region: oregon
     envVars:

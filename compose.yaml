@@ -28,7 +28,8 @@ services:
     restart: unless-stopped
 
   gorush:
-    image: appleboy/gorush:1.22.0
+    # Pinned by digest, like render.yaml (deploy/manifests_test.go checks).
+    image: appleboy/gorush:1.22.0@sha256:2bc21bc98c2253f2d14b4aeb614ec89b72188b2e885d58490ac712cb85a9b8bd
     ports:
       # gorush has no auth and holds the APNs signing key; only the
       # host-run sidecar needs it, via localhost. Not exposed on the LAN.

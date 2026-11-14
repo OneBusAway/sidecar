@@ -1003,6 +1003,22 @@ registrations, and ghost bus reports are keyed by language, public id, or
 token, not by a carried id, so the floor does not apply to them; alarms and
 Live Activities are not in the document at all.
 
+#### Pinned images
+
+Third-party images are pinned by digest, so a moved or hijacked tag cannot
+change what is built or run without a commit here: every `FROM` in the
+`Dockerfile` (as `tag@sha256:…`, multi-arch index digests) and gorush in
+`render.yaml`, `render.staging.yaml` (as `docker.io/appleboy/gorush@sha256:…`,
+the digest form Render accepts) and `compose.yaml`. The Litestream tarball the
+build downloads is checked against the SHA-256 recorded per architecture in the
+`Dockerfile`, from the release's `checksums.txt`. `deploy/manifests_test.go`
+fails on an unpinned reference or an unverified download. The one exception is
+this repository's own `ghcr.io/onebusaway/sidecar:main`, which `render*.yaml`
+track on purpose -- it is how a push to main deploys. To take a new release
+(for example a Go patch in `golang:1.26-alpine`), resolve the new digest with
+`docker buildx imagetools inspect <image>:<tag>` and update the reference;
+nothing bumps these automatically.
+
 #### Backups
 
 The image ships [Litestream](https://litestream.io). Set
