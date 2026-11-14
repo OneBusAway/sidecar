@@ -35,6 +35,9 @@ services:
       - "127.0.0.1:8088:8088"
     environment:
       GORUSH_CORE_PORT: "8088"
+      # gorush defaults log.hide_token to true, which masks every token in the
+      # feedback webhook payload, so the sidecar could never prune a dead one.
+      GORUSH_LOG_HIDE_TOKEN: "false"
       GORUSH_IOS_ENABLED: ${GORUSH_IOS_ENABLED:-true}
       GORUSH_IOS_KEY_TYPE: p8
       GORUSH_IOS_KEY_BASE64: ${GORUSH_IOS_KEY_BASE64}

@@ -111,6 +111,11 @@ services:
       # (same reasoning as the sidecar's PORT).
       - key: PORT
         value: "8088"
+      # gorush defaults log.hide_token to true, which masks every token in the
+      # feedback webhook payload, so the sidecar could never prune a dead one.
+      # The cost: gorush's own logs carry full device tokens.
+      - key: GORUSH_LOG_HIDE_TOKEN
+        value: "false"
       - key: GORUSH_IOS_ENABLED
         value: "true"
       - key: GORUSH_IOS_KEY_TYPE

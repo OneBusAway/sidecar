@@ -870,6 +870,17 @@ authenticated webhook is not rate limited -- gorush reports one failure per
 dead token, and a mass uninstall arrives as a burst that a throttle would
 turn into lost prune signals.
 
+gorush must also run with `GORUSH_LOG_HIDE_TOKEN=false` (`render.yaml`,
+`render.staging.yaml`, and `compose.yaml` set it). gorush 1.22's
+`log.hide_token` defaults to `true` and replaces the first and last ten
+characters of every token with `*` in its log entries -- which are exactly
+what it posts to the webhook and returns inline -- so with the default no
+dead token ever matches a registration. A masked token is recognized (no real
+APNs or FCM token contains `*`): the webhook and the alert-push sender each
+log one `ERROR` naming the setting, and the webhook skips the delete. The
+trade-off is that gorush's own access and error logs then carry full device
+tokens.
+
 The same endpoint is where an alert push's asynchronous failures are counted:
 a payload carrying a `notif_id` of `alertpush:<push id>` increments that
 push's `failed_count` and records the token's hash, whether or not the

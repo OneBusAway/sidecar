@@ -33,3 +33,20 @@ func TestEntrypoint_OwnerOnlyUmask(t *testing.T) {
 		t.Fatal("umask 077 must come before litestream restore")
 	}
 }
+
+// TestGorushTokensUnmasked (SC-06): gorush defaults log.hide_token to true,
+// which masks the token in the feedback webhook payload and the inline
+// sync-mode logs alike, so the sidecar could never match a dead token to a
+// registration. Every manifest that runs gorush turns it off.
+func TestGorushTokensUnmasked(t *testing.T) {
+	t.Parallel()
+	for _, f := range []string{"render.yaml", "render.staging.yaml"} {
+		s := read(t, f)
+		if !strings.Contains(s, "- key: GORUSH_LOG_HIDE_TOKEN\n        value: \"false\"") {
+			t.Errorf("%s: gorush service does not set GORUSH_LOG_HIDE_TOKEN=\"false\"", f)
+		}
+	}
+	if s := read(t, "compose.yaml"); !strings.Contains(s, `GORUSH_LOG_HIDE_TOKEN: "false"`) {
+		t.Error(`compose.yaml: gorush does not set GORUSH_LOG_HIDE_TOKEN: "false"`)
+	}
+}
