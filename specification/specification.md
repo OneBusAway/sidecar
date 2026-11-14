@@ -739,6 +739,16 @@ some shipped clients POST to `update_path` rather than PATCH.
 Unknown `{id}` on amend → `404 {"error": …}`, the same shape as an unknown `survey_id`
 on create.
 
+Survey ids are sequential, so a create MUST check the survey the way the list does
+(§7.1): a survey that is unavailable or outside its window answers the same `404` as an
+unknown id. Amends are not gated on the window — a rider who answered the first question
+just before the survey closed can still send the rest. Implementations SHOULD also cap
+creates per `user_identifier` per survey (never amends, which are how the apps send
+every answer after the first); the reference allows 3 on a single-response survey
+(headroom for a create retried after its `201` was lost) and 50 when the survey
+`allows_multiple_responses`, answering `422` "User identifier has already responded to
+this survey" past it.
+
 ---
 
 ## 8. Ghost bus reports

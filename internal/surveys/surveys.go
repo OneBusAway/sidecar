@@ -178,6 +178,9 @@ type Repository interface {
 	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error) // ErrNotFound, ErrQuestionsFrozen, ErrUnknownQuestion
 	DeleteSurvey(ctx context.Context, id int64) error                                          // ErrNotFound, ErrHasResponses
 	CountResponses(ctx context.Context, surveyID int64) (int64, error)
+	// CountResponsesByUser counts one rider's responses to one survey (the
+	// per-rider cap on creates).
+	CountResponsesByUser(ctx context.Context, surveyID int64, userIdentifier string) (int64, error)
 
 	CreateResponse(ctx context.Context, in NewResponse, now time.Time) (Response, error)                    // ErrNotFound for the survey
 	GetResponse(ctx context.Context, publicID string) (Response, error)                                     // ErrNotFound
@@ -186,6 +189,23 @@ type Repository interface {
 	// GetResponseInRegion resolves one response through its survey's study's
 	// region, in a single query.
 	GetResponseInRegion(ctx context.Context, regionID int64, publicID string) (Response, error)
+}
+
+// ActiveAt reports whether the survey is one the rider-facing list shows at
+// now (spec §7.1): available, and inside its window when one is set, both
+// bounds inclusive at whole-second precision like ListActiveSurveys.
+func (s Survey) ActiveAt(now time.Time) bool {
+	if !s.Available {
+		return false
+	}
+	sec := now.Unix()
+	if s.StartTime != nil && s.StartTime.Unix() > sec {
+		return false
+	}
+	if s.EndTime != nil && s.EndTime.Unix() < sec {
+		return false
+	}
+	return true
 }
 
 // canonicalJSON is the one place json.RawMessage values are normalized, so

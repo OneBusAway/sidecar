@@ -566,6 +566,16 @@ func (r *surveyRepo) CountResponses(ctx context.Context, surveyID int64) (int64,
 	return n, nil
 }
 
+func (r *surveyRepo) CountResponsesByUser(ctx context.Context, surveyID int64, userIdentifier string) (int64, error) {
+	n, err := r.q.CountResponsesForSurveyByUser(ctx, gen.CountResponsesForSurveyByUserParams{
+		SurveyID: surveyID, UserIdentifier: userIdentifier,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count rider responses for survey %d: %w", surveyID, err)
+	}
+	return n, nil
+}
+
 func floatToNull(v *float64) sql.NullFloat64 {
 	if v == nil {
 		return sql.NullFloat64{}

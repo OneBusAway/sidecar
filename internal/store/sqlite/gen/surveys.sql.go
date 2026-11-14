@@ -21,6 +21,23 @@ func (q *Queries) CountResponsesForSurvey(ctx context.Context, surveyID int64) (
 	return count, err
 }
 
+const countResponsesForSurveyByUser = `-- name: CountResponsesForSurveyByUser :one
+SELECT COUNT(*) FROM survey_responses
+WHERE survey_id = ?1 AND user_identifier = ?2
+`
+
+type CountResponsesForSurveyByUserParams struct {
+	SurveyID       int64
+	UserIdentifier string
+}
+
+func (q *Queries) CountResponsesForSurveyByUser(ctx context.Context, arg CountResponsesForSurveyByUserParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countResponsesForSurveyByUser, arg.SurveyID, arg.UserIdentifier)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createResponse = `-- name: CreateResponse :one
 INSERT INTO survey_responses (
   survey_id, public_id, user_identifier, stop_identifier, stop_latitude, stop_longitude,

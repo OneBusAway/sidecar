@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -51,6 +52,36 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("UpdateStudyIsRegionScoped", func(t *testing.T) { testUpdateStudyRegionScoped(t, newStore) })
 	t.Run("CreateSurveyInRegionRejectsForeignStudy", func(t *testing.T) { testCreateSurveyInRegion(t, newStore) })
 	t.Run("GetResponseInRegionIsScoped", func(t *testing.T) { testGetResponseInRegion(t, newStore) })
+	t.Run("CountResponsesByUser", func(t *testing.T) { testCountResponsesByUser(t, newStore) })
+}
+
+// testCountResponsesByUser backs the per-rider response cap (SC-09).
+func testCountResponsesByUser(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	study := seedStudy(t, repo, regionRepo, 1)
+	a := mustCreateSurvey(t, repo, study.ID, surveyDef("a"))
+	b := mustCreateSurvey(t, repo, study.ID, surveyDef("b"))
+	for i, in := range []surveys.NewResponse{
+		{SurveyID: a.ID, UserIdentifier: "rider-1"},
+		{SurveyID: a.ID, UserIdentifier: "rider-1"},
+		{SurveyID: a.ID, UserIdentifier: "rider-2"},
+		{SurveyID: b.ID, UserIdentifier: "rider-1"},
+	} {
+		in.PublicID = fmt.Sprintf("pub-%d", i)
+		if _, err := repo.CreateResponse(ctx, in, base); err != nil {
+			t.Fatalf("CreateResponse %d: %v", i, err)
+		}
+	}
+	for _, tc := range []struct {
+		survey int64
+		user   string
+		want   int64
+	}{{a.ID, "rider-1", 2}, {a.ID, "rider-2", 1}, {b.ID, "rider-1", 1}, {b.ID, "rider-2", 0}} {
+		if got, err := repo.CountResponsesByUser(ctx, tc.survey, tc.user); err != nil || got != tc.want {
+			t.Errorf("CountResponsesByUser(%d, %s) = %d, %v; want %d", tc.survey, tc.user, got, err, tc.want)
+		}
+	}
 }
 
 func surveyDef(name string) surveys.Definition {

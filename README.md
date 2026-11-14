@@ -302,6 +302,14 @@ survey response endpoints the apps submit to.
 - `POST|PUT|PATCH /api/v1/survey_responses/{id}` — merges more answers into a
   response by `question_id`.
 
+A create against a survey the list would not show (unavailable, not started,
+or ended) is the same `404` as an unknown survey id. One `user_identifier` may
+create at most 3 responses to a survey (50 if it `allows_multiple_responses`);
+past that the create is a `422` ("User identifier has already responded to this
+survey"). Amends are never counted or window-gated, so the apps' flow -- create
+with the first answer, then amend with the rest -- is unaffected. Imported
+responses (`sidecar-admin import`) bypass both rules: they are history.
+
 The write endpoints share one throttle of 60 requests per minute per source
 address. The throttle keys on the connection's remote address: behind a
 reverse proxy that does not preserve client addresses, every rider shares one

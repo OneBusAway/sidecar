@@ -1700,6 +1700,9 @@ func (failingSurveys) DeleteSurvey(context.Context, int64) error { return errSto
 func (failingSurveys) CountResponses(context.Context, int64) (int64, error) {
 	return 0, errStoreBroken
 }
+func (failingSurveys) CountResponsesByUser(context.Context, int64, string) (int64, error) {
+	return 0, errStoreBroken
+}
 func (failingSurveys) CreateResponse(context.Context, surveys.NewResponse, time.Time) (surveys.Response, error) {
 	return surveys.Response{}, errStoreBroken
 }

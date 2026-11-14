@@ -116,3 +116,7 @@ RETURNING *;
 -- name: ListResponsesBySurvey :many
 SELECT * FROM survey_responses WHERE survey_id = @survey_id
 ORDER BY created_at ASC, id ASC;
+
+-- name: CountResponsesForSurveyByUser :one
+SELECT COUNT(*) FROM survey_responses
+WHERE survey_id = @survey_id AND user_identifier = @user_identifier;
