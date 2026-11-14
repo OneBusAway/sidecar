@@ -155,12 +155,23 @@ func quote(s string) string { return `"` + s + `"` }
 // the test if it is absent.
 func responseSessionCookie(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
+	// Over HTTPS the live cookie is the __Host- one and the plain name is
+	// only cleared (SC-25), so a clearing Set-Cookie never counts here.
+	// Logout's clearing form is still returned when it is all there is.
+	var clearing *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == auth.CookieName {
+		if c.Name != auth.CookieName && c.Name != auth.SecureCookieName {
+			continue
+		}
+		if c.MaxAge >= 0 {
 			return c
 		}
+		clearing = c
 	}
-	t.Fatalf("no %s cookie in response; Set-Cookie = %v", auth.CookieName, rec.Header().Values("Set-Cookie"))
+	if clearing != nil {
+		return clearing
+	}
+	t.Fatalf("no live session cookie in response; Set-Cookie = %v", rec.Header().Values("Set-Cookie"))
 	return nil
 }
 
@@ -199,8 +210,8 @@ func TestLogin_Success(t *testing.T) {
 	if want := int(auth.SessionLifetime / time.Second); c.MaxAge != want {
 		t.Errorf("Max-Age = %d, want %d", c.MaxAge, want)
 	}
-	if c.MaxAge != 2592000 {
-		t.Errorf("Max-Age = %d, want 2592000 (30 days)", c.MaxAge)
+	if c.MaxAge != 86400 {
+		t.Errorf("Max-Age = %d, want 86400 (the 24-hour default lifetime)", c.MaxAge)
 	}
 	if c.Secure {
 		t.Error("Secure set on a plain-HTTP request; the cookie would never be sent back")
@@ -710,7 +721,7 @@ func (f *loginFixture) do(method, target string, cookie *http.Cookie) *httptest.
 
 // TestLogout_DeletesSessionAndClearsCookie: the session row must actually go
 // away -- clearing the cookie alone would leave a live token that anyone
-// holding a copy could keep using for 30 days.
+// holding a copy could keep using until it expired.
 func TestLogout_DeletesSessionAndClearsCookie(t *testing.T) {
 	t.Parallel()
 

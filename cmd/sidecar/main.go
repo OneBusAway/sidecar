@@ -27,6 +27,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/donations"
@@ -139,7 +140,10 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		"Pirate Weather API key; without it the weather endpoint returns 403")
 	webhookSecret := fs.String("gorush-webhook-secret", envOrDefault("SIDECAR_GORUSH_WEBHOOK_SECRET", ""),
 		"shared secret gorush must send as a bearer token on POST /webhooks/gorush; "+
-			"unset leaves the webhook open but rate limited")
+			"required with --gorush-url unless --allow-unauthenticated-gorush-webhook is set")
+	allowOpenWebhook := fs.Bool("allow-unauthenticated-gorush-webhook", envBool("SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK"),
+		"boot with --gorush-url but no --gorush-webhook-secret, leaving POST /webhooks/gorush open (rate limited); "+
+			"for local experiments and test harnesses only")
 	gorushURL := fs.String("gorush-url", envOrDefault("SIDECAR_GORUSH_URL", ""),
 		"base URL of the gorush push gateway; without it alarms are stored but never fire")
 	trustedProxy := fs.String("trusted-proxy", envOrDefault("SIDECAR_TRUSTED_PROXY", ""),
@@ -165,6 +169,10 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		"id of the live Stripe product recurring donations bill against (prod_...)")
 	stripeTestProduct := fs.String("stripe-test-recurring-product-id", envOrDefault("SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID", ""),
 		"id of the test-mode Stripe product recurring donations bill against")
+	sessionLifetime := fs.String("admin-session-lifetime", envOrDefault("SIDECAR_ADMIN_SESSION_LIFETIME", auth.SessionLifetime.String()),
+		"absolute lifetime of an admin UI session from sign-in; activity never extends it")
+	sessionIdle := fs.String("admin-session-idle-timeout", envOrDefault("SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT", auth.SessionIdleTimeout.String()),
+		"an admin UI session unused for this long expires; must not exceed --admin-session-lifetime")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
@@ -193,6 +201,15 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// in the sidecar's logs to say why. Reject it here, where it is visible.
 	if strings.ContainsAny(*webhookSecret, ": \t\r\n") {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
+	}
+
+	if err = checkWebhookSecret(*gorushURL, *webhookSecret, *allowOpenWebhook); err != nil {
+		return err
+	}
+
+	sessionTTL, sessionIdleTTL, err := parseSessionDurations(*sessionLifetime, *sessionIdle)
+	if err != nil {
+		return err
 	}
 
 	// --refresh=0 is a natural way to try to disable directory sync, and
@@ -343,6 +360,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
 	deps.ClientIP = resolveClientIP
+	deps.SessionLifetime, deps.SessionIdleTimeout = sessionTTL, sessionIdleTTL
 	deps.Donations, err = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
 	if err != nil {
 		return err
@@ -417,6 +435,8 @@ func leaseHolder(logger *slog.Logger) string {
 // failures against pushes the CLI enqueued (design spec §2.12).
 func buildDeps(store *sqlite.Store, logger *slog.Logger, obaAPIKey, pirateKey, webhookSecret string, waker alertpush.Waker) httpapi.Deps {
 	if webhookSecret == "" {
+		// Reachable with gorush configured only through the explicit
+		// --allow-unauthenticated-gorush-webhook opt-in (checkWebhookSecret).
 		logger.Warn("no --gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET set; " +
 			"POST /webhooks/gorush is open to anyone (rate limited); restrict it at the proxy")
 	}
@@ -499,6 +519,48 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 		}
 		return <-errCh
 	}
+}
+
+// checkWebhookSecret fails closed (SC-11): with gorush configured, the
+// feedback webhook prunes registrations in every region and writes alert
+// push accounting on whatever it is sent, so it must be authenticated. An
+// open webhook is still possible, for local experiments and test harnesses,
+// but only by saying so.
+func checkWebhookSecret(gorushURL, secret string, allowOpen bool) error {
+	if gorushURL == "" || secret != "" || allowOpen {
+		return nil
+	}
+	return errors.New("--gorush-url/SIDECAR_GORUSH_URL is set but --gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET is not: " +
+		"set the secret (and the same value in gorush's GORUSH_CORE_FEEDBACK_HEADER as authorization:<secret>), " +
+		"or pass --allow-unauthenticated-gorush-webhook (SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true) to run with the webhook open")
+}
+
+// envBool reads a boolean environment variable for a flag default: true
+// for 1/t/true/yes (any case), false otherwise.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "t", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// parseSessionDurations validates the two admin session settings (SC-25):
+// both positive, and the idle timeout no longer than the lifetime (a longer
+// one could never fire, so it is almost certainly the two values swapped).
+func parseSessionDurations(lifetime, idle string) (time.Duration, time.Duration, error) {
+	l, err := time.ParseDuration(lifetime)
+	if err != nil || l <= 0 {
+		return 0, 0, fmt.Errorf("--admin-session-lifetime/SIDECAR_ADMIN_SESSION_LIFETIME must be a positive duration, got %q", lifetime)
+	}
+	i, err := time.ParseDuration(idle)
+	if err != nil || i <= 0 {
+		return 0, 0, fmt.Errorf("--admin-session-idle-timeout/SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT must be a positive duration, got %q", idle)
+	}
+	if i > l {
+		return 0, 0, fmt.Errorf("--admin-session-idle-timeout (%s) must not exceed --admin-session-lifetime (%s)", i, l)
+	}
+	return l, i, nil
 }
 
 // envOrDefault returns the value of the environment variable key, or def if

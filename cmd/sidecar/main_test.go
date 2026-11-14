@@ -89,6 +89,26 @@ func TestRun_ArgHandling(t *testing.T) {
 			wantStdoutLen: 0,
 		},
 		{
+			name:          "non-positive admin session lifetime returns an error",
+			args:          []string{"--admin-session-lifetime=0"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			name:          "unparseable admin session idle timeout returns an error",
+			args:          []string{"--admin-session-idle-timeout=soon"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
+			// An idle timeout longer than the lifetime can never fire; it is
+			// almost certainly the two values swapped.
+			name:          "idle timeout longer than the session lifetime returns an error",
+			args:          []string{"--admin-session-lifetime=1h", "--admin-session-idle-timeout=2h"},
+			wantErr:       true,
+			wantStdoutLen: 0,
+		},
+		{
 			name:          "unknown flag returns an error and writes nothing to stdout",
 			args:          []string{"--bogus-flag"},
 			wantErr:       true,
@@ -562,5 +582,61 @@ func TestNewDonations(t *testing.T) {
 	first, second := svc.NewID(), svc.NewID()
 	if svc.Test == nil || first == "" || first == second {
 		t.Fatalf("both keys: %+v ids=%q,%q", svc, first, second)
+	}
+}
+
+// TestRun_AdminSessionFlags pins SC-25's two session settings: they exist,
+// and a bad value is rejected at boot by name (not as an unknown flag).
+func TestRun_AdminSessionFlags(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	if err := run(&stdout, &stderr, []string{"--help"}); err != nil {
+		t.Fatalf("--help: %v", err)
+	}
+	for _, flag := range []string{"admin-session-lifetime", "admin-session-idle-timeout"} {
+		if !strings.Contains(stdout.String(), flag) {
+			t.Errorf("--help does not list --%s", flag)
+		}
+	}
+	for _, args := range [][]string{
+		{"--admin-session-lifetime=0"},
+		{"--admin-session-idle-timeout=soon"},
+		{"--admin-session-lifetime=1h", "--admin-session-idle-timeout=2h"},
+	} {
+		err := run(&bytes.Buffer{}, &bytes.Buffer{}, args)
+		if err == nil || !strings.Contains(err.Error(), "admin-session") {
+			t.Errorf("run(%v) = %v, want an error naming the admin session setting", args, err)
+		}
+	}
+}
+
+// TestRun_GorushWithoutWebhookSecretFailsClosed pins SC-11: with gorush
+// configured, the feedback webhook deletes registrations and writes push
+// accounting on whatever it is sent, so booting without its shared secret
+// is refused unless the operator opts in to an open webhook explicitly.
+func TestRun_GorushWithoutWebhookSecretFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	run1 := func(args ...string) error { return run(&bytes.Buffer{}, &bytes.Buffer{}, args) }
+
+	// --log-format=yaml is a backstop: if the check is missing, run fails on
+	// it instead of booting a server that would hang the test.
+	err := run1("--gorush-url=http://127.0.0.1:1", "--log-format=yaml")
+	if err == nil || !strings.Contains(err.Error(), "--gorush-webhook-secret") ||
+		!strings.Contains(err.Error(), "--allow-unauthenticated-gorush-webhook") {
+		t.Fatalf("gorush without a webhook secret: err = %v, want a refusal naming the secret and the opt-in", err)
+	}
+	// Each accepted configuration gets past the check and stops at the
+	// deliberately bad --log-format that follows it, so nothing binds.
+	for name, args := range map[string][]string{
+		"secret set":         {"--gorush-url=http://127.0.0.1:1", "--gorush-webhook-secret=s3cret"},
+		"explicit opt-in":    {"--gorush-url=http://127.0.0.1:1", "--allow-unauthenticated-gorush-webhook"},
+		"no gorush, no hook": {},
+	} {
+		err := run1(append(args, "--log-format=yaml")...)
+		if err == nil || !strings.Contains(err.Error(), "log-format") {
+			t.Errorf("%s: err = %v, want it to reach the log-format check", name, err)
+		}
 	}
 }

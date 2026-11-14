@@ -574,6 +574,14 @@ Without this loop things still *mostly* work — alarms self-destruct after firi
 activities die at expiry — but you'll push into the void for hours and your reach counts
 rot.
 
+The feedback channel deletes rows on a caller-supplied token, so it MUST be
+authenticated whenever a push transport is configured (the reference refuses to start
+with gorush configured and no shared secret unless an explicit insecure opt-in is
+given). Treat its contents as untrusted: the reference caps recorded failures per send
+at the audience the send went to, ignores feedback for sends completed more than 24
+hours earlier, and stores failure reasons cut to 120 characters with control characters
+removed.
+
 ### 6.6 APNs specifics
 
 Live Activity pushes have hard platform requirements; getting these wrong produces a

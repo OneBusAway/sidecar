@@ -128,7 +128,8 @@ func (h *feedbackHandler) recordAlertPushFailure(r *http.Request, fb gorushFeedb
 	if !ok {
 		return
 	}
-	if _, err := h.deps.AlertPushes.RecordFailure(r.Context(), pushID, fb.Token, fb.Error, h.deps.Now()); err != nil {
+	reason := alertpush.CleanFailureReason(fb.Error)
+	if _, err := h.deps.AlertPushes.RecordFailure(r.Context(), pushID, fb.Token, reason, h.deps.Now()); err != nil {
 		h.deps.Logger.Info("httpapi: alert push feedback not recorded",
 			"push_id", pushID, "err", sanitizeToken(err, fb.Token))
 	}

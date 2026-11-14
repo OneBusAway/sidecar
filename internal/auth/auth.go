@@ -10,12 +10,23 @@ import (
 	"time"
 )
 
-// CookieName is the session cookie the HTTP layer sets and reads.
+// CookieName is the session cookie the HTTP layer sets and reads on plain
+// HTTP (local development).
 const CookieName = "sidecar_session"
 
-// SessionLifetime is the absolute session duration; there is no sliding
-// renewal (spec section 4.2).
-const SessionLifetime = 30 * 24 * time.Hour
+// SecureCookieName is the session cookie over HTTPS (SC-25). The __Host-
+// prefix makes the browser refuse it unless it is Secure, Path=/ and carries
+// no Domain, so a sibling subdomain or a plain-HTTP response cannot plant or
+// overwrite it (session fixation by cookie tossing).
+const SecureCookieName = "__Host-" + CookieName
+
+// SessionLifetime is the default absolute session duration, measured from
+// login; activity never extends a session past it (SC-25).
+const SessionLifetime = 24 * time.Hour
+
+// SessionIdleTimeout is the default idle timeout: a session unused for this
+// long expires, however much of its absolute lifetime remains (SC-25).
+const SessionIdleTimeout = 2 * time.Hour
 
 // ErrNotFound is returned when a user or session lookup finds no live row.
 var ErrNotFound = errors.New("user or session not found")
@@ -94,4 +105,11 @@ type Repository interface {
 	// does not need it: UpdatePassword revokes the sessions itself.
 	DeleteUserSessions(ctx context.Context, userID int64) (int64, error)
 	DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error)
+	// ExtendSession sets a session's expires_at, forward or back; it is the
+	// write behind the idle timeout (SC-25). created_at never moves. An
+	// unknown token is ErrNotFound.
+	ExtendSession(ctx context.Context, tokenHash string, expiresAt time.Time) error
+	// ListSessions returns every stored session, oldest first (then by
+	// token hash), expired rows included until something reaps them.
+	ListSessions(ctx context.Context) ([]Session, error)
 }

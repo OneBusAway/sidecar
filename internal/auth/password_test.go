@@ -92,7 +92,7 @@ func TestVerifyRejectsZeroParams(t *testing.T) {
 // An empty hash segment decodes to zero bytes without error. Deriving a
 // zero-length key panics inside x/crypto, so it must be rejected as malformed.
 func TestVerifyRejectsEmptyHash(t *testing.T) {
-	phc := "$argon2id$v=19$m=19456,t=2,p=1$AAAA$"
+	phc := "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$"
 	_, err := VerifyPassword(phc, "x")
 	if err == nil || err.Error() != "auth: malformed hash value" {
 		t.Errorf("VerifyPassword with empty hash segment: got %v, want malformed hash value", err)
@@ -132,4 +132,40 @@ func hashWithParams(password string, m uint32, t uint32, p uint8) string {
 		panic(err) // test-only helper; crypto/rand failure is unrecoverable anyway
 	}
 	return encodePHC(password, salt, m, t, p)
+}
+
+// TestVerifyRejectsOversizedParameters pins SC-26: VerifyPassword runs
+// whatever cost the stored PHC string names, so an unbounded m/t/p (or an
+// enormous salt or key) in a row is a memory/CPU bomb the next login
+// detonates. Each case must be refused before any key derivation -- the m
+// case would try to allocate 4 GiB if it were not.
+func TestVerifyRejectsOversizedParameters(t *testing.T) {
+	salt := "AAAAAAAAAAAAAAAAAAAAAA"                     // 16 bytes
+	key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" // 32 bytes
+	long := strings.Repeat("A", 4096)
+	cases := map[string]string{
+		"memory 4 GiB":   "$argon2id$v=19$m=4194304,t=2,p=1$" + salt + "$" + key,
+		"memory > cap":   "$argon2id$v=19$m=65537,t=2,p=1$" + salt + "$" + key,
+		"time 1000":      "$argon2id$v=19$m=19456,t=1000,p=1$" + salt + "$" + key,
+		"threads 255":    "$argon2id$v=19$m=19456,t=2,p=255$" + salt + "$" + key,
+		"salt 3 KiB":     "$argon2id$v=19$m=19456,t=2,p=1$" + long + "$" + key,
+		"key 3 KiB":      "$argon2id$v=19$m=19456,t=2,p=1$" + salt + "$" + long,
+		"short salt":     "$argon2id$v=19$m=19456,t=2,p=1$AAAA$" + key,
+		"short key":      "$argon2id$v=19$m=19456,t=2,p=1$" + salt + "$AAAA",
+		"whole string >": "$argon2id$v=19$m=19456,t=2,p=1$" + salt + "$" + key + long,
+	}
+	for name, phc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if ok, err := VerifyPassword(phc, "whatever password"); err == nil || ok {
+				t.Fatalf("VerifyPassword = %v, %v; want an error", ok, err)
+			}
+		})
+	}
+
+	// The bounds must leave room above today's defaults, so raising them
+	// later (the reason the parameters live in the row) still verifies.
+	raised := hashWithParams("raised password!", 2*argonMemoryKiB, 3, 2)
+	if ok, err := VerifyPassword(raised, "raised password!"); err != nil || !ok {
+		t.Fatalf("raised-cost hash: ok=%v err=%v; want a match", ok, err)
+	}
 }

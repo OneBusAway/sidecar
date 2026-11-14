@@ -64,6 +64,27 @@ func (l *Limiter) Allow(key string, now time.Time) bool {
 	return true
 }
 
+// Count reports how many admissions key has spent in its current window at
+// now, without counting anything. Zero for an unseen key or an expired
+// window.
+func (l *Limiter) Count(key string, now time.Time) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.buckets[key]
+	if b == nil || now.Sub(b.start) >= l.window {
+		return 0
+	}
+	return b.count
+}
+
+// Exhausted reports whether Allow would deny key at now, without counting
+// anything. It is the check half of a charge-on-failure throttle (the admin
+// login, SC-02): refuse up front when the budget is spent, and call Allow
+// only once the expensive operation has actually failed.
+func (l *Limiter) Exhausted(key string, now time.Time) bool {
+	return l.Count(key, now) >= l.limit
+}
+
 // Len reports the number of live buckets; test-only observability.
 func (l *Limiter) Len() int {
 	l.mu.Lock()

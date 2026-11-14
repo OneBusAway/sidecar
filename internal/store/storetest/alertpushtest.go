@@ -31,6 +31,8 @@ func RunAlertPushRepository(t *testing.T, newStore newAlertPushStoreFunc) {
 	t.Run("ClaimTakesQueuedAndStuckOnly", func(t *testing.T) { testAlertPushClaim(t, newStore) })
 	t.Run("AdvanceCursorIsConditional", func(t *testing.T) { testAlertPushAdvanceCursor(t, newStore) })
 	t.Run("RecordFailureDedupsAndCounts", func(t *testing.T) { testAlertPushRecordFailure(t, newStore) })
+	t.Run("RecordFailureIsBounded", func(t *testing.T) { testAlertPushRecordFailureBounded(t, newStore) })
+	t.Run("CountReachingAllSince", func(t *testing.T) { testAlertPushCountReachingAllSince(t, newStore) })
 	t.Run("RecordAttemptAndMarkCompleted", func(t *testing.T) { testAlertPushAttemptsAndCompletion(t, newStore) })
 	t.Run("CancelTransitions", func(t *testing.T) { testAlertPushCancel(t, newStore) })
 	t.Run("CascadesWithAlert", func(t *testing.T) { testAlertPushCascade(t, newStore) })
@@ -68,6 +70,15 @@ func idsOf(ps []alertpush.Push) []int64 {
 
 // createPush creates one push for a and fails the test if the repository
 // refuses -- the fixture path, not an assertion.
+// setDeviceCount records the audience size the dispatcher writes at send
+// start; RecordFailure never counts more failures than this (SC-11).
+func setDeviceCount(t *testing.T, repo alertpush.Repository, id, n int64, now time.Time) {
+	t.Helper()
+	if err := repo.SetDeviceCount(context.Background(), id, n, now); err != nil {
+		t.Fatalf("SetDeviceCount: %v", err)
+	}
+}
+
 func createPush(t *testing.T, repo alertpush.Repository, a alerts.Alert, now time.Time) alertpush.Push {
 	t.Helper()
 	p, err := repo.Create(context.Background(), newPushFor(a), now)
@@ -211,6 +222,7 @@ func testAlertPushListByAlert(t *testing.T, newStore newAlertPushStoreFunc) {
 	completePush(t, repo, p1.ID)
 	p2 := createPush(t, repo, a, base.Add(time.Minute))
 	createPush(t, repo, b, base)
+	setDeviceCount(t, repo, p2.ID, 1, base.Add(time.Minute))
 
 	if _, err := repo.RecordFailure(ctx, p2.ID, "tok", "Unregistered", base); err != nil {
 		t.Fatalf(recordFailureFmt, err)
@@ -258,6 +270,7 @@ func testAlertPushClaim(t *testing.T, newStore newAlertPushStoreFunc) {
 	}
 	// A failure on `stale` gives the FailureReasons assertion below something
 	// to find if Claim ever starts attaching the rollup.
+	setDeviceCount(t, repo, stale.ID, 1, base)
 	if _, err := repo.RecordFailure(ctx, stale.ID, "tok", "Unregistered", base); err != nil {
 		t.Fatalf(recordFailureFmt, err)
 	}
@@ -351,6 +364,7 @@ func testAlertPushRecordFailure(t *testing.T, newStore newAlertPushStoreFunc) {
 	ctx := context.Background()
 	a := seedPushAlert(t, alertsRepo, regionsRepo, 1)
 	p := createPush(t, repo, a, base)
+	setDeviceCount(t, repo, p.ID, 10, base)
 
 	for i, c := range []struct {
 		token, reason string
@@ -469,6 +483,7 @@ func testAlertPushCascade(t *testing.T, newStore newAlertPushStoreFunc) {
 	ctx := context.Background()
 	a := seedPushAlert(t, alertsRepo, regionsRepo, 1)
 	p := createPush(t, repo, a, base)
+	setDeviceCount(t, repo, p.ID, 1, base)
 
 	if _, err := repo.RecordFailure(ctx, p.ID, "t", "Unregistered", base); err != nil {
 		t.Fatalf(recordFailureFmt, err)
@@ -478,5 +493,87 @@ func testAlertPushCascade(t *testing.T, newStore newAlertPushStoreFunc) {
 	}
 	if _, err := repo.Get(ctx, p.ID); !errors.Is(err, alertpush.ErrNotFound) {
 		t.Errorf("Get after alert delete = %v, want ErrNotFound (cascade)", err)
+	}
+}
+
+// testAlertPushRecordFailureBounded pins SC-11's accounting bounds. The
+// feedback webhook is the one place an outside caller writes these rows, so
+// failed_count never exceeds the audience the push actually went to
+// (device_count), and feedback for a push that completed more than
+// alertpush.FeedbackWindow ago is ignored rather than counted. Both refusals
+// are (false, nil): gorush fires once and never retries, so they are not
+// errors.
+func testAlertPushRecordFailureBounded(t *testing.T, newStore newAlertPushStoreFunc) {
+	repo, alertsRepo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	a := seedPushAlert(t, alertsRepo, regionsRepo, 1)
+	p := createPush(t, repo, a, base)
+
+	// Before the dispatcher records an audience, nothing can be counted.
+	if isNew, err := repo.RecordFailure(ctx, p.ID, "early", "Unregistered", base); err != nil || isNew {
+		t.Errorf("RecordFailure before SetDeviceCount = %v, %v; want false, nil", isNew, err)
+	}
+	setDeviceCount(t, repo, p.ID, 2, base)
+	for i, tok := range []string{"t1", "t2", "t3", "t4"} {
+		isNew, err := repo.RecordFailure(ctx, p.ID, tok, "Unregistered", base)
+		if err != nil || isNew != (i < 2) {
+			t.Errorf("RecordFailure %s = %v, %v; want %v, nil", tok, isNew, err, i < 2)
+		}
+	}
+	if got := getPush(t, repo, p.ID); got.FailedCount != 2 || len(got.FailureReasons) != 1 || got.FailureReasons[0].Count != 2 {
+		t.Errorf("after 4 distinct bounces on a 2-device push: failed_count = %d, reasons = %v; want 2 and one row of 2",
+			got.FailedCount, got.FailureReasons)
+	}
+
+	// Staleness: a completed push accepts feedback inside the window only.
+	b := seedPushAlert(t, alertsRepo, regionsRepo, 2)
+	q := createPush(t, repo, b, base)
+	setDeviceCount(t, repo, q.ID, 10, base)
+	claimPushes(t, repo, base, base.Add(-time.Hour))
+	markCompleted(t, repo, q.ID, alertpush.StatusSent, "", base)
+	if isNew, err := repo.RecordFailure(ctx, q.ID, "late-ok", "Unregistered", base.Add(alertpush.FeedbackWindow-time.Second)); err != nil || !isNew {
+		t.Errorf("feedback inside the window = %v, %v; want true, nil", isNew, err)
+	}
+	if isNew, err := repo.RecordFailure(ctx, q.ID, "too-late", "Unregistered", base.Add(alertpush.FeedbackWindow+time.Second)); err != nil || isNew {
+		t.Errorf("feedback past the window = %v, %v; want false, nil", isNew, err)
+	}
+	if got := getPush(t, repo, q.ID); got.FailedCount != 1 {
+		t.Errorf("failed_count after one in-window and one stale bounce = %d, want 1", got.FailedCount)
+	}
+}
+
+// testAlertPushCountReachingAllSince backs the SC-27 region cap: "all"
+// pushes in the region at or after since, minus failed/canceled pushes that
+// never submitted a batch. Test-audience pushes and other regions never count.
+func testAlertPushCountReachingAllSince(t *testing.T, newStore newAlertPushStoreFunc) {
+	repo, alertsRepo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	a := seedPushAlert(t, alertsRepo, regionsRepo, 1)
+	b := seedPushAlert(t, alertsRepo, regionsRepo, 2)
+
+	old := createPush(t, repo, a, base.Add(-2*time.Hour))
+	claimPushes(t, repo, base.Add(-2*time.Hour), base.Add(-3*time.Hour))
+	advanceCursor(t, repo, old.ID, 0, 1, 1, base.Add(-2*time.Hour))
+	markCompleted(t, repo, old.ID, alertpush.StatusSent, "", base.Add(-2*time.Hour))
+
+	unsent := createPush(t, repo, a, base)
+	if err := repo.Cancel(ctx, unsent.ID, base); err != nil {
+		t.Fatalf(cancelFailFmt, err)
+	}
+	createPush(t, repo, a, base.Add(time.Minute)) // queued: counts
+	if _, err := repo.Create(ctx, alertpush.NewPush{AlertID: b.ID, RegionID: b.RegionID, Audience: alertpush.AudienceTest,
+		Messages: alertpush.Messages{"en": {Title: "t", Body: "b"}}}, base); err != nil {
+		t.Fatalf("Create test push: %v", err)
+	}
+
+	n, err := repo.CountReachingAllSince(ctx, a.RegionID, base.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CountReachingAllSince: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountReachingAllSince = %d, want 1 (the queued push; not the old one, the unsent cancel, or a test push)", n)
+	}
+	if n, err = repo.CountReachingAllSince(ctx, a.RegionID, base.Add(-3*time.Hour)); err != nil || n != 2 {
+		t.Errorf("CountReachingAllSince over 3h = %d, %v; want 2", n, err)
 	}
 }

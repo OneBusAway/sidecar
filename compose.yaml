@@ -20,7 +20,11 @@ services:
       SIDECAR_GORUSH_URL: http://gorush:8088
       SIDECAR_OBA_API_KEY: ${SIDECAR_OBA_API_KEY:-}
       SIDECAR_PIRATE_WEATHER_KEY: ${SIDECAR_PIRATE_WEATHER_KEY:-}
+      # Required with SIDECAR_GORUSH_URL (the sidecar refuses to boot without
+      # it); gorush below sends the same value. .env.example ships a
+      # local-only placeholder.
       SIDECAR_GORUSH_WEBHOOK_SECRET: ${SIDECAR_GORUSH_WEBHOOK_SECRET:-}
+      SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK: ${SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK:-}
       SIDECAR_APNS_TOPIC: ${SIDECAR_APNS_TOPIC:-}
     depends_on:
       gorush:

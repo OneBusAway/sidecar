@@ -190,6 +190,17 @@ unknown push, or a `pushId` belonging to a different alert, and `409` for each
 precondition (unpublished alert, a push already in flight, empty audience) and
 for canceling a push that has already finished.
 
+`POST` also applies a deliberately loose cooldown to `all`-audience pushes,
+answered as `409` with the reason in the body ("push cooldown: …", which
+OBACloud shows to the operator as the reason the push was not sent): the
+same alert cannot be pushed to everyone again within **1 minute** of its
+last such push (a double submit or a loop; a correction sent a few minutes
+later goes through), and a region cannot send more than **20** `all` pushes
+in a trailing hour. Pushes that were canceled or failed before submitting a
+single batch do not count. `test`-audience sends -- including every send of
+a test alert -- are never throttled, and `sidecar-admin alert push` (an
+operator with database access) is not throttled at all.
+
 **These four routes are registered only when `SIDECAR_GORUSH_URL` is set.**
 Without a transport the admin UI reports that push notifications are not
 configured on this server, rather than letting an operator queue a send that
@@ -545,14 +556,17 @@ export SIDECAR_APNS_TOPIC=org.onebusaway.iphone
 
 # Shared secret gorush must send on the feedback webhook, as either
 # `Authorization: Bearer <secret>` or a bare `Authorization: <secret>`.
-# Leave it unset only if your gorush cannot send a header: the webhook then
-# stays open (and rate limited), and should be restricted at the proxy.
-# gorush splits its header setting on ':', so the value must contain no ':'
-# or whitespace; the server refuses to start otherwise.
+# Required whenever SIDECAR_GORUSH_URL is set: the server refuses to start
+# with gorush configured and no secret, unless you opt in to an open
+# webhook with SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true (local
+# experiments and test harnesses only; it is then rate limited and should
+# be restricted at the proxy). gorush splits its header setting on ':', so
+# the value must contain no ':' or whitespace; the server refuses to start
+# otherwise.
 export SIDECAR_GORUSH_WEBHOOK_SECRET=...
 ```
 
-(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url`/`--apns-topic`/`--gorush-webhook-secret` are the equivalent `sidecar` flags.)
+(`--oba-api-key`/`--pirate-weather-key`/`--gorush-url`/`--apns-topic`/`--gorush-webhook-secret`/`--allow-unauthenticated-gorush-webhook` are the equivalent `sidecar` flags.)
 
 A region can also carry its own OneBusAway REST API key, overriding
 `SIDECAR_OBA_API_KEY` for that region alone -- set it the same way as the other
@@ -636,6 +650,91 @@ or a deep link always has a region to put in the API path. There is no
 compatibility shim for the old shape -- a bookmark to `/admin/alerts/42`
 from before this change shows the SPA's ordinary not-found page rather than
 redirecting.
+
+### Admin API hardening
+
+- **Sign-in throttling.** `POST /api/admin/v1/session` charges every
+  *failed* sign-in to two fixed 15-minute budgets: 10 per client address
+  (the same address the other per-IP throttles use; see `SIDECAR_TRUSTED_PROXY`
+  under Deployment) and 20 per username (normalized, so `Admin` and `admin`
+  share one). A spent budget answers `429` with a `Retry-After` header and
+  the SPA shows "too many failed sign-in attempts; try again later" --
+  decided before any password hashing, and identically for real and unknown
+  usernames. Successful sign-ins are never charged. Password verification
+  itself runs at most 2 at a time process-wide (each argon2id derivation
+  holds ~19 MiB); a sign-in that waits more than 10 seconds for a slot gets
+  `503`. Bearer-key authentication is unaffected: it keeps its own
+  failure-only bucket (60/minute per address).
+
+  The per-username budget is a throttle, not a lockout, by design. Once it
+  is spent, only addresses that have themselves failed in the window are
+  refused; an address with a clean record still gets its attempt checked.
+  So someone hammering an operator's username from many addresses cannot
+  keep that operator out -- the operator signs in from any address that has
+  not been guessing -- and the price is that an attacker gets one guess per
+  fresh address per window once the username budget is spent (each failure
+  marks that address). An operator who shares a NAT address with the
+  attacker, or who mistypes during an attack, waits out the 15-minute
+  window.
+- **Session lifetime.** An admin UI session ends 24 hours after sign-in
+  however busy it is (`--admin-session-lifetime` /
+  `SIDECAR_ADMIN_SESSION_LIFETIME`), and earlier if it goes unused for 2
+  hours (`--admin-session-idle-timeout` /
+  `SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT`, at most the lifetime). Activity
+  slides the idle deadline, written at most once per twentieth of the idle
+  window. The lifetime is checked against each session's sign-in time on
+  every request, so lowering it -- or upgrading from the old 30-day,
+  no-idle-timeout sessions -- ends existing sessions that are already older.
+- **`__Host-` cookie over HTTPS.** Over HTTPS (direct TLS or
+  `X-Forwarded-Proto: https` from the proxy) the session cookie is
+  `__Host-sidecar_session`: always `Secure`, `Path=/`, no `Domain`, so a
+  sibling subdomain or a plain-HTTP response cannot plant or overwrite it.
+  Plain-HTTP development keeps `sidecar_session` (browsers reject a
+  non-`Secure` `__Host-` cookie). Over HTTPS only the prefixed name
+  authenticates -- accepting the old name there would reopen the hole the
+  prefix closes -- so **every operator signs in once more after upgrading**;
+  the old cookie is cleared on that sign-in.
+- **Listing and revoking sessions.** `sidecar-admin user sessions
+  [--username NAME]` lists live sessions (a 12-character id -- a prefix of
+  the token's SHA-256, never the token -- the username, sign-in time, and
+  current idle deadline). `sidecar-admin user revoke --session ID` ends one
+  (at least 8 characters, matching exactly one session); `user revoke
+  --username NAME` ends all of one account's. `user passwd` and `user
+  delete` already revoke an account's sessions.
+- **Bearer keys do not expire.** Region keys (`obask_`) and service
+  principals (`obasp_`) are valid until revoked; OBACloud rotates region
+  keys itself. Treat the `obasp_` principal as deployment-root in practice:
+  it can mint a push-scoped key for any region (see below), so store it
+  like a root credential and revoke it (`sidecar-admin principal revoke`)
+  if it may have leaked.
+- **Security headers.** Every response under `/admin` and `/api/admin/`
+  -- including `401`s, `404`s and `405`s -- carries
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, a Content-Security-Policy, and, when the request
+  arrived over HTTPS, `Strict-Transport-Security: max-age=31536000` (never
+  over plain HTTP, so local development is unaffected). Admin JSON and CSV
+  are `Cache-Control: no-store`, and their CSP is `default-src 'none'`. The
+  SPA's CSP is `'self'`-only with no `'unsafe-inline'`: SvelteKit's inline
+  bootstrap script is allowed by its SHA-256, and the route announcer's
+  fixed `style` attribute by its hash under `'unsafe-hashes'`, both computed
+  at boot from the embedded build, so a rebuild cannot fall out of step.
+  `web/admin/src/app.html` therefore must not carry inline styles or event
+  handlers; `go test ./internal/httpapi/adminui` (part of `make check`)
+  fails if the built SPA does. Rider-facing routes are unchanged.
+- **One JSON value per body.** Every JSON body on `/api/admin/v1` (and the
+  gorush webhook and the donations endpoint) must be exactly one JSON value;
+  trailing data after it -- a second object, stray bytes -- is a `400`.
+  Trailing whitespace is fine.
+- **Bounded password-hash cost.** Verification uses the argon2id parameters
+  stored in each user row, so it refuses a stored hash naming more than
+  64 MiB, 10 passes, or 8 lanes (or an out-of-range salt/key length) instead
+  of running it. The defaults (19 MiB, 2 passes, 1 lane) leave room to raise
+  them without a code change.
+- **Username charset.** `sidecar-admin user create` accepts 1-64 characters
+  of lowercase ASCII letters, digits, and `._@+-` (input is trimmed and
+  lowercased first). Accounts created before this rule keep signing in; the
+  rule applies to new accounts only. A failed sign-in logs the attempted
+  username cut to 64 characters with control characters replaced.
 
 ### Region API keys and service principals
 
@@ -854,9 +953,11 @@ a payload carrying a `notif_id` of `alertpush:<push id>` increments that
 push's `failed_count` and records the token's hash, whether or not the
 failure reason is a terminal one (see *Sending alerts as push notifications*).
 
-Without the secret the endpoint still works, but is rate limited per client
-IP as an abuse ceiling and should be restricted to the gorush host at the
-proxy. A dropped prune is not lost data: the token is cleaned up by the
+The server will not start with `SIDECAR_GORUSH_URL` set and no secret
+unless `--allow-unauthenticated-gorush-webhook`
+(`SIDECAR_ALLOW_UNAUTHENTICATED_GORUSH_WEBHOOK=true`) says to. Without the
+secret the endpoint still works, but is rate limited per client IP as an
+abuse ceiling and should be restricted to the gorush host at the proxy. A dropped prune is not lost data: the token is cleaned up by the
 180-day sweep, or by the next failure gorush reports. The push accounting is
 the one thing an open webhook lets an anonymous caller *write*: someone who
 guesses a `notif_id` can inflate a push's failure counters. What bounds that
@@ -865,6 +966,11 @@ report -- the rows hold a counter and token hashes, nothing reads either back
 to make a delivery decision, and both cascade away with the push and its
 alert. A deployment that cares about the accuracy of its own fan-out numbers
 sets the shared secret; that is what the setting is for.
+
+Either way the accounting is bounded: a push never records more failures
+than the `device_count` it was sent to, feedback for a push that completed
+more than 24 hours earlier is ignored, and each stored failure reason is
+cut to 120 characters with control characters removed.
 
 #### Staging
 
@@ -1294,7 +1400,7 @@ phone -- is the compose stack, which runs the sidecar beside
 [gorush](https://github.com/appleboy/gorush) exactly as production does.
 
 ```sh
-cp .env.example .env    # fill in the webhook secret and your APNs key
+cp .env.example .env    # set a real webhook secret (openssl rand -hex 32) and your APNs key
 make up                 # builds the image, starts sidecar + gorush
 deploy/smoke.sh         # /healthz, /admin, and the alerts feed
 make admin ARGS="region set --id 1 --agency-id 1 --timezone America/Los_Angeles"
@@ -1349,7 +1455,7 @@ GORUSH_IOS_KEY_ID=XXXXXXXXXX     # 10 chars, the key's ID
 GORUSH_IOS_TEAM_ID=XXXXXXXXXX    # 10 chars, your team ID
 # sidecar
 SIDECAR_APNS_TOPIC=org.onebusaway.iphone   # the EXACT bundle id of the build on the phone
-SIDECAR_GORUSH_WEBHOOK_SECRET=...          # openssl rand -hex 32  (needed only for the prune half)
+SIDECAR_GORUSH_WEBHOOK_SECRET=...          # openssl rand -hex 32  (required with gorush; .env.example ships a local-only placeholder)
 ```
 
 The topic must be the bundle id of the build actually installed on the

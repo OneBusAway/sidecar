@@ -304,3 +304,28 @@ func (r *authRepo) DeleteExpiredSessions(ctx context.Context, now time.Time) (in
 	}
 	return n, nil
 }
+
+// ExtendSession sets expires_at; zero affected rows is auth.ErrNotFound.
+func (r *authRepo) ExtendSession(ctx context.Context, tokenHash string, expiresAt time.Time) error {
+	n, err := r.q.ExtendSession(ctx, gen.ExtendSessionParams{ExpiresAt: expiresAt.Unix(), TokenHash: tokenHash})
+	if err != nil {
+		return fmt.Errorf("sqlite: extend session: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("sqlite: extend session: %w", auth.ErrNotFound)
+	}
+	return nil
+}
+
+// ListSessions returns every session row, oldest first.
+func (r *authRepo) ListSessions(ctx context.Context) ([]auth.Session, error) {
+	rows, err := r.q.ListSessions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list sessions: %w", err)
+	}
+	out := make([]auth.Session, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, sessionFromRow(row))
+	}
+	return out, nil
+}

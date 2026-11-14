@@ -129,3 +129,98 @@ func TestEnqueueRejectsInFlight(t *testing.T) {
 		t.Errorf("second Enqueue = %v, want ErrInFlight", err)
 	}
 }
+
+// finish moves every queued push to sent, so the in-flight rule (one push
+// per alert at a time) is out of the way of the cooldown assertions.
+func (f fixture) finish(t *testing.T, now time.Time, submitted bool) {
+	t.Helper()
+	ctx := context.Background()
+	claimed, err := f.store.AlertPushes().Claim(ctx, now, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range claimed {
+		status := alertpush.StatusSent
+		if !submitted {
+			status = alertpush.StatusCanceled
+		} else if _, err := f.store.AlertPushes().AdvanceCursor(ctx, p.ID, p.BatchCursor, p.BatchCursor+1, 1, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.AlertPushes().MarkCompleted(ctx, p.ID, status, "", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestEnqueueCooldown pins SC-27: a modest brake on "all" pushes that a
+// compromised push-scoped key could otherwise loop, tuned so it never gets
+// in an agency's way. A repeat of the same alert within AlertSpacing is
+// refused (a double click, a script loop), but a correction minutes later
+// goes through; more than RegionHourlyLimit "all" pushes in one region in
+// an hour is refused; test-audience pushes are never throttled; and a push
+// that was canceled or failed before reaching anyone does not count.
+func TestEnqueueCooldown(t *testing.T) {
+	f := newFixture(t)
+	f.enq.AlertSpacing = time.Minute
+	f.enq.RegionHourlyLimit = 3
+	ctx := context.Background()
+	f.register(t, "tok", false)
+	f.register(t, "qa", true)
+	a := f.alert(t, true, false)
+
+	if _, err := f.enq.Enqueue(ctx, a.ID, alertpush.AudienceAll, nil, base); err != nil {
+		t.Fatalf("first push: %v", err)
+	}
+	f.finish(t, base.Add(10*time.Second), true)
+	if _, err := f.enq.Enqueue(ctx, a.ID, alertpush.AudienceAll, nil, base.Add(30*time.Second)); !errors.Is(err, alertpush.ErrCooldown) {
+		t.Fatalf("same alert 30s later: err = %v, want ErrCooldown", err)
+	}
+	// Test-audience sends are how operators check copy; never throttled.
+	for i := range 5 {
+		if _, err := f.enq.Enqueue(ctx, a.ID, alertpush.AudienceTest, nil, base.Add(31*time.Second)); err != nil {
+			t.Fatalf("test push %d: %v", i, err)
+		}
+		f.finish(t, base.Add(31*time.Second), true)
+	}
+	// A correction a few minutes later is a legitimate second send.
+	if _, err := f.enq.Enqueue(ctx, a.ID, alertpush.AudienceAll, nil, base.Add(3*time.Minute)); err != nil {
+		t.Fatalf("correction 3 minutes later: %v", err)
+	}
+	f.finish(t, base.Add(3*time.Minute), true)
+
+	// Region budget: a and its correction are 2 of 3 this hour.
+	b := f.alert(t, true, false)
+	if _, err := f.enq.Enqueue(ctx, b.ID, alertpush.AudienceAll, nil, base.Add(5*time.Minute)); err != nil {
+		t.Fatalf("third push in the hour: %v", err)
+	}
+	f.finish(t, base.Add(5*time.Minute), true)
+	c := f.alert(t, true, false)
+	if _, err := f.enq.Enqueue(ctx, c.ID, alertpush.AudienceAll, nil, base.Add(6*time.Minute)); !errors.Is(err, alertpush.ErrCooldown) {
+		t.Fatalf("fourth push in the hour: err = %v, want ErrCooldown", err)
+	}
+	// A test alert is forced to the test audience, so it is unthrottled too.
+	ta := f.alert(t, true, true)
+	if _, err := f.enq.Enqueue(ctx, ta.ID, alertpush.AudienceAll, nil, base.Add(6*time.Minute)); err != nil {
+		t.Fatalf("test alert over the region budget: %v", err)
+	}
+	f.finish(t, base.Add(6*time.Minute), true)
+	// The window rolls: an hour after the first send, there is room again.
+	if _, err := f.enq.Enqueue(ctx, c.ID, alertpush.AudienceAll, nil, base.Add(time.Hour+time.Second)); err != nil {
+		t.Fatalf("after the hour: %v", err)
+	}
+	f.finish(t, base.Add(time.Hour+time.Second), false) // canceled before any batch
+
+	// That canceled push reached nobody, so it neither spaces the alert nor
+	// spends the region budget.
+	if _, err := f.enq.Enqueue(ctx, c.ID, alertpush.AudienceAll, nil, base.Add(time.Hour+2*time.Second)); err != nil {
+		t.Fatalf("resend after an unsent cancel: %v", err)
+	}
+
+	// The CLI's Enqueuer sets neither knob: operators with database access
+	// are not throttled.
+	cli := &alertpush.Enqueuer{Repo: f.store.AlertPushes(), Alerts: f.store.Alerts(), PushRegs: f.store.PushRegs()}
+	f.finish(t, base.Add(time.Hour+3*time.Second), true)
+	if _, err := cli.Enqueue(ctx, c.ID, alertpush.AudienceAll, nil, base.Add(time.Hour+4*time.Second)); err != nil {
+		t.Fatalf("unthrottled Enqueuer: %v", err)
+	}
+}

@@ -700,6 +700,9 @@ func TestAlertPushFailuresStoreOnlyHashes(t *testing.T) {
 	if pushErr != nil {
 		t.Fatalf("Create push: %v", pushErr)
 	}
+	if err := store.AlertPushes().SetDeviceCount(ctx, push.ID, 1, now); err != nil {
+		t.Fatalf("SetDeviceCount: %v", err)
+	}
 	if _, err := store.AlertPushes().RecordFailure(ctx, push.ID, token, "Unregistered", now); err != nil {
 		t.Fatalf("RecordFailure: %v", err)
 	}

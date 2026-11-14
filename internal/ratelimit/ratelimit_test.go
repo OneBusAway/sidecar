@@ -46,3 +46,35 @@ func TestSweepBoundsMemory(t *testing.T) {
 		t.Fatalf("Len() = %d after sweep; want <= 1", got)
 	}
 }
+
+// TestCountAndExhaustedDoNotCharge pins the read-only probes the login
+// throttle uses (SC-02): it must decide "refuse before hashing" without
+// spending budget, and charge only once a verification has actually failed.
+func TestCountAndExhaustedDoNotCharge(t *testing.T) {
+	t.Parallel()
+	l := ratelimit.New(2, time.Minute)
+
+	if got := l.Count("k", base); got != 0 {
+		t.Fatalf("Count on an unseen key = %d, want 0", got)
+	}
+	for range 5 {
+		if l.Exhausted("k", base) {
+			t.Fatal("Exhausted on an unseen key; probing must not charge")
+		}
+	}
+	l.Allow("k", base)
+	if got := l.Count("k", base); got != 1 {
+		t.Fatalf("Count after one Allow = %d, want 1", got)
+	}
+	l.Allow("k", base)
+	if !l.Exhausted("k", base.Add(30*time.Second)) {
+		t.Fatal("Exhausted = false at the limit")
+	}
+	// The window rolls over exactly as Allow sees it.
+	if l.Exhausted("k", base.Add(time.Minute)) || l.Count("k", base.Add(time.Minute)) != 0 {
+		t.Fatal("an expired window still reads as charged")
+	}
+	if !l.Allow("k", base.Add(time.Minute)) {
+		t.Fatal("Allow denied in a fresh window")
+	}
+}
