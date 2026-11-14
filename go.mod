@@ -1,12 +1,12 @@
 module github.com/OneBusAway/sidecar
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs v1.0.0
 	github.com/google/go-cmp v0.7.0
 	github.com/pressly/goose/v3 v3.27.3
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.59.0
 	modernc.org/sqlite v1.56.0
 )
 
@@ -14,7 +14,7 @@ require (
 	github.com/OneBusAway/go-sdk v1.15.0
 	github.com/getsentry/sentry-go v0.49.0
 	github.com/stripe/stripe-go/v83 v83.2.1
-	golang.org/x/term v0.45.0
+	golang.org/x/term v0.48.0
 )
 
 require (
@@ -22,7 +22,7 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )
 
 require (
@@ -34,8 +34,8 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sync v0.25.0
+	golang.org/x/sys v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.12
 	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

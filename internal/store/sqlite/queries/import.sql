@@ -11,8 +11,8 @@
 INSERT INTO alerts (
   id, region_id, agency_id, header_text, description_text, url,
   cause, effect, severity_level, start_time, end_time,
-  published, is_test, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  published, is_test, created_at, updated_at, imported_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING;
 
 -- name: ImportAlertTranslation :execrows
@@ -22,16 +22,16 @@ INSERT INTO alert_translations (
 ON CONFLICT (alert_id, language, field) DO NOTHING;
 
 -- name: ImportStudy :execrows
-INSERT INTO studies (id, region_id, name, description, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO studies (id, region_id, name, description, created_at, updated_at, imported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING;
 
 -- name: ImportSurvey :execrows
 INSERT INTO surveys (
   id, study_id, name, available, start_time, end_time,
   show_on_map, show_on_stops, always_visible, allows_multiple_responses,
-  visible_stop_list, visible_route_list, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  visible_stop_list, visible_route_list, created_at, updated_at, imported_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING;
 
 -- name: ImportSurveyQuestion :execrows
@@ -68,3 +68,24 @@ ON CONFLICT (public_identifier) DO NOTHING;
 
 -- name: GetQuestionSurveyID :one
 SELECT survey_id FROM survey_questions WHERE id = ?;
+
+-- Provenance of a row already holding an imported id (security audit
+-- SC-14): who owns it, when it was created, and whether an import wrote it.
+
+-- name: GetAlertProvenance :one
+SELECT region_id, created_at, imported_at FROM alerts WHERE id = ?;
+
+-- name: GetStudyProvenance :one
+SELECT region_id, created_at, imported_at FROM studies WHERE id = ?;
+
+-- name: GetSurveyProvenance :one
+SELECT study_id, created_at, imported_at FROM surveys WHERE id = ?;
+
+-- name: MarkAlertImported :exec
+UPDATE alerts SET imported_at = ? WHERE id = ? AND imported_at IS NULL;
+
+-- name: MarkStudyImported :exec
+UPDATE studies SET imported_at = ? WHERE id = ? AND imported_at IS NULL;
+
+-- name: MarkSurveyImported :exec
+UPDATE surveys SET imported_at = ? WHERE id = ? AND imported_at IS NULL;

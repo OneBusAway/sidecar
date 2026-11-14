@@ -14,7 +14,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -91,12 +93,53 @@ func dsn(path string) string {
 }
 
 // Open connects to the database at path with the parameters dsn documents.
+// The file and its -wal and -shm siblings are owner-only (see ownerOnly).
 func Open(path string) (*Store, error) {
+	if err := ownerOnly(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
 	return &Store{db: db, q: gen.New(db), logger: slog.Default()}, nil
+}
+
+// dbFileMode is the mode of the database and its -wal and -shm files: they
+// hold password hashes, session and API-key digests, OBA keys, push tokens,
+// and rider data, so nothing but the owning user reads them.
+const dbFileMode = 0o600
+
+// ownerOnly makes path and its WAL-mode siblings owner-only before SQLite
+// opens them (security audit SC-16). A missing database is created empty
+// at dbFileMode -- SQLite creates -wal and -shm with the database file's
+// own permissions, so they follow -- and files an older deployment left
+// group- or world-readable are narrowed. Litestream, which runs as the
+// same user (deploy/entrypoint.sh), is unaffected. Special names
+// (":memory:", "file:" URIs) are left to SQLite.
+func ownerOnly(path string) error {
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, dbFileMode)
+	switch {
+	case err == nil:
+		if closeErr := f.Close(); closeErr != nil {
+			return fmt.Errorf("sqlite: create %s: %w", path, closeErr)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// The directory is missing: SQLite reports that itself, at the
+		// first statement, exactly as before.
+		return nil
+	case !errors.Is(err, fs.ErrExist):
+		return fmt.Errorf("sqlite: create %s: %w", path, err)
+	}
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, dbFileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("sqlite: restrict %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // SetLogger routes the store's own log lines through logger, so adapter

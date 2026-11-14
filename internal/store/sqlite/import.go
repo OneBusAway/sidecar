@@ -21,13 +21,14 @@ var ErrRegionMissing = errors.New("sqlite: import: region not found; sync the re
 
 // ErrImportConflict marks a row whose id or public id already exists in
 // this database but belongs to something else -- another region, another
-// study, another survey. Alerts, studies, surveys, and questions share one
-// global id sequence, so the second region migrated into a database that
-// has authored anything of its own can collide with a source id. Silently
-// skipping such a row would drop it (or, for a study or survey, attach the
-// rows beneath it to another region's content), so it is an error naming
-// the row instead.
-var ErrImportConflict = errors.New("sqlite: import: id already belongs to another region or parent")
+// study, another survey, or (alerts, studies, surveys) a row authored on
+// this sidecar rather than imported. Alerts, studies, surveys, and
+// questions share one global id sequence, so the second region migrated
+// into a database that has authored anything of its own can collide with a
+// source id. Silently skipping such a row would drop it (or attach the
+// translations, surveys, or questions beneath it to unrelated content), so
+// it is an error naming the row instead.
+var ErrImportConflict = errors.New("sqlite: import: id already belongs to another row")
 
 // ValidateImport runs every check Import runs before it writes anything:
 // the document's own invariants, the derivations that can fail (enum
@@ -56,10 +57,11 @@ func (s *Store) ValidateImport(ctx context.Context, doc *export.Document, now ti
 // transaction opens; anything the database itself rejects -- a foreign
 // key, a CHECK, a second UNIQUE such as a question's position -- rolls the
 // whole transaction back, so a bad document never leaves a partial import.
-// Enum names, question content, answer shape, and time windows are
-// re-validated with the domain packages' own rules; the HTTP layer's
-// length caps and locale normalization are not, on the assumption the
-// source enforced them.
+// Enum names, question content, answer shape, time windows, alert urls,
+// and the HTTP layer's rider-state rules (validateRiderRows: length caps,
+// coordinate ranges, wait-duration choices, snapshot shape) are
+// re-validated with the domain packages' own rules. Locales are stored raw,
+// as the registration API stores them.
 func (s *Store) Import(ctx context.Context, doc *export.Document, now time.Time) (export.Summary, error) {
 	var sum export.Summary
 	prepared, err := prepareImport(doc, now)
@@ -123,14 +125,21 @@ func (im *importer) alerts(doc *export.Document) error {
 			StartTime: a.StartTime.Unix(), EndTime: timeToNullUnix(a.EndTime),
 			Published: a.Published, IsTest: a.IsTest,
 			CreatedAt: orNow(a.CreatedAt, im.now), UpdatedAt: orNow(a.UpdatedAt, im.now),
+			ImportedAt: im.stamp(),
 		})
 		if err != nil {
 			return fmt.Errorf("sqlite: import alert %d: %w", a.ID, err)
 		}
 		if !im.sum.Alerts.Tally(n) {
-			existing, err := im.q.GetAlert(im.ctx, a.ID)
+			existing, err := im.q.GetAlertProvenance(im.ctx, a.ID)
 			if err != nil || existing.RegionID != im.region {
 				return conflict("alert", a.ID, err)
+			}
+			if err := im.sameRow("alert", a.ID, existing.ImportedAt, existing.CreatedAt, a.CreatedAt,
+				func() error {
+					return im.q.MarkAlertImported(im.ctx, gen.MarkAlertImportedParams{ImportedAt: im.stamp(), ID: a.ID})
+				}); err != nil {
+				return err
 			}
 		}
 		if err := im.translations(a); err != nil {
@@ -175,14 +184,21 @@ func (im *importer) studies(doc *export.Document) error {
 		n, err := im.q.ImportStudy(im.ctx, gen.ImportStudyParams{
 			ID: st.ID, RegionID: im.region, Name: st.Name, Description: st.Description,
 			CreatedAt: orNow(st.CreatedAt, im.now), UpdatedAt: orNow(st.UpdatedAt, im.now),
+			ImportedAt: im.stamp(),
 		})
 		if err != nil {
 			return fmt.Errorf("sqlite: import study %d: %w", st.ID, err)
 		}
 		if !im.sum.Studies.Tally(n) {
-			existing, err := im.q.GetStudy(im.ctx, st.ID)
+			existing, err := im.q.GetStudyProvenance(im.ctx, st.ID)
 			if err != nil || existing.RegionID != im.region {
 				return conflict("study", st.ID, err)
+			}
+			if err := im.sameRow("study", st.ID, existing.ImportedAt, existing.CreatedAt, st.CreatedAt,
+				func() error {
+					return im.q.MarkStudyImported(im.ctx, gen.MarkStudyImportedParams{ImportedAt: im.stamp(), ID: st.ID})
+				}); err != nil {
+				return err
 			}
 		}
 		for _, sv := range st.Surveys {
@@ -203,14 +219,21 @@ func (im *importer) survey(studyID int64, sv export.Survey) error {
 		AllowsMultipleResponses: sv.AllowsMultipleResponses,
 		VisibleStopList:         sp.stops, VisibleRouteList: sp.routes,
 		CreatedAt: orNow(sv.CreatedAt, im.now), UpdatedAt: orNow(sv.UpdatedAt, im.now),
+		ImportedAt: im.stamp(),
 	})
 	if err != nil {
 		return fmt.Errorf("sqlite: import survey %d: %w", sv.ID, err)
 	}
 	if !im.sum.Surveys.Tally(n) {
-		existing, err := im.q.GetSurvey(im.ctx, sv.ID)
+		existing, err := im.q.GetSurveyProvenance(im.ctx, sv.ID)
 		if err != nil || existing.StudyID != studyID {
 			return conflict("survey", sv.ID, err)
+		}
+		if err := im.sameRow("survey", sv.ID, existing.ImportedAt, existing.CreatedAt, sv.CreatedAt,
+			func() error {
+				return im.q.MarkSurveyImported(im.ctx, gen.MarkSurveyImportedParams{ImportedAt: im.stamp(), ID: sv.ID})
+			}); err != nil {
+			return err
 		}
 	}
 	for _, qd := range sv.Questions {
@@ -266,6 +289,12 @@ func (im *importer) responses(doc *export.Document) error {
 // this region's own earlier row (or the device re-registering directly).
 func (im *importer) registrations(doc *export.Document) error {
 	for _, p := range doc.PushRegistrations {
+		// Non-test rows carry no description (spec section 4; the
+		// registration API ignores one), so a legacy one is dropped rather
+		// than failing the document.
+		if !p.TestDevice {
+			p.Description = ""
+		}
 		n, err := im.q.ImportPushRegistration(im.ctx, gen.ImportPushRegistrationParams{
 			RegionID: im.region, Token: p.Token, OperatingSystem: p.OperatingSystem,
 			ApnsSandbox: p.APNSSandbox, Locale: p.Locale, TestDevice: p.TestDevice, Description: p.Description,
@@ -318,6 +347,41 @@ func (im *importer) reports(doc *export.Document) error {
 	return nil
 }
 
+// stamp is the imported_at value this run writes.
+func (im *importer) stamp() sql.NullInt64 {
+	return sql.NullInt64{Int64: im.now, Valid: true}
+}
+
+// sameRow decides whether a row that already holds an exported id -- and
+// already belongs to this region or parent -- is the row the export
+// describes (security audit SC-14):
+//
+//   - imported earlier (imported_at set): the same row. It is skipped
+//     whatever its content now, because the delta is insert-if-absent: an
+//     identical re-import is a no-op, and an edit made in OBACloud since
+//     the bulk run is not carried (OBACloud's cutover preflight reports
+//     that drift before any flip).
+//   - not marked, but created_at equals the export's: a row imported by a
+//     binary that predates the provenance column (OBACloud never changes
+//     created_at and the import carries it verbatim). Same row; stamp it.
+//   - otherwise: authored on this sidecar, a different row that happens to
+//     hold the id. Skipping it would attach the export's translations,
+//     surveys, or questions to unrelated content, so it is ErrImportConflict
+//     and the transaction rolls back.
+func (im *importer) sameRow(kind string, id int64, importedAt sql.NullInt64, storedCreated int64, exported time.Time, mark func() error) error {
+	if importedAt.Valid {
+		return nil
+	}
+	if exported.IsZero() || storedCreated != exported.Unix() {
+		return fmt.Errorf("%w: %s %d exists in this region but was authored on this sidecar, not imported "+
+			"(was `sequence bump` run before the first cutover?)", ErrImportConflict, kind, id)
+	}
+	if err := mark(); err != nil {
+		return fmt.Errorf("sqlite: import %s %d: mark imported: %w", kind, id, err)
+	}
+	return nil
+}
+
 // surveyInRegion is ErrImportConflict unless survey id exists and its
 // study belongs to regionID.
 func surveyInRegion(ctx context.Context, q *gen.Queries, id, regionID int64) error {
@@ -366,6 +430,9 @@ func prepareImport(doc *export.Document, now time.Time) (preparedImport, error) 
 	if err := doc.Validate(); err != nil {
 		return p, err
 	}
+	if err := validateRiderRows(doc); err != nil {
+		return p, err
+	}
 	for _, step := range []func(*export.Document) error{
 		func(d *export.Document) error { return p.prepareAlerts(d, now) },
 		p.prepareSurveys,
@@ -391,6 +458,11 @@ func (p *preparedImport) prepareAlerts(doc *export.Document, now time.Time) erro
 			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 		if err := alerts.ValidateWindow(a.StartTime, a.EndTime, now); err != nil {
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
+		}
+		// OBACloud validates http(s) on write, so this should not fire on
+		// real data; if it does, the operator fixes the alert there.
+		if err := alerts.ValidateURL(a.URL); err != nil {
 			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
 	}

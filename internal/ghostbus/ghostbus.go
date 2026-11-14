@@ -18,6 +18,12 @@ import (
 const (
 	// CommentMaxLen is the comment cap in runes; mirrored in GhostBusReportView.swift.
 	CommentMaxLen = 1000
+	// MaxIdentifierLen caps user/trip/route/stop/vehicle identifiers in
+	// bytes; the rider API and import share it.
+	MaxIdentifierLen = 255
+	// MaxSnapshotBytes caps an imported enrichment snapshot. A real one is a
+	// fixed handful of status and display fields, about 1 KB.
+	MaxSnapshotBytes = 64 << 10
 	// MaxSnapshotAttempts is the total tries per report, matching OBACloud's
 	// retry_on attempts: 3.
 	MaxSnapshotAttempts = 3

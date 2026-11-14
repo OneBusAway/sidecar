@@ -9,6 +9,13 @@
 #
 # Sidecar flags pass straight through: `entrypoint.sh --refresh 30m`.
 set -eu
+# Owner-only for everything this script and its children create: the
+# database Litestream restores, its WAL and shared-memory files, and
+# Litestream's own .sidecar.db-litestream copies of database pages. The
+# sidecar narrows the database files itself as well (SC-16); this covers
+# what Litestream writes before and beside it. Litestream runs as this same
+# user, so nothing it needs is lost.
+umask 077
 
 if [ -z "${SIDECAR_BACKUP_BUCKET:-}" ]; then
   exec sidecar "$@"

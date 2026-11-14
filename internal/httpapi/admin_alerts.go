@@ -182,6 +182,10 @@ func (h *adminAlertsHandler) create(w http.ResponseWriter, r *http.Request) {
 			`description must not be whitespace only; send "" for no description`)
 		return
 	}
+	if urlErr := alerts.ValidateURL(req.URL); urlErr != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, urlErr.Error())
+		return
+	}
 
 	ctx := r.Context()
 	startTime, err := parseInstantJSON(req.StartTime, region)
@@ -315,6 +319,12 @@ func (h *adminAlertsHandler) patch(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest,
 			`description must not be whitespace only; send "" to clear it`)
 		return
+	}
+	if req.URL != nil {
+		if urlErr := alerts.ValidateURL(*req.URL); urlErr != nil {
+			writeJSONError(w, h.deps.Logger, http.StatusBadRequest, urlErr.Error())
+			return
+		}
 	}
 
 	if req.StartTime != nil || req.EndTime != nil {

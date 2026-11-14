@@ -28,13 +28,17 @@ services:
     restart: unless-stopped
 
   gorush:
-    image: appleboy/gorush:1.22.0
+    # Pinned by digest, like render.yaml (deploy/manifests_test.go checks).
+    image: appleboy/gorush:1.22.0@sha256:2bc21bc98c2253f2d14b4aeb614ec89b72188b2e885d58490ac712cb85a9b8bd
     ports:
       # gorush has no auth and holds the APNs signing key; only the
       # host-run sidecar needs it, via localhost. Not exposed on the LAN.
       - "127.0.0.1:8088:8088"
     environment:
       GORUSH_CORE_PORT: "8088"
+      # gorush defaults log.hide_token to true, which masks every token in the
+      # feedback webhook payload, so the sidecar could never prune a dead one.
+      GORUSH_LOG_HIDE_TOKEN: "false"
       GORUSH_IOS_ENABLED: ${GORUSH_IOS_ENABLED:-true}
       GORUSH_IOS_KEY_TYPE: p8
       GORUSH_IOS_KEY_BASE64: ${GORUSH_IOS_KEY_BASE64}

@@ -46,6 +46,10 @@ each stale field.
 `sidecar-admin` is the CLI for creating and publishing alerts. It never talks to the
 server over HTTP — it opens the same SQLite database file directly, so run it against a
 copy of (or the same file as) whatever `--db`/`SIDECAR_DB` the server uses.
+Both binaries keep the database and its `-wal` and `-shm` files owner-only
+(mode `0600`, narrowing files an older build left `0644`): they hold password
+hashes, key digests, OBA keys, push tokens, and rider data. Run the CLI as the
+same user as the server (in the image, `sidecar`).
 
 The steps below are sequential, not independent examples: `region sync` populates the
 regions table that `region set` updates, and `region set` must run before the first
@@ -122,10 +126,16 @@ sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
                        delete --username NAME [--force]
-sidecar-admin import  --file <path|-> [--dry-run]   # an OBACloud region export
+sidecar-admin import  --file <path|-> [--dry-run] [--id-floor N]   # an OBACloud region export
 sidecar-admin sequence show | bump --min N          # id headroom before a migration
 sidecar-admin migrate  up | status
 ```
+
+An alert's `--url` (and the admin API's `url`) must be empty or an absolute
+`http://` / `https://` URL with a host, at most 2048 bytes; `javascript:`,
+`data:`, protocol-relative, and relative values are refused by the CLI, the
+admin API (`400`), and `import` alike, because the value is published
+verbatim in the feed and rendered as a link.
 
 ### Sending alerts as push notifications
 
@@ -374,7 +384,9 @@ sidecar-admin survey  create    --study N --file <path|->
 
 `survey responses` writes rider-sourced cells (identifiers, question type/label,
 answer) with a leading apostrophe when the cell would otherwise open with a
-spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return), so
+spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return, or
+the full-width/small-form `=`, `+`, `-`, `@`) -- looking past any leading
+whitespace, control, or invisible format characters, as spreadsheets do -- so
 opening the export can't execute a formula a rider embedded in their answer.
 
 ## Ghost bus reports
@@ -451,7 +463,8 @@ JSON). `--since` is optional and, like every other CLI instant in this repo,
 requires an explicit UTC offset. Rider-sourced and GTFS-derived cells go
 through the same formula-injection guard as `survey responses`: a leading
 apostrophe when a cell would otherwise open with `=`, `+`, `-`, `@`, a tab,
-or a carriage return.
+or a carriage return (or a full-width/small-form variant, after any leading
+whitespace or control characters).
 
 ## Live Activities
 
@@ -575,6 +588,14 @@ command line.
 Weather needs no separate coordinate configuration -- a region's centroid arrives
 automatically as part of `region sync`, computed from the regions directory's
 `bounds` rectangles for that region.
+
+`region sync` (and the server's hourly directory sync) skips any directory
+entry whose `obaBaseUrl`, or non-empty `sidecarBaseUrl`, is not an absolute
+`http://` or `https://` URL with a host; the region keeps whatever an earlier
+sync stored. Plain `http` and loopback or private hosts are accepted on
+purpose -- local development and OBACloud's contract harness use
+`http://127.0.0.1` -- since the directory itself is operator-chosen. Every OBA
+response body is capped at 32 MiB; a larger one fails the call.
 
 ## Donations
 
@@ -849,6 +870,17 @@ authenticated webhook is not rate limited -- gorush reports one failure per
 dead token, and a mass uninstall arrives as a burst that a throttle would
 turn into lost prune signals.
 
+gorush must also run with `GORUSH_LOG_HIDE_TOKEN=false` (`render.yaml`,
+`render.staging.yaml`, and `compose.yaml` set it). gorush 1.22's
+`log.hide_token` defaults to `true` and replaces the first and last ten
+characters of every token with `*` in its log entries -- which are exactly
+what it posts to the webhook and returns inline -- so with the default no
+dead token ever matches a registration. A masked token is recognized (no real
+APNs or FCM token contains `*`): the webhook and the alert-push sender each
+log one `ERROR` naming the setting, and the webhook skips the delete. The
+trade-off is that gorush's own access and error logs then carry full device
+tokens.
+
 The same endpoint is where an alert push's asynchronous failures are counted:
 a payload carrying a `notif_id` of `alertpush:<push id>` increments that
 push's `failed_count` and records the token's hash, whether or not the
@@ -907,18 +939,36 @@ cat export.json | render ssh sidecar -- sidecar-admin --db /data/sidecar.db impo
 Ids are preserved -- the feed's `Alert_<id>` entity ids and the survey and
 question ids the apps persist locally must not change under riders -- and
 every row is checked with the domain packages' own rules (enum names,
-question content, answer shape, time windows; not the HTTP layer's length
-caps) before anything is written, so a bad row rejects the whole document.
-An alert header or agency id that is only whitespace counts as missing,
-while a description or translation that is only whitespace imports as none.
-Rows that already exist under this region (same id, public id, or
-region+token) are skipped and counted, which makes the migration two runs
-of the same command: a bulk import the day before the region's
-`sidecar_base_url` flips, and a delta from a fresh export right after --
-translations added to an already migrated alert land on the delta run. An
-id that already belongs to another region's content (alerts, studies,
-surveys, and questions share one id sequence) is an error naming the row,
-never a silent skip. `--dry-run` runs the same checks, including that the
+question content, answer shape, time windows, alert urls) and the rider
+API's own limits (255-byte user, trip, route, stop, and vehicle
+identifiers, 4096-byte push tokens, a 255-byte test-device description,
+1000-character ghost bus comments, latitude within +/-90 and longitude
+within +/-180, the 5/10/15/20/30 wait-duration choices, URL-safe public ids
+of at most 64 characters, a captured snapshot that is a JSON object of at
+most 64 KiB) before anything is written, so a bad row rejects the whole
+document with an error naming it -- fix or delete it in OBACloud and
+re-export. OBACloud validates nearly all of these itself, so a real export
+should not trip them. An alert header or agency id that is only whitespace
+counts as missing, while a description or translation that is only
+whitespace imports as none, and a non-test device's description is dropped
+(the registration API keeps none). The document itself is capped at 256 MiB.
+Rows that an earlier import already wrote under this region (same id,
+public id, or region+token) are skipped and counted, which makes the
+migration two runs of the same command: a bulk import the day before the
+region's `sidecar_base_url` flips, and a delta from a fresh export right
+after -- translations added to an already migrated alert land on the delta
+run, and re-running either is a no-op. The delta is insert-if-absent: an
+edit made in OBACloud to a row the bulk run already imported is *not*
+carried over (OBACloud's cutover preflight reports that drift before any
+flip). An id that already belongs to another region's content (alerts,
+studies, surveys, and questions share one id sequence), or to an alert,
+study, or survey authored on this sidecar rather than imported, is an error
+naming the row, never a silent skip -- skipping would attach the export's
+translations, surveys, or questions to unrelated content -- and nothing
+from the document is written. Imported alerts, studies, and surveys record
+when they were imported (`imported_at`); a row imported by a binary older
+than that column is recognized by the `created_at` the export carries
+verbatim and stamped on the next run. `--dry-run` runs the same checks, including that the
 region exists, without writing. The region itself must already be present
 (`sidecar-admin region sync`); alarms and Live Activities are deliberately
 not part of the document -- OBACloud keeps firing the ones it owns until
@@ -940,6 +990,34 @@ once per deployment: `bump` raises the `alerts`, `studies`, `surveys`, and
 or a lower floor changes nothing), and `show` prints each current value so
 the cutover runbook can verify the headroom is still there. 1,000,000 is
 comfortably above any OBACloud id and its growth during the migration.
+
+`import` holds the other side of that line: an alert, study, survey, or
+question id -- or a survey response's `survey_id` -- at or above the floor
+rejects the whole document before anything is written, so an export can
+neither collide with ids this database minted after the bump nor park a
+shared sequence at `MaxInt64`, where SQLite has no id left to mint for
+any region. The floor defaults to 1,000,000; a deployment that raised it
+(in lockstep with OBACloud's `Sidecar::Cutover::ID_HEADROOM`) passes the
+same value as `import --id-floor N`. Translations, survey responses, push
+registrations, and ghost bus reports are keyed by language, public id, or
+token, not by a carried id, so the floor does not apply to them; alarms and
+Live Activities are not in the document at all.
+
+#### Pinned images
+
+Third-party images are pinned by digest, so a moved or hijacked tag cannot
+change what is built or run without a commit here: every `FROM` in the
+`Dockerfile` (as `tag@sha256:…`, multi-arch index digests) and gorush in
+`render.yaml`, `render.staging.yaml` (as `docker.io/appleboy/gorush@sha256:…`,
+the digest form Render accepts) and `compose.yaml`. The Litestream tarball the
+build downloads is checked against the SHA-256 recorded per architecture in the
+`Dockerfile`, from the release's `checksums.txt`. `deploy/manifests_test.go`
+fails on an unpinned reference or an unverified download. The one exception is
+this repository's own `ghcr.io/onebusaway/sidecar:main`, which `render*.yaml`
+track on purpose -- it is how a push to main deploys. To take a new release
+(for example a Go patch in `golang:1.26-alpine`), resolve the new digest with
+`docker buildx imagetools inspect <image>:<tag>` and update the reference;
+nothing bumps these automatically.
 
 #### Backups
 

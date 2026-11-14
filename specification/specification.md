@@ -73,6 +73,11 @@ Apps discover the sidecar through the regions directory. Each region entry carri
 | `sidecarBaseUrl` | HTTPS base URL of the sidecar serving this region.             |
 | `obaBaseUrl`     | Base URL of the region's OBA REST API server.                  |
 
+Implementations SHOULD ignore a directory entry whose `obaBaseUrl` (or a non-empty
+`sidecarBaseUrl`) is not an absolute `http`/`https` URL with a host: the first is where
+region API keys are sent, the second is echoed to apps inside resource URLs. They
+SHOULD also bound the size of OBA responses they read.
+
 A single sidecar instance can serve many regions; the `{regionId}` path segment scopes
 every request. Your implementation MUST treat the numeric region identifier as the
 region's public primary key and MUST return `404 {"error": "Couldn't find Region"}` for
@@ -250,6 +255,12 @@ first, then any available translations. If your implementation stores translatio
 withhold any translation that is *stale* — produced from an earlier version of the
 English source text — so riders fall back to accurate English rather than reading
 outdated information. `url` is English-only.
+
+**`url`.** When present, `url` MUST be an absolute `http` or `https` URL with a host
+(the reference implementation also caps it at 2048 bytes); implementations MUST refuse
+anything else at authoring time rather than publish it. Clients drop the value into a
+link, so a `javascript:`, `data:`, protocol-relative, or relative value is an injection
+vector, not a link.
 
 Alerts also drive **push notifications** to registered devices (§4); the feed and the
 push audience are two views of the same authored content.

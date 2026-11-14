@@ -74,7 +74,7 @@ const createStudy = `-- name: CreateStudy :one
 
 INSERT INTO studies (region_id, name, description, created_at, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?4)
-RETURNING id, region_id, name, description, created_at, updated_at
+RETURNING id, region_id, name, description, created_at, updated_at, imported_at
 `
 
 type CreateStudyParams struct {
@@ -102,6 +102,7 @@ func (q *Queries) CreateStudy(ctx context.Context, arg CreateStudyParams) (Study
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -116,7 +117,7 @@ INSERT INTO surveys (
   ?6, ?7, ?8, ?9,
   ?10, ?11, ?12, ?12
 )
-RETURNING id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at
+RETURNING id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at, imported_at
 `
 
 type CreateSurveyParams struct {
@@ -165,6 +166,7 @@ func (q *Queries) CreateSurvey(ctx context.Context, arg CreateSurveyParams) (Sur
 		&i.VisibleRouteList,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -244,7 +246,7 @@ func (q *Queries) GetResponseByPublicIDInRegion(ctx context.Context, arg GetResp
 }
 
 const getStudy = `-- name: GetStudy :one
-SELECT id, region_id, name, description, created_at, updated_at FROM studies WHERE id = ?1
+SELECT id, region_id, name, description, created_at, updated_at, imported_at FROM studies WHERE id = ?1
 `
 
 func (q *Queries) GetStudy(ctx context.Context, id int64) (Study, error) {
@@ -257,12 +259,13 @@ func (q *Queries) GetStudy(ctx context.Context, id int64) (Study, error) {
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
 
 const getStudyInRegion = `-- name: GetStudyInRegion :one
-SELECT id, region_id, name, description, created_at, updated_at FROM studies WHERE id = ?1 AND region_id = ?2
+SELECT id, region_id, name, description, created_at, updated_at, imported_at FROM studies WHERE id = ?1 AND region_id = ?2
 `
 
 type GetStudyInRegionParams struct {
@@ -280,12 +283,13 @@ func (q *Queries) GetStudyInRegion(ctx context.Context, arg GetStudyInRegionPara
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
 
 const getSurvey = `-- name: GetSurvey :one
-SELECT id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at FROM surveys WHERE id = ?1
+SELECT id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at, imported_at FROM surveys WHERE id = ?1
 `
 
 func (q *Queries) GetSurvey(ctx context.Context, id int64) (Survey, error) {
@@ -306,6 +310,7 @@ func (q *Queries) GetSurvey(ctx context.Context, id int64) (Survey, error) {
 		&i.VisibleRouteList,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -391,7 +396,7 @@ func (q *Queries) InsertQuestionWithID(ctx context.Context, arg InsertQuestionWi
 }
 
 const listActiveSurveysByRegion = `-- name: ListActiveSurveysByRegion :many
-SELECT surveys.id, surveys.study_id, surveys.name, surveys.available, surveys.start_time, surveys.end_time, surveys.show_on_map, surveys.show_on_stops, surveys.always_visible, surveys.allows_multiple_responses, surveys.visible_stop_list, surveys.visible_route_list, surveys.created_at, surveys.updated_at FROM surveys
+SELECT surveys.id, surveys.study_id, surveys.name, surveys.available, surveys.start_time, surveys.end_time, surveys.show_on_map, surveys.show_on_stops, surveys.always_visible, surveys.allows_multiple_responses, surveys.visible_stop_list, surveys.visible_route_list, surveys.created_at, surveys.updated_at, surveys.imported_at FROM surveys
 JOIN studies ON studies.id = surveys.study_id
 WHERE studies.region_id = ?1
   AND surveys.available = TRUE
@@ -431,6 +436,7 @@ func (q *Queries) ListActiveSurveysByRegion(ctx context.Context, arg ListActiveS
 			&i.VisibleRouteList,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -522,7 +528,7 @@ func (q *Queries) ListResponsesBySurvey(ctx context.Context, surveyID int64) ([]
 }
 
 const listStudiesByRegion = `-- name: ListStudiesByRegion :many
-SELECT id, region_id, name, description, created_at, updated_at FROM studies WHERE region_id = ?1 ORDER BY id ASC
+SELECT id, region_id, name, description, created_at, updated_at, imported_at FROM studies WHERE region_id = ?1 ORDER BY id ASC
 `
 
 func (q *Queries) ListStudiesByRegion(ctx context.Context, regionID int64) ([]Study, error) {
@@ -541,6 +547,7 @@ func (q *Queries) ListStudiesByRegion(ctx context.Context, regionID int64) ([]St
 			&i.Description,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -556,7 +563,7 @@ func (q *Queries) ListStudiesByRegion(ctx context.Context, regionID int64) ([]St
 }
 
 const listSurveysByRegion = `-- name: ListSurveysByRegion :many
-SELECT surveys.id, surveys.study_id, surveys.name, surveys.available, surveys.start_time, surveys.end_time, surveys.show_on_map, surveys.show_on_stops, surveys.always_visible, surveys.allows_multiple_responses, surveys.visible_stop_list, surveys.visible_route_list, surveys.created_at, surveys.updated_at FROM surveys
+SELECT surveys.id, surveys.study_id, surveys.name, surveys.available, surveys.start_time, surveys.end_time, surveys.show_on_map, surveys.show_on_stops, surveys.always_visible, surveys.allows_multiple_responses, surveys.visible_stop_list, surveys.visible_route_list, surveys.created_at, surveys.updated_at, surveys.imported_at FROM surveys
 JOIN studies ON studies.id = surveys.study_id
 WHERE studies.region_id = ?1
 ORDER BY surveys.id ASC
@@ -586,6 +593,7 @@ func (q *Queries) ListSurveysByRegion(ctx context.Context, regionID int64) ([]Su
 			&i.VisibleRouteList,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -633,7 +641,7 @@ func (q *Queries) UpdateResponseAnswers(ctx context.Context, arg UpdateResponseA
 const updateStudy = `-- name: UpdateStudy :one
 UPDATE studies SET name = ?1, description = ?2, updated_at = ?3
 WHERE id = ?4 AND region_id = ?5
-RETURNING id, region_id, name, description, created_at, updated_at
+RETURNING id, region_id, name, description, created_at, updated_at, imported_at
 `
 
 type UpdateStudyParams struct {
@@ -660,6 +668,7 @@ func (q *Queries) UpdateStudy(ctx context.Context, arg UpdateStudyParams) (Study
 		&i.Description,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -672,7 +681,7 @@ UPDATE surveys SET
   visible_stop_list = ?9, visible_route_list = ?10,
   updated_at = ?11
 WHERE id = ?12
-RETURNING id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at
+RETURNING id, study_id, name, available, start_time, end_time, show_on_map, show_on_stops, always_visible, allows_multiple_responses, visible_stop_list, visible_route_list, created_at, updated_at, imported_at
 `
 
 type UpdateSurveyParams struct {
@@ -721,6 +730,7 @@ func (q *Queries) UpdateSurvey(ctx context.Context, arg UpdateSurveyParams) (Sur
 		&i.VisibleRouteList,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }

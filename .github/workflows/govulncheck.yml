@@ -1,0 +1,30 @@
+name: govulncheck
+
+# Reports known vulnerabilities reachable from this module's code -- in its
+# dependencies and in the Go standard library it is built with -- on a
+# schedule, so a newly published advisory surfaces without waiting for an
+# unrelated PR. Not part of `make check`: a fresh advisory would otherwise
+# turn every open PR red at once. Runs `make vulncheck`, so the scan is the
+# one a developer runs locally; the Go toolchain comes from mise.toml (its
+# 1.26 selector resolves to the newest 1.26 patch, the same series the
+# Dockerfile's builder image tracks).
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  push:
+    branches: [main]
+    paths: [go.mod, go.sum]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          cache: true
+      - run: make vulncheck

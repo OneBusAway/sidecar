@@ -22,6 +22,14 @@ import (
 // ErrNotFound is returned when a registration cannot be found.
 var ErrNotFound = errors.New("push registration not found")
 
+// Length caps in bytes, shared by the registration API and import: a token
+// past MaxTokenLen is no real APNs/FCM token, and a test device's
+// description (the human it traces to) is at most MaxDescriptionLen.
+const (
+	MaxTokenLen       = 4096
+	MaxDescriptionLen = 255
+)
+
 // OS values are the only two the API admits.
 const (
 	OSIOS     = "ios"
