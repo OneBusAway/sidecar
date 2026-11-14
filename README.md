@@ -648,6 +648,11 @@ redirecting.
   64 MiB, 10 passes, or 8 lanes (or an out-of-range salt/key length) instead
   of running it. The defaults (19 MiB, 2 passes, 1 lane) leave room to raise
   them without a code change.
+- **Username charset.** `sidecar-admin user create` accepts 1-64 characters
+  of lowercase ASCII letters, digits, and `._@+-` (input is trimmed and
+  lowercased first). Accounts created before this rule keep signing in; the
+  rule applies to new accounts only. A failed sign-in logs the attempted
+  username cut to 64 characters with control characters replaced.
 
 ### Region API keys and service principals
 

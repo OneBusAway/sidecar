@@ -290,6 +290,9 @@ func testCreateRejectsInvalidUsername(t *testing.T, newRepo newAuthRepoFunc) {
 		{"embedded space", "has space"},
 		{"embedded tab", "has\ttab"},
 		{"too long", strings.Repeat("a", 65)},
+		{"control character", "ad\x00min"},
+		{"escape sequence", "ad\x1b[31mmin"},
+		{"non-ascii", "jos\u00e9"},
 	}
 	for _, tc := range cases {
 		if _, err := repo.CreateUser(ctx, tc.username, testPasswordHash, base); err == nil {
