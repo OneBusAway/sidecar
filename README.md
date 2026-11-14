@@ -127,6 +127,12 @@ sidecar-admin sequence show | bump --min N          # id headroom before a migra
 sidecar-admin migrate  up | status
 ```
 
+An alert's `--url` (and the admin API's `url`) must be empty or an absolute
+`http://` / `https://` URL with a host, at most 2048 bytes; `javascript:`,
+`data:`, protocol-relative, and relative values are refused by the CLI, the
+admin API (`400`), and `import` alike, because the value is published
+verbatim in the feed and rendered as a link.
+
 ### Sending alerts as push notifications
 
 A published alert can also be sent to the region's registered devices as a push

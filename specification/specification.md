@@ -251,6 +251,12 @@ withhold any translation that is *stale* — produced from an earlier version of
 English source text — so riders fall back to accurate English rather than reading
 outdated information. `url` is English-only.
 
+**`url`.** When present, `url` MUST be an absolute `http` or `https` URL with a host
+(the reference implementation also caps it at 2048 bytes); implementations MUST refuse
+anything else at authoring time rather than publish it. Clients drop the value into a
+link, so a `javascript:`, `data:`, protocol-relative, or relative value is an injection
+vector, not a link.
+
 Alerts also drive **push notifications** to registered devices (§4); the feed and the
 push audience are two views of the same authored content.
 

@@ -406,3 +406,31 @@ func TestImport_RejectsIDAtSequenceFloor(t *testing.T) {
 		t.Fatalf("another region can no longer author: %v", err)
 	}
 }
+
+// TestImport_AlertURLValidated (SC-07): import applies the admin API's url
+// rule. OBACloud validates http(s) on write, so this should never fire on
+// real data; when it does, the error names the alert to fix in OBACloud.
+func TestImport_AlertURLValidated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	for _, u := range []string{"javascript:alert(1)", "data:text/html,x", "//evil.example/x", "/detours", "https://example.org/" + strings.Repeat("a", 5000)} {
+		doc := importDoc()
+		doc.Alerts[0].URL = u
+		if err := store.ValidateImport(ctx, doc, importBase); err == nil || !strings.Contains(err.Error(), "alert 4242") || !strings.Contains(err.Error(), "url") {
+			t.Errorf("url %.40q: dry run err %v, want one naming alert 4242's url", u, err)
+		}
+		if _, err := store.Import(ctx, doc, importBase); err == nil {
+			t.Errorf("url %.40q imported", u)
+		}
+	}
+	if _, err := store.Alerts().Get(ctx, 4242); err == nil {
+		t.Fatal("rejected import left the alert behind")
+	}
+	doc := importDoc()
+	doc.Alerts[0].URL = "https://example.org/detours"
+	if _, err := store.Import(ctx, doc, importBase); err != nil {
+		t.Fatalf("valid url: %v", err)
+	}
+}

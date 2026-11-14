@@ -393,6 +393,11 @@ func (p *preparedImport) prepareAlerts(doc *export.Document, now time.Time) erro
 		if err := alerts.ValidateWindow(a.StartTime, a.EndTime, now); err != nil {
 			return fmt.Errorf("export: alert %d: %w", a.ID, err)
 		}
+		// OBACloud validates http(s) on write, so this should not fire on
+		// real data; if it does, the operator fixes the alert there.
+		if err := alerts.ValidateURL(a.URL); err != nil {
+			return fmt.Errorf("export: alert %d: %w", a.ID, err)
+		}
 	}
 	return nil
 }
