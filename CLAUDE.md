@@ -17,6 +17,7 @@ make test-tz            # suite under TZ=UTC and TZ=Asia/Kathmandu; catches loca
 make lint / lint-fix    # golangci-lint (v2 config in .golangci.yml)
 make generate           # sqlc generate   (after editing queries/ or migrations/)
 make generate-check     # sqlc diff — fails if committed gen/ is stale
+make vulncheck          # govulncheck (pinned); scheduled in CI, not part of check
 make web                # build the SvelteKit admin SPA into internal/httpapi/adminui/dist
 make build              # SPA + go build -o bin/sidecar
 make run ARGS="..."     # go run ./cmd/sidecar — does NOT build the SPA; /admin serves 503 until `make web`
