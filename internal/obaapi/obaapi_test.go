@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneBusAway/sidecar/internal/httpx"
 	"github.com/OneBusAway/sidecar/internal/regions"
 )
 
@@ -1022,5 +1024,25 @@ func TestArrivalsAndDeparturesForStop_NoKeyIsErrNotConfigured(t *testing.T) {
 	}
 	if srv.calls.Load() != 0 {
 		t.Error("no request must be made without a key")
+	}
+}
+
+// TestResponseBodiesAreCapped (SC-22): a region's OBA server is an
+// external host; a response past the cap fails the call rather than being
+// read into memory without bound.
+func TestResponseBodiesAreCapped(t *testing.T) {
+	t.Parallel()
+	if MaxResponseBytes < 8<<20 {
+		t.Fatalf("MaxResponseBytes = %d; a large agency's vehicles-for-agency response runs to several MB", MaxResponseBytes)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":200,"data":{"entry":{"pad":"`+strings.Repeat("p", 4096)+`"}}}`)
+	}))
+	defer srv.Close()
+	c := newClient("k", srv.Client(), slog.New(slog.DiscardHandler), 1024)
+	_, err := c.TripDetails(context.Background(), regions.Region{ID: 1, OBABaseURL: srv.URL + "/"}, TripDetailsQuery{TripID: "t", ServiceDate: 1})
+	if !errors.Is(err, httpx.ErrResponseTooLarge) || strings.Contains(err.Error(), "k=") {
+		t.Fatalf("oversized response: err %v, want ErrResponseTooLarge without the URL", err)
 	}
 }

@@ -73,6 +73,11 @@ Apps discover the sidecar through the regions directory. Each region entry carri
 | `sidecarBaseUrl` | HTTPS base URL of the sidecar serving this region.             |
 | `obaBaseUrl`     | Base URL of the region's OBA REST API server.                  |
 
+Implementations SHOULD ignore a directory entry whose `obaBaseUrl` (or a non-empty
+`sidecarBaseUrl`) is not an absolute `http`/`https` URL with a host: the first is where
+region API keys are sent, the second is echoed to apps inside resource URLs. They
+SHOULD also bound the size of OBA responses they read.
+
 A single sidecar instance can serve many regions; the `{regionId}` path segment scopes
 every request. Your implementation MUST treat the numeric region identifier as the
 region's public primary key and MUST return `404 {"error": "Couldn't find Region"}` for

@@ -586,6 +586,14 @@ Weather needs no separate coordinate configuration -- a region's centroid arrive
 automatically as part of `region sync`, computed from the regions directory's
 `bounds` rectangles for that region.
 
+`region sync` (and the server's hourly directory sync) skips any directory
+entry whose `obaBaseUrl`, or non-empty `sidecarBaseUrl`, is not an absolute
+`http://` or `https://` URL with a host; the region keeps whatever an earlier
+sync stored. Plain `http` and loopback or private hosts are accepted on
+purpose -- local development and OBACloud's contract harness use
+`http://127.0.0.1` -- since the directory itself is operator-chosen. Every OBA
+response body is capped at 32 MiB; a larger one fails the call.
+
 ## Donations
 
 `POST /api/v1/payment_intents` (spec section 11) powers the apps' in-app
