@@ -474,7 +474,17 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
   the same every time; every field, including `apns_sandbox`, is re-read.
 - Required: `activity_id`, `push_token` (≤ 4096 chars — a sidecar addition), `stop_id`,
   `route_short_name`, `trip_headsign`. Optional trip metadata: `trip_id`,
-  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`.
+  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`. `stop_id`,
+  `route_short_name`, `trip_headsign`, `trip_id` and `vehicle_id` are capped at
+  255 bytes each (`422`).
+- New subscriptions are capped (a re-registration of an existing activity —
+  token rotation — never is): 5 per ActivityKit push token (`429`; a push token
+  belongs to one activity), and 5000 per region, 20000 in all, and 1000
+  distinct stops per region (`503`, logged as `live activity registration
+  refused at capacity`). Each live row costs a push a minute and each distinct
+  stop an upstream call a minute for up to eight hours; the updater's per-cycle
+  stop cache holds every stop those caps admit, so a cycle makes at most one
+  upstream call per distinct stop.
 - `apns_sandbox` follows the §2.7 allow-list. The stakes are highest here: a
   misrouted push bounces `BadDeviceToken`, which the feedback webhook treats as
   terminal and deletes the subscription.
@@ -489,7 +499,8 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
 
 Deviations from OBACloud, all deliberate: route/headsign matching resolves
 names through the response `references` like the app does; the push-token
-length cap and the POST throttle are new.
+length cap, the field caps, the subscription caps and the POST throttle are
+new.
 
 ## Weather and vehicle search
 

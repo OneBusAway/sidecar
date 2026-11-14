@@ -503,6 +503,14 @@ many individual trips (the "next bus" keeps changing); that's the point.
 
 Set a hard expiry at registration: **8 hours** (Apple's HIG ceiling for Live Activities).
 
+Because registration is unauthenticated and every live subscription costs a push per
+minute (and every distinct stop an upstream call per minute) for those eight hours,
+implementations SHOULD cap text field lengths and the number of live subscriptions, and
+MUST NOT apply count caps to a re-registration of an existing activity (token rotation),
+which would freeze a card mid-trip. The reference: 255 bytes per text field (`422`); 5
+subscriptions per push token (`429`); 5000 per region, 20000 in all, and 1000 distinct
+stops per region (`503`).
+
 ### 6.2 The content-state contract
 
 Every update push carries a `content-state` JSON object the widget decodes. This is a

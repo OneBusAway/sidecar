@@ -180,6 +180,60 @@ func (q *Queries) ListLiveActivities(ctx context.Context) ([]LiveActivity, error
 	return items, nil
 }
 
+const liveActivityUsage = `-- name: LiveActivityUsage :one
+
+SELECT
+  (SELECT COUNT(*) FROM live_activities) AS total,
+  (SELECT COUNT(*) FROM live_activities AS r WHERE r.region_id = ?1) AS in_region,
+  (SELECT COUNT(DISTINCT s.stop_id) FROM live_activities AS s WHERE s.region_id = ?1) AS stops_in_region,
+  (SELECT COUNT(*) FROM live_activities AS p WHERE p.push_token = ?2) AS for_push_token,
+  (SELECT COUNT(*) FROM live_activities AS o WHERE o.region_id = ?1 AND o.stop_id = ?3) AS on_stop,
+  (SELECT COALESCE(MAX(e.stop_id), '') FROM live_activities AS e WHERE e.region_id = ?1 AND e.activity_id = ?4) AS existing_stop_id,
+  (SELECT COUNT(*) FROM live_activities AS x WHERE x.region_id = ?1 AND x.activity_id = ?4) AS existing
+`
+
+type LiveActivityUsageParams struct {
+	RegionID   int64
+	PushToken  string
+	StopID     string
+	ActivityID string
+}
+
+type LiveActivityUsageRow struct {
+	Total          int64
+	InRegion       int64
+	StopsInRegion  int64
+	ForPushToken   int64
+	OnStop         int64
+	ExistingStopID interface{}
+	Existing       int64
+}
+
+// LiveActivityUsage feeds the registration caps (SC-03): table-wide and
+// per-region row counts, distinct stops in the region, rows on this push
+// token and on this stop, and whether (region, activity_id) already exists
+// and on which stop. One round trip; the counts are a soft cap, so a race
+// between this read and the insert can overshoot by the concurrency.
+func (q *Queries) LiveActivityUsage(ctx context.Context, arg LiveActivityUsageParams) (LiveActivityUsageRow, error) {
+	row := q.db.QueryRowContext(ctx, liveActivityUsage,
+		arg.RegionID,
+		arg.PushToken,
+		arg.StopID,
+		arg.ActivityID,
+	)
+	var i LiveActivityUsageRow
+	err := row.Scan(
+		&i.Total,
+		&i.InRegion,
+		&i.StopsInRegion,
+		&i.ForPushToken,
+		&i.OnStop,
+		&i.ExistingStopID,
+		&i.Existing,
+	)
+	return i, err
+}
+
 const recordLiveActivityFailure = `-- name: RecordLiveActivityFailure :one
 
 UPDATE live_activities SET consecutive_failures = consecutive_failures + 1, updated_at = unixepoch()

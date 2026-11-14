@@ -132,6 +132,9 @@ type Deps struct {
 	// distinct stop a registration names costs one upstream call per
 	// minute for eight hours). NewRouter defaults it; tests inject tighter.
 	LiveActivityLimiter *ratelimit.Limiter
+	// LiveActivityCaps bounds live subscriptions (SC-03). Zero fields take
+	// liveactivities.DefaultCaps; tests set tight ones.
+	LiveActivityCaps liveactivities.Caps
 
 	// Surveys backs the survey list and survey response endpoints (spec
 	// §7). Nil means those routes are not registered.

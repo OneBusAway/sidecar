@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -89,6 +90,9 @@ func (r *fakeRepo) RecordPush(_ context.Context, id int64, state liveactivities.
 	la.LastPushedAt = &at
 	r.rows[id] = la
 	return nil
+}
+func (r *fakeRepo) Usage(context.Context, int64, string, string, string) (liveactivities.Usage, error) {
+	return liveactivities.Usage{}, nil
 }
 func (r *fakeRepo) get(id int64) (liveactivities.LiveActivity, bool) {
 	r.mu.Lock()
@@ -505,5 +509,26 @@ func TestEndKeepsRowReRegisteredMidSweep(t *testing.T) {
 	}
 	if p := s.pushes(); len(p) != 1 || p[0].Event != "end" {
 		t.Errorf("end push still goes to the token the sweep saw: %+v", p)
+	}
+}
+
+// TestOneFetchPerStopPerCycleAtTheStopCap (SC-03): the per-cycle stop cache
+// must hold every distinct stop the caps admit, or rows on an early stop
+// listed again late in the sweep are refetched (the old 1024-entry cache).
+func TestOneFetchPerStopPerCycleAtTheStopCap(t *testing.T) {
+	const stops = 1100
+	var rows []liveactivities.LiveActivity
+	for pass := range 2 {
+		for i := range stops {
+			id := int64(pass*stops + i + 1)
+			la := activity(id, "stop-"+strconv.Itoa(i))
+			la.PushToken = "push-" + strconv.FormatInt(id, 10)
+			rows = append(rows, la)
+		}
+	}
+	h := newHarness(t, nil, rows...)
+	h.cycle()
+	if got := h.oba.count(); got != stops {
+		t.Fatalf("upstream fetches = %d for %d rows on %d stops; want %d", got, len(rows), stops, stops)
 	}
 }

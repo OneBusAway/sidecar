@@ -516,7 +516,16 @@ paths:
                 error: Unable to register live activity
                 messages: ["Push token can't be blank"]
         '429':
-          description: Rate limited (30/minute per client address). DELETE is not throttled.
+          description: >
+            Empty body. Rate limited (30/minute per client address; DELETE
+            is not throttled), or this `push_token` already has 5 live
+            subscriptions. A re-registration of an existing `activity_id`
+            is never refused by the count caps.
+        '503':
+          description: >
+            Empty body. At capacity: the region already has 5000 live
+            subscriptions or 1000 distinct stops (and this registration
+            names a new one), or the server has 20000 in all.
         '500':
           $ref: '#/components/responses/RegionStoreFailure'
 
@@ -1002,20 +1011,25 @@ components:
             re-POSTed.
         stop_id:
           type: string
+          maxLength: 255
         route_short_name:
           type: string
+          maxLength: 255
           description: Display identity — arrivals are filtered to this route+headsign.
           examples: ["44"]
         trip_headsign:
           type: string
+          maxLength: 255
           examples: ["Ballard"]
         trip_id:
           type: string
+          maxLength: 255
           description: Optional display metadata; identity is bookmark-scoped, not trip-scoped.
         service_date:
           $ref: '#/components/schemas/EpochMilliseconds'
         vehicle_id:
           type: string
+          maxLength: 255
         stop_sequence:
           type: integer
         apns_sandbox:
