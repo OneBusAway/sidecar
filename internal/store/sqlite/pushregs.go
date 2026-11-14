@@ -28,12 +28,14 @@ type pushRegRepo struct {
 // with no application-level retry.
 //
 // The three CASE WHEN ? THEN excluded.col ELSE push_registrations.col END
-// expressions are the sticky-field semantics (spec section 4): each of
+// expressions on locale, test_device and description are the sticky-field semantics (spec section 4): each of
 // locale, test_device, and description carries its own independent
 // set-flag, so a caller can overwrite one without touching the others.
-// operating_system, apns_sandbox, and last_seen_at have no such flag --
-// every registration restates its own build's platform and APNs
-// environment, and every registration is by definition a sighting.
+// operating_system and last_seen_at have no such flag -- every
+// registration restates its own build's platform, and every registration is
+// by definition a sighting. apns_sandbox is overwritten too unless the
+// caller sets KeepStoredAPNSSandbox (the alarm side effect, which is not a
+// registration and may not know the build's APNs environment).
 const upsertPushRegistrationSQL = `
 INSERT INTO push_registrations (
   region_id, token, operating_system, apns_sandbox,
@@ -42,7 +44,7 @@ INSERT INTO push_registrations (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (region_id, token) DO UPDATE SET
   operating_system = excluded.operating_system,
-  apns_sandbox     = excluded.apns_sandbox,
+  apns_sandbox     = CASE WHEN CAST(? AS BOOLEAN) THEN push_registrations.apns_sandbox ELSE excluded.apns_sandbox END,
   locale           = CASE WHEN CAST(? AS BOOLEAN) THEN excluded.locale      ELSE push_registrations.locale      END,
   test_device      = CASE WHEN CAST(? AS BOOLEAN) THEN excluded.test_device ELSE push_registrations.test_device END,
   description      = CASE WHEN CAST(? AS BOOLEAN) THEN excluded.description ELSE push_registrations.description END,
@@ -64,6 +66,7 @@ func (r *pushRegRepo) Upsert(ctx context.Context, in pushreg.Upsert, now time.Ti
 		in.RegionID, in.Token, in.OperatingSystem, in.APNSSandbox,
 		deref(in.Locale, ""), deref(in.TestDevice, false), deref(in.Description, ""),
 		ts, ts, ts,
+		in.KeepStoredAPNSSandbox,
 		in.Locale != nil, in.TestDevice != nil, in.Description != nil,
 	)
 	if err != nil {

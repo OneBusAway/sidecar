@@ -313,8 +313,8 @@ func TestCreateV2_SideEffectUpsertsPushRegistration(t *testing.T) {
 	if reg.OperatingSystem != pushreg.OSIOS {
 		t.Errorf("OperatingSystem = %q, want %q", reg.OperatingSystem, pushreg.OSIOS)
 	}
-	if reg.APNSSandbox {
-		t.Errorf("APNSSandbox = true, want false -- the alarm's sandbox=true must not propagate (spec §5.2 wart)")
+	if !reg.APNSSandbox {
+		t.Errorf("APNSSandbox = false, want true -- a new registration takes the alarm's apns_sandbox (spec §5.2)")
 	}
 	if reg.Locale != "" {
 		t.Errorf("Locale = %q, want empty", reg.Locale)
@@ -353,6 +353,51 @@ func TestCreateV2_SideEffectRefreshesExisting(t *testing.T) {
 	}
 	if !reg.LastSeenAt.Equal(base) {
 		t.Errorf("LastSeenAt = %v, want %v (advanced by the side-effect)", reg.LastSeenAt, base)
+	}
+}
+
+// TestCreateV2_SideEffectSandboxCarriedOrPreserved covers the alarm-side
+// registration refresh's APNs environment: a sandbox registration must not
+// be demoted to production by an alarm create, whether the alarm restates
+// apns_sandbox=1 (the iOS app does) or omits it; an explicit value on the
+// alarm wins; and an Android alarm always writes production.
+func TestCreateV2_SideEffectSandboxCarriedOrPreserved(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		seedSandbox bool
+		body        string
+		want        bool
+	}{
+		{"sandbox row, alarm restates sandbox", true, "user_push_id=push1&operating_system=ios&apns_sandbox=1", true},
+		{"sandbox row, alarm omits apns_sandbox", true, "user_push_id=push1&operating_system=ios", true},
+		{"sandbox row, alarm says production", true, "user_push_id=push1&operating_system=ios&apns_sandbox=0", false},
+		{"production row, alarm says sandbox", false, "user_push_id=push1&operating_system=ios&apns_sandbox=1", true},
+		{"production row, alarm omits apns_sandbox", false, "user_push_id=push1&operating_system=ios", false},
+		{"sandbox row, android alarm", true, "user_push_id=push1&operating_system=android&apns_sandbox=1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h, _, pushRepo, regionRepo := newAlarmsTestServer(t, &fakeAlarmsOBA{})
+			putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
+			if err := pushRepo.Upsert(context.Background(), pushreg.Upsert{
+				RegionID: 1, Token: "push1", OperatingSystem: pushreg.OSIOS, APNSSandbox: tt.seedSandbox,
+			}, base.Add(-time.Hour)); err != nil {
+				t.Fatalf("seed pushreg: %v", err)
+			}
+			rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT, tt.body)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+			}
+			reg, err := pushRepo.Get(context.Background(), 1, "push1")
+			if err != nil {
+				t.Fatalf("Get(push1): %v", err)
+			}
+			if reg.APNSSandbox != tt.want {
+				t.Errorf("APNSSandbox = %v, want %v", reg.APNSSandbox, tt.want)
+			}
+		})
 	}
 }
 

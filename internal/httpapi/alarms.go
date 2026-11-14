@@ -135,14 +135,24 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 
 		if version == 2 {
 			// Every V2 alarm creation also refreshes the alert-push audience
-			// (spec §5.2): OS and last_seen_at only, no locale, and -- the
-			// documented reference wart -- no apns_sandbox propagation. This
-			// upsert bypasses the registration endpoint's own validation; the
-			// length cap that endpoint enforces (maxTokenLen, spec §2.6) was
-			// already applied to user_push_id above (alarmBoundsMessages),
-			// and the alarm throttle bounds how often this path runs.
+			// (spec §5.2): OS and last_seen_at, no locale. An iOS alarm that
+			// carries apns_sandbox restates the build's APNs environment, so
+			// it is written; one that omits it keeps the stored value (a new
+			// row starts as production) rather than demoting a sandbox
+			// device, whose alert pushes would then bounce. Android is always
+			// production. This upsert bypasses the registration endpoint's
+			// own validation; the length cap that endpoint enforces
+			// (maxTokenLen, spec §2.6) was already applied to user_push_id
+			// above (alarmBoundsMessages), and the alarm throttle bounds how
+			// often this path runs.
+			sandboxGiven := false
+			if raw, ok := p.str("apns_sandbox"); ok && raw != "" {
+				sandboxGiven = true
+			}
 			if err := h.deps.PushRegs.Upsert(r.Context(), pushreg.Upsert{
 				RegionID: region.ID, Token: userPushID, OperatingSystem: os,
+				APNSSandbox:           sandbox,
+				KeepStoredAPNSSandbox: os == pushreg.OSIOS && !sandboxGiven,
 			}, h.deps.Now()); err != nil {
 				// The alarm exists and its 201 must stand; the registry miss
 				// only costs alert-push reach. err's Token is user_push_id on

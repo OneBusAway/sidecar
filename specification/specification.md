@@ -397,12 +397,14 @@ real OBA ids of tens of bytes, the service date of a departure on screen.
 
 **Side effect (V2):** every successful V2 alarm creation also upserts a push
 registration (§4) for `user_push_id` — refreshing `operating_system` and
-`last_seen_at`, but carrying no `locale` and no `apns_sandbox`. Consequences:
-alarm-only devices are part of the alert-push audience and reach counts, and their
-180-day retention clock is refreshed by alarm creation, not only app launches. (Known
-reference wart: because `apns_sandbox` isn't propagated, a sandbox debug build that
-only ever creates alarms gets a production-routed *alert* registration, which bounces
-terminally and is pruned.)
+`last_seen_at`, carrying no `locale`. For `apns_sandbox` (§2.7): an iOS alarm that
+sends the field writes its value to the registration; one that omits it leaves an
+existing registration's value alone (a new registration starts as production); an
+Android alarm always writes production. An alarm create MUST NOT demote a sandbox
+registration to production merely by omitting the field — the device's alert pushes
+would then route to the wrong APNs host and bounce. Consequences: alarm-only devices
+are part of the alert-push audience and reach counts, and their 180-day retention
+clock is refreshed by alarm creation, not only app launches.
 
 ### 5.3 Firing behavior (normative)
 
