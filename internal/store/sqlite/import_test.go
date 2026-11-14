@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -360,5 +362,47 @@ func TestImport_ValidatesBeforeWriting(t *testing.T) {
 	empty := sqlitetest.Open(t)
 	if _, err := empty.Import(ctx, importDoc(), importBase); !errors.Is(err, sqlite.ErrRegionMissing) {
 		t.Fatalf("missing region: %v", err)
+	}
+}
+
+// TestImport_RejectsIDAtSequenceFloor (SC-13): an alert id of MaxInt64
+// would park the shared alerts sequence where SQLite has no id left to
+// mint, breaking alert creation in every region. It is rejected before the
+// transaction opens: nothing lands, the sequences do not move, and another
+// region can still author.
+func TestImport_RejectsIDAtSequenceFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 2, Name: "Elsewhere", OBABaseURL: "https://example.org/", Active: true,
+	}}, importBase); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Sequences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := importDoc()
+	doc.Alerts[0].ID = math.MaxInt64
+	if dryErr := store.ValidateImport(ctx, doc, importBase); dryErr == nil {
+		t.Fatal("dry run accepted an id at MaxInt64")
+	}
+	if _, impErr := store.Import(ctx, doc, importBase); impErr == nil || !strings.Contains(impErr.Error(), "sequence floor") {
+		t.Fatalf("import err %v, want a sequence-floor rejection", impErr)
+	}
+	after, err := store.Sequences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Fatalf("sequences moved: %v -> %v", before, after)
+	}
+	if _, err := store.Surveys().GetStudy(ctx, 7); err == nil {
+		t.Fatal("rejected import left the study behind")
+	}
+	if _, err := store.Alerts().Create(ctx, alerts.NewAlert{RegionID: 2, AgencyID: "1", HeaderText: "h", StartTime: importBase}, importBase); err != nil {
+		t.Fatalf("another region can no longer author: %v", err)
 	}
 }

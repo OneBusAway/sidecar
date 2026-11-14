@@ -31,6 +31,37 @@ type Document struct {
 	SurveyResponses   []SurveyResponse   `json:"survey_responses"`
 	PushRegistrations []PushRegistration `json:"push_registrations"`
 	GhostBusReports   []GhostBusReport   `json:"ghost_bus_reports"`
+
+	// IDFloor is the sidecar's id-sequence floor (`sidecar-admin sequence
+	// bump --min`); Validate rejects any carried id at or above it. It is
+	// the importer's setting, never part of the wire format (the CLI's
+	// --id-floor), and zero means DefaultIDFloor.
+	IDFloor int64 `json:"-"`
+}
+
+// DefaultIDFloor is the floor the cutover runbook bumps the alerts,
+// studies, surveys, and survey_questions sequences to before the first
+// region migrates, and OBACloud's Sidecar::Cutover::ID_HEADROOM: every id
+// OBACloud exports sits below it, and every id this database mints after
+// the bump sits above it. An imported id at or above the floor could only
+// collide with sidecar-authored content -- or, at MaxInt64, leave a shared
+// AUTOINCREMENT sequence with no id left to mint for any region.
+const DefaultIDFloor int64 = 1_000_000
+
+// floor is the effective IDFloor.
+func (d *Document) floor() int64 {
+	if d.IDFloor > 0 {
+		return d.IDFloor
+	}
+	return DefaultIDFloor
+}
+
+// checkFloor rejects an id at or above the document's floor.
+func (d *Document) checkFloor(kind string, id int64) error {
+	if id >= d.floor() {
+		return fmt.Errorf("export: %s id %d is at or above the sequence floor %d; OBACloud ids must stay below it (README, Id headroom)", kind, id, d.floor())
+	}
+	return nil
 }
 
 // Alert is one authored service alert with its translations. Cause,
@@ -233,6 +264,9 @@ func (d *Document) validateAlerts() error {
 		if a.ID <= 0 || strings.TrimSpace(a.HeaderText) == "" || a.StartTime.IsZero() || strings.TrimSpace(a.AgencyID) == "" {
 			return fmt.Errorf("export: alert %d needs a positive id, header_text, start_time, and agency_id", a.ID)
 		}
+		if err := d.checkFloor("alert", a.ID); err != nil {
+			return err
+		}
 		if err := ids.add("alert", a.ID); err != nil {
 			return err
 		}
@@ -258,11 +292,14 @@ func (d *Document) validateStudies() error {
 		if s.ID <= 0 || s.Name == "" {
 			return fmt.Errorf("export: study %d needs a positive id and a name", s.ID)
 		}
+		if err := d.checkFloor("study", s.ID); err != nil {
+			return err
+		}
 		if err := studies.add("study", s.ID); err != nil {
 			return err
 		}
 		for _, sv := range s.Surveys {
-			if err := validateSurvey(s.ID, sv, surveys, questions); err != nil {
+			if err := d.validateSurvey(s.ID, sv, surveys, questions); err != nil {
 				return err
 			}
 		}
@@ -270,12 +307,15 @@ func (d *Document) validateStudies() error {
 	return nil
 }
 
-func validateSurvey(studyID int64, sv Survey, surveys, questions keySet) error {
+func (d *Document) validateSurvey(studyID int64, sv Survey, surveys, questions keySet) error {
 	if sv.ID <= 0 || sv.Name == "" {
 		return fmt.Errorf("export: survey %d (study %d) needs a positive id and a name", sv.ID, studyID)
 	}
 	if (sv.StartTime == nil) != (sv.EndTime == nil) {
 		return fmt.Errorf("export: survey %d has only one of start_time/end_time; set both or neither", sv.ID)
+	}
+	if err := d.checkFloor("survey", sv.ID); err != nil {
+		return err
 	}
 	if err := surveys.add("survey", sv.ID); err != nil {
 		return err
@@ -283,6 +323,9 @@ func validateSurvey(studyID int64, sv Survey, surveys, questions keySet) error {
 	for _, q := range sv.Questions {
 		if q.ID <= 0 || len(q.Content) == 0 {
 			return fmt.Errorf("export: question %d (survey %d) needs a positive id and content", q.ID, sv.ID)
+		}
+		if err := d.checkFloor("question", q.ID); err != nil {
+			return err
 		}
 		if err := questions.add("question", q.ID); err != nil {
 			return err
@@ -296,6 +339,11 @@ func (d *Document) validateResponses() error {
 	for _, r := range d.SurveyResponses {
 		if r.SurveyID <= 0 || r.PublicID == "" || r.UserIdentifier == "" {
 			return fmt.Errorf("export: survey response %q needs survey_id, public_id, and user_identifier", r.PublicID)
+		}
+		// A response can name a survey an earlier run migrated, so its
+		// survey_id is held to the floor on its own.
+		if err := d.checkFloor(fmt.Sprintf("survey response %q survey", r.PublicID), r.SurveyID); err != nil {
+			return err
 		}
 		if err := ids.add("survey response", r.PublicID); err != nil {
 			return err

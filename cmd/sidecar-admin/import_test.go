@@ -118,3 +118,27 @@ func TestImportCommand_ReadsStdin(t *testing.T) {
 		t.Fatalf("trailing content on stdin: err = %v", err)
 	}
 }
+
+// TestImportCommand_IDFloor (SC-13): ids at or above the sequence floor are
+// refused before anything is written; a deployment that raised its floor in
+// lockstep with OBACloud's ID_HEADROOM says so with --id-floor.
+func TestImportCommand_IDFloor(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	seedRegion(t, store.Regions(), 16)
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	doc := export.Document{
+		Format: export.Format, ExportedAt: start, RegionID: 16,
+		Alerts: []export.Alert{{ID: 1_500_000, AgencyID: "unitrans", HeaderText: "High id", StartTime: start, Published: true}},
+	}
+	path := writeExportDoc(t, doc)
+	cliErrContains(t, dbPath, "sequence floor 1000000", "import", "--file", path, "--dry-run")
+	cliErrContains(t, dbPath, "sequence floor 1000000", "import", "--file", path)
+	if _, err := store.Alerts().Get(context.Background(), 1_500_000); err == nil {
+		t.Fatal("refused import wrote the alert")
+	}
+	cliErrContains(t, dbPath, "id-floor must be positive", "import", "--file", path, "--id-floor", "0")
+	if _, _, err := cli(t, dbPath, "import", "--file", path, "--id-floor", "2000000"); err != nil {
+		t.Fatalf("raised floor: %v", err)
+	}
+}

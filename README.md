@@ -122,7 +122,7 @@ sidecar-admin user    create --username NAME [--password-stdin]
                        passwd --username NAME [--password-stdin]
                        list
                        delete --username NAME [--force]
-sidecar-admin import  --file <path|-> [--dry-run]   # an OBACloud region export
+sidecar-admin import  --file <path|-> [--dry-run] [--id-floor N]   # an OBACloud region export
 sidecar-admin sequence show | bump --min N          # id headroom before a migration
 sidecar-admin migrate  up | status
 ```
@@ -940,6 +940,18 @@ once per deployment: `bump` raises the `alerts`, `studies`, `surveys`, and
 or a lower floor changes nothing), and `show` prints each current value so
 the cutover runbook can verify the headroom is still there. 1,000,000 is
 comfortably above any OBACloud id and its growth during the migration.
+
+`import` holds the other side of that line: an alert, study, survey, or
+question id -- or a survey response's `survey_id` -- at or above the floor
+rejects the whole document before anything is written, so an export can
+neither collide with ids this database minted after the bump nor park a
+shared sequence at `MaxInt64`, where SQLite has no id left to mint for
+any region. The floor defaults to 1,000,000; a deployment that raised it
+(in lockstep with OBACloud's `Sidecar::Cutover::ID_HEADROOM`) passes the
+same value as `import --id-floor N`. Translations, survey responses, push
+registrations, and ghost bus reports are keyed by language, public id, or
+token, not by a carried id, so the floor does not apply to them; alarms and
+Live Activities are not in the document at all.
 
 #### Backups
 

@@ -26,11 +26,15 @@ func runImport(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sq
 	fs.SetOutput(io.Discard)
 	file := fs.String("file", "", "path to the export document, or - for stdin (required)")
 	dryRun := fs.Bool("dry-run", false, "validate the document and report what would be imported, without writing")
+	idFloor := fs.Int64("id-floor", export.DefaultIDFloor, "refuse ids at or above this floor; match `sequence bump --min`")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *file == "" {
 		return errors.New("import requires --file")
+	}
+	if *idFloor <= 0 {
+		return fmt.Errorf("import: --id-floor must be positive, got %d", *idFloor)
 	}
 	r := stdin
 	source := "stdin"
@@ -54,6 +58,7 @@ func runImport(ctx context.Context, stdin io.Reader, stdout io.Writer, store *sq
 	if _, trailingErr := dec.Token(); !errors.Is(trailingErr, io.EOF) {
 		return fmt.Errorf("import: %s: unexpected content after the document", source)
 	}
+	doc.IDFloor = *idFloor
 	if *dryRun {
 		// The same pre-checks the real import runs, so a clean dry run
 		// means the import will not stop on validation (it can still
