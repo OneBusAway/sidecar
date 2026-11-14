@@ -64,7 +64,7 @@ func (h *liveActivitiesHandler) register(w http.ResponseWriter, r *http.Request)
 	}
 	trip := parseTripIdentity(p)
 	for _, f := range []struct{ label, value string }{
-		{"Stop", stopID}, {"Route short name", routeShortName},
+		{"Activity", activityID}, {"Stop", stopID}, {"Route short name", routeShortName},
 		{"Trip headsign", tripHeadsign}, {"Trip", trip.TripID}, {"Vehicle", trip.VehicleID},
 	} {
 		if len(f.value) > maxLiveActivityFieldLen {

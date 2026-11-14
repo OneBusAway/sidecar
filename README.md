@@ -474,7 +474,7 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
   the same every time; every field, including `apns_sandbox`, is re-read.
 - Required: `activity_id`, `push_token` (≤ 4096 chars — a sidecar addition), `stop_id`,
   `route_short_name`, `trip_headsign`. Optional trip metadata: `trip_id`,
-  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`. `stop_id`,
+  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`. `activity_id`, `stop_id`,
   `route_short_name`, `trip_headsign`, `trip_id` and `vehicle_id` are capped at
   255 bytes each (`422`).
 - New subscriptions are capped (a re-registration of an existing activity —
@@ -485,6 +485,11 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
   stop an upstream call a minute for up to eight hours; the updater's per-cycle
   stop cache holds every stop those caps admit, so a cycle makes at most one
   upstream call per distinct stop.
+- `activity_id` is the only proof of ownership for a re-registration (a re-POST
+  with a known id takes over the row). Its shape is deliberately not enforced:
+  ActivityKit documents `Activity.id` only as an opaque `String` and the app
+  forwards it verbatim, so only its length is capped. In practice it is a
+  random UUID, which is what makes it unguessable.
 - `apns_sandbox` follows the §2.7 allow-list. The stakes are highest here: a
   misrouted push bounces `BadDeviceToken`, which the feedback webhook treats as
   terminal and deletes the subscription.

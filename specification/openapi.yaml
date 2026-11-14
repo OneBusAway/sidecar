@@ -1000,6 +1000,7 @@ components:
       properties:
         activity_id:
           type: string
+          maxLength: 255
           description: >
             The ActivityKit activity's id. Upsert key (with the region):
             re-registration with the same id updates the stored subscription.

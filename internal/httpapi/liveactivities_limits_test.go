@@ -64,6 +64,7 @@ func TestLiveActivityFieldLengthCaps(t *testing.T) {
 	t.Parallel()
 	long := func(n int) string { return strings.Repeat("x", n) }
 	for _, tc := range []struct{ field, want string }{
+		{"activity_id", "Activity is too long (maximum is 255 characters)"},
 		{"stop_id", "Stop is too long (maximum is 255 characters)"},
 		{"route_short_name", "Route short name is too long (maximum is 255 characters)"},
 		{"trip_headsign", "Trip headsign is too long (maximum is 255 characters)"},

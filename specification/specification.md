@@ -507,7 +507,10 @@ Because registration is unauthenticated and every live subscription costs a push
 minute (and every distinct stop an upstream call per minute) for those eight hours,
 implementations SHOULD cap text field lengths and the number of live subscriptions, and
 MUST NOT apply count caps to a re-registration of an existing activity (token rotation),
-which would freeze a card mid-trip. The reference: 255 bytes per text field (`422`); 5
+which would freeze a card mid-trip. `activity_id` is the only ownership proof for an
+upsert, but its format is not part of the contract (ActivityKit documents it only as an
+opaque string), so the reference caps its length and does not enforce a UUID shape. The
+reference: 255 bytes per text field, `activity_id` included (`422`); 5
 subscriptions per push token (`429`); 5000 per region, 20000 in all, and 1000 distinct
 stops per region (`503`).
 
