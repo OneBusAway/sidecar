@@ -178,6 +178,10 @@ real client behavior:
 | `/api/v2/regions/{id}/push_registrations` (any method) | 30/minute per IP |
 | `POST /api/v2/regions/{id}/ghost_bus_reports` | 10/hour per IP **and** 20/day per `user_identifier` |
 
+"Per IP" means per IPv4 address, or per IPv6 **/64**: an IPv6 subscriber is
+routinely delegated a whole /64, so a limiter keyed on the full address is bypassed by
+rotating the interface bits.
+
 Push registration is throttled because junk tokens inflate an agency's apparent push
 reach and turn every alert send into a fan-out to garbage. (The reference throttle
 matches on path alone, so opt-out DELETEs share the POST bucket.) Ghost bus reports are

@@ -836,7 +836,12 @@ Render's `*.onrender.com` hostname directly, where anyone could set
 buckets -- keys on the peer, as with the setting off. Requests with the
 proof but no header, or a value that is not an IP address, also fall back
 to the peer. There is deliberately no `X-Forwarded-For` mode: its first
-entry is whatever the client sent. Leaving the setting off
+entry is whatever the client sent. Whichever source is used, an IPv6
+client is keyed on its /64 (`2001:db8:1:2::/64`), not its full address:
+a subscriber is routinely handed a whole /64 and could otherwise mint a
+fresh bucket per request by rotating the low bits. IPv4 (and IPv4-mapped
+IPv6) addresses are keyed as-is. The request log's `ip` field shows the
+same key. Leaving the setting off
 behind a proxy that terminates and re-originates TCP means every request
 throttles against the proxy's own address -- one shared bucket for all
 clients, which at any real traffic level is a 429 for nearly everyone.

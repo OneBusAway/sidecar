@@ -10,7 +10,8 @@
 // directly (Render's *.onrender.com hostname beside a Cloudflare-proxied
 // domain) would otherwise let any caller mint a fresh bucket per request
 // by varying the header. There is no X-Forwarded-For mode: its first entry
-// is whatever the client sent.
+// is whatever the client sent. Either way the result is a throttle key
+// (see Key): an IPv6 address collapses to its /64.
 package clientip
 
 import (
@@ -44,14 +45,48 @@ type Options struct {
 	Secret string
 }
 
-// Peer is the default Resolver: the connection's remote host, or the raw
-// RemoteAddr when it carries no port.
+// ipv6KeyBits is the prefix an IPv6 throttle key is collapsed to. A /64 is
+// the smallest block an ISP hands a subscriber (RFC 6177): every address in
+// it is one client, so keying on the full address would hand one caller
+// 2^64 fresh buckets.
+const ipv6KeyBits = 64
+
+// Peer is the default Resolver: the connection's remote host as a throttle
+// key (see Key), or the raw RemoteAddr when it carries no port.
 func Peer(r *http.Request) string {
+	return Key(peerHost(r))
+}
+
+// peerHost is the connection's remote host exactly as the socket reports
+// it. Proxy proof (viaProxy) compares this, never the collapsed key: a
+// ::1/128 trusted range must still match loopback.
+func peerHost(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// Key normalizes an address into the identity every per-IP throttle (and
+// the request log) uses: an IPv4 address -- including an IPv4-mapped IPv6
+// one -- is itself, and an IPv6 address is its /64 in prefix notation
+// ("2001:db8:1:2::/64"). Anything that is not an IP address is returned
+// unchanged.
+func Key(addr string) string {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		return addr
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return ip.String()
+	}
+	p, err := ip.WithZone("").Prefix(ipv6KeyBits)
+	if err != nil {
+		return addr
+	}
+	return p.String()
 }
 
 // Header returns a Resolver that reads the named header for requests the
@@ -67,7 +102,7 @@ func Header(name string, opts Options) Resolver {
 		}
 		v := strings.TrimSpace(r.Header.Get(name))
 		if ip := net.ParseIP(v); ip != nil {
-			return ip.String()
+			return Key(ip.String())
 		}
 		return Peer(r)
 	}
@@ -80,7 +115,7 @@ func viaProxy(r *http.Request, opts Options) bool {
 	if len(opts.Prefixes) == 0 {
 		return false
 	}
-	peer, err := netip.ParseAddr(Peer(r))
+	peer, err := netip.ParseAddr(peerHost(r))
 	if err != nil {
 		return false
 	}
