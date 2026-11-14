@@ -427,3 +427,34 @@ func TestWeatherLogsCancellationAtWarnOnly(t *testing.T) {
 		})
 	}
 }
+
+// The shipped apps request ".json" (Rails-style); it must behave exactly like
+// the bare path in every outcome, including the deliberate 403 and the 404.
+func TestWeatherJSONAliasMatchesBare(t *testing.T) {
+	good := weatherRegion()
+	noCentroid := regions.Region{ID: 2, Name: "Unsynced", OBABaseURL: "https://x/", Active: true}
+	regs := newTestRegions(t, good, noCentroid)
+	srv := newWeatherTestServer(t, &fakeProvider{snap: sampleSnapshot(time.Date(2026, 1, 9, 15, 0, 0, 0, time.UTC))}, regs)
+
+	for _, tc := range []struct {
+		seg  string
+		want int
+	}{{"1", http.StatusOK}, {"2", http.StatusForbidden}, {"99", http.StatusNotFound}} {
+		get := func(path string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil))
+			return rec
+		}
+		bare := get("/api/v1/regions/" + tc.seg + "/weather")
+		alias := get("/api/v1/regions/" + tc.seg + "/weather.json")
+		if bare.Code != tc.want || alias.Code != tc.want {
+			t.Errorf("region %s: status bare=%d alias=%d, want %d", tc.seg, bare.Code, alias.Code, tc.want)
+		}
+		if bare.Body.String() != alias.Body.String() {
+			t.Errorf("region %s: alias body %q != bare %q", tc.seg, alias.Body.String(), bare.Body.String())
+		}
+		if a, b := alias.Header().Get("Content-Type"), bare.Header().Get("Content-Type"); a != b {
+			t.Errorf("region %s: Content-Type alias %q != bare %q", tc.seg, a, b)
+		}
+	}
+}

@@ -27,6 +27,10 @@ companion CLI that writes the same database directly.
 
 - `GET /api/v1/regions/{regionId}/alerts` — the feed as binary protobuf
   (`application/octet-stream`), the format apps consume.
+- `GET /api/v1/regions/{regionId}/alerts.pb` — identical to the bare path. The shipped
+  iOS and Android apps request this one (it is the legacy Rails route's default
+  format). There is no `alerts.json`: Rails never served one and the sidecar has no
+  such representation, so it is a `404`.
 - `GET /api/v1/regions/{regionId}/alerts.pbtext` — the same feed rendered as protobuf
   JSON (`text/plain`), for debugging in a browser or with `curl`.
 
@@ -499,7 +503,8 @@ its live vehicle ids.
 
 ### Endpoints
 
-- `GET /api/v1/regions/{regionId}/weather` — current conditions plus an hourly
+- `GET /api/v1/regions/{regionId}/weather` (also `weather.json`, which is what both
+  shipped apps request; same handler, same `403`) — current conditions plus an hourly
   forecast for the region's centroid. A `403` means "unavailable" and covers the
   provider and configuration failures alike: no Pirate Weather key configured, the
   region has no centroid yet, or the upstream provider errored or timed out. This is
@@ -507,7 +512,8 @@ its live vehicle ids.
   the weather UI" and have been tested against `403` specifically, so these must
   never be "improved" to a 5xx. An unknown `{regionId}` is still a plain `404`, and a
   failure reading the region from the sidecar's own store is a `500`.
-- `GET /api/v1/regions/{regionId}/vehicles?query=` — substring search over the
+- `GET /api/v1/regions/{regionId}/vehicles?query=` (also `vehicles.json`, which Rails
+  served and its redirect preserves) — substring search over the
   region's live vehicle ids. `query` must be between 3 and 64 characters (runes, not
   bytes); shorter or longer queries return `[]` without an upstream call. Only the
   query is lowercased before matching -- vehicle ids are compared raw -- so a fleet
@@ -1140,7 +1146,7 @@ cache rule for `/api/v1/regions/*/alerts*` (*Feed caching*). Then:
 deploy/smoke.sh https://sidecar2.onebusaway.org
 # ok   /healthz -> 200
 # ok   /admin -> 200
-# ok   /api/v1/regions/1/alerts.pbtext -> 200
+# ok   /api/v1/regions/1/alerts.pb -> 200
 ```
 
 The feed line reports `skip … -> 404 (no regions synced yet)` until the

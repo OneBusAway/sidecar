@@ -230,7 +230,10 @@ func NewRouter(deps Deps) http.Handler {
 			depRegions: deps.Regions == nil, depNow: deps.Now == nil,
 		})
 		h := &alertsHandler{deps: deps}
+		// Both shipped apps request ".pb" (the legacy Rails route's default
+		// format), so it is the same handler as the bare path.
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pb", h.feedBinary)
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 	}
 
@@ -241,11 +244,16 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Vehicles != nil {
 		vh := &vehiclesHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
+		// Rails served vehicles with a ".json" suffix and its migrated-region
+		// redirect preserves the full path.
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles.json", vh.search)
 	}
 
 	if deps.Weather != nil {
 		wh := &weatherHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
+		// Both shipped apps request "weather.json".
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather.json", wh.forecast)
 	}
 
 	if deps.PushRegs != nil {

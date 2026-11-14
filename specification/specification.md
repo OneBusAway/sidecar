@@ -222,6 +222,7 @@ terminal (§6.5), silently destroying the subscription.
 
 ```
 GET /api/v1/regions/{regionId}/alerts        → GTFS-realtime FeedMessage (binary protobuf)
+GET /api/v1/regions/{regionId}/alerts.pb     → identical (the path shipped apps request)
 GET /api/v1/regions/{regionId}/alerts.pbtext → the same message as protobuf JSON (debugging)
 ```
 
