@@ -566,6 +566,16 @@ func (r *surveyRepo) CountResponses(ctx context.Context, surveyID int64) (int64,
 	return n, nil
 }
 
+func (r *surveyRepo) CountResponsesByUser(ctx context.Context, surveyID int64, userIdentifier string) (int64, error) {
+	n, err := r.q.CountResponsesForSurveyByUser(ctx, gen.CountResponsesForSurveyByUserParams{
+		SurveyID: surveyID, UserIdentifier: userIdentifier,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count rider responses for survey %d: %w", surveyID, err)
+	}
+	return n, nil
+}
+
 func floatToNull(v *float64) sql.NullFloat64 {
 	if v == nil {
 		return sql.NullFloat64{}
@@ -735,6 +745,29 @@ func (r *surveyRepo) AmendResponse(ctx context.Context, publicID string, incomin
 	}
 	if err := tx.Commit(); err != nil {
 		return surveys.Response{}, fmt.Errorf("sqlite: amend response %d: commit: %w", stored.ID, err)
+	}
+	return out, nil
+}
+
+func (r *surveyRepo) ListResponsesPage(ctx context.Context, surveyID int64, after surveys.ResponseCursor, limit int) ([]surveys.Response, error) {
+	afterCreated := after.CreatedAtUnix
+	if !after.Started() {
+		// created_at is epoch seconds, never negative: -1 admits every row.
+		afterCreated = -1
+	}
+	rows, err := r.q.ListResponsesBySurveyPage(ctx, gen.ListResponsesBySurveyPageParams{
+		SurveyID: surveyID, AfterCreatedAt: afterCreated, AfterID: after.ID, MaxRows: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list responses page for survey %d: %w", surveyID, err)
+	}
+	out := make([]surveys.Response, 0, len(rows))
+	for _, row := range rows {
+		resp, err := responseFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: list responses page for survey %d: %w", surveyID, err)
+		}
+		out = append(out, resp)
 	}
 	return out, nil
 }

@@ -59,3 +59,19 @@ WHERE id = @id AND consecutive_failures <> 0;
 -- name: RecordLiveActivityPush :exec
 UPDATE live_activities SET last_content_state = @last_content_state, last_pushed_at = @pushed_at, updated_at = @pushed_at
 WHERE id = @id;
+
+-- LiveActivityUsage feeds the registration caps (SC-03): table-wide and
+-- per-region row counts, distinct stops in the region, rows on this push
+-- token and on this stop, and whether (region, activity_id) already exists
+-- and on which stop. One round trip; the counts are a soft cap, so a race
+-- between this read and the insert can overshoot by the concurrency.
+
+-- name: LiveActivityUsage :one
+SELECT
+  (SELECT COUNT(*) FROM live_activities) AS total,
+  (SELECT COUNT(*) FROM live_activities AS r WHERE r.region_id = sqlc.arg(region_id)) AS in_region,
+  (SELECT COUNT(DISTINCT s.stop_id) FROM live_activities AS s WHERE s.region_id = sqlc.arg(region_id)) AS stops_in_region,
+  (SELECT COUNT(*) FROM live_activities AS p WHERE p.push_token = sqlc.arg(push_token)) AS for_push_token,
+  (SELECT COUNT(*) FROM live_activities AS o WHERE o.region_id = sqlc.arg(region_id) AND o.stop_id = sqlc.arg(stop_id)) AS on_stop,
+  (SELECT COALESCE(MAX(e.stop_id), '') FROM live_activities AS e WHERE e.region_id = sqlc.arg(region_id) AND e.activity_id = sqlc.arg(activity_id)) AS existing_stop_id,
+  (SELECT COUNT(*) FROM live_activities AS x WHERE x.region_id = sqlc.arg(region_id) AND x.activity_id = sqlc.arg(activity_id)) AS existing;

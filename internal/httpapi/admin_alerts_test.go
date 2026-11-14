@@ -1700,6 +1700,9 @@ func (failingSurveys) DeleteSurvey(context.Context, int64) error { return errSto
 func (failingSurveys) CountResponses(context.Context, int64) (int64, error) {
 	return 0, errStoreBroken
 }
+func (failingSurveys) CountResponsesByUser(context.Context, int64, string) (int64, error) {
+	return 0, errStoreBroken
+}
 func (failingSurveys) CreateResponse(context.Context, surveys.NewResponse, time.Time) (surveys.Response, error) {
 	return surveys.Response{}, errStoreBroken
 }
@@ -1710,6 +1713,9 @@ func (failingSurveys) AmendResponse(context.Context, string, []surveys.Answer, t
 	return surveys.Response{}, errStoreBroken
 }
 func (failingSurveys) ListResponses(context.Context, int64) ([]surveys.Response, error) {
+	return nil, errStoreBroken
+}
+func (failingSurveys) ListResponsesPage(context.Context, int64, surveys.ResponseCursor, int) ([]surveys.Response, error) {
 	return nil, errStoreBroken
 }
 func (failingSurveys) GetResponseInRegion(context.Context, int64, string) (surveys.Response, error) {
@@ -1739,6 +1745,12 @@ func (failingGhostBus) RecordSnapshotFailure(context.Context, int64, time.Time) 
 func (failingGhostBus) ListForExport(context.Context, int64, int64) ([]ghostbus.Report, error) {
 	return nil, errStoreBroken
 }
+func (failingGhostBus) ListForExportPage(context.Context, int64, int64, int64, int) ([]ghostbus.Report, error) {
+	return nil, errStoreBroken
+}
+func (failingGhostBus) TripReportCounts(context.Context, int64, int64) (map[ghostbus.TripKey]int, error) {
+	return nil, errStoreBroken
+}
 func (failingGhostBus) GetByPublicID(context.Context, int64, string) (ghostbus.Report, error) {
 	return ghostbus.Report{}, errStoreBroken
 }
@@ -1759,7 +1771,10 @@ func (failingAlarms) DeleteByID(context.Context, int64) error     { return errSt
 func (failingAlarms) List(context.Context) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
-func (failingAlarms) ListDue(context.Context, time.Time) ([]alarms.Alarm, error) {
+func (failingAlarms) CountByUserPushID(context.Context, string) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingAlarms) ListDue(context.Context, time.Time, int) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
 func (failingAlarms) Defer(context.Context, int64, time.Time) error { return errStoreBroken }
@@ -1768,6 +1783,9 @@ func (failingAlarms) RecordFailure(context.Context, int64) (int64, error) {
 }
 func (failingAlarms) ResetFailures(context.Context, int64) error { return errStoreBroken }
 func (failingAlarms) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) ListByRegionPage(context.Context, int64, int64, int) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
 func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {

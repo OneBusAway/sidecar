@@ -72,6 +72,14 @@ func (r *fakeSnapRepo) ListForExport(context.Context, int64, int64) ([]Report, e
 	panic("not used by the scheduler")
 }
 
+func (r *fakeSnapRepo) ListForExportPage(context.Context, int64, int64, int64, int) ([]Report, error) {
+	panic("not used by the scheduler")
+}
+
+func (r *fakeSnapRepo) TripReportCounts(context.Context, int64, int64) (map[TripKey]int, error) {
+	panic("not used by the scheduler")
+}
+
 func (r *fakeSnapRepo) GetByPublicID(context.Context, int64, string) (Report, error) {
 	panic("not used by the scheduler")
 }

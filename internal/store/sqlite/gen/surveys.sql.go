@@ -21,6 +21,23 @@ func (q *Queries) CountResponsesForSurvey(ctx context.Context, surveyID int64) (
 	return count, err
 }
 
+const countResponsesForSurveyByUser = `-- name: CountResponsesForSurveyByUser :one
+SELECT COUNT(*) FROM survey_responses
+WHERE survey_id = ?1 AND user_identifier = ?2
+`
+
+type CountResponsesForSurveyByUserParams struct {
+	SurveyID       int64
+	UserIdentifier string
+}
+
+func (q *Queries) CountResponsesForSurveyByUser(ctx context.Context, arg CountResponsesForSurveyByUserParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countResponsesForSurveyByUser, arg.SurveyID, arg.UserIdentifier)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createResponse = `-- name: CreateResponse :one
 INSERT INTO survey_responses (
   survey_id, public_id, user_identifier, stop_identifier, stop_latitude, stop_longitude,
@@ -489,6 +506,64 @@ ORDER BY created_at ASC, id ASC
 
 func (q *Queries) ListResponsesBySurvey(ctx context.Context, surveyID int64) ([]SurveyResponse, error) {
 	rows, err := q.db.QueryContext(ctx, listResponsesBySurvey, surveyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SurveyResponse{}
+	for rows.Next() {
+		var i SurveyResponse
+		if err := rows.Scan(
+			&i.ID,
+			&i.SurveyID,
+			&i.PublicID,
+			&i.UserIdentifier,
+			&i.StopIdentifier,
+			&i.StopLatitude,
+			&i.StopLongitude,
+			&i.Answers,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResponsesBySurveyPage = `-- name: ListResponsesBySurveyPage :many
+
+SELECT id, survey_id, public_id, user_identifier, stop_identifier, stop_latitude, stop_longitude, answers, created_at, updated_at FROM survey_responses
+WHERE survey_id = ?1
+  AND (created_at > ?2 OR (created_at = ?2 AND id > ?3))
+ORDER BY created_at ASC, id ASC
+LIMIT ?4
+`
+
+type ListResponsesBySurveyPageParams struct {
+	SurveyID       int64
+	AfterCreatedAt int64
+	AfterID        int64
+	MaxRows        int64
+}
+
+// ListResponsesBySurveyPage is the admin list's bounded page (SC-21), in
+// ListResponsesBySurvey's (created_at, id) order, strictly after the
+// (after_created_at, after_id) cursor.
+func (q *Queries) ListResponsesBySurveyPage(ctx context.Context, arg ListResponsesBySurveyPageParams) ([]SurveyResponse, error) {
+	rows, err := q.db.QueryContext(ctx, listResponsesBySurveyPage,
+		arg.SurveyID,
+		arg.AfterCreatedAt,
+		arg.AfterID,
+		arg.MaxRows,
+	)
 	if err != nil {
 		return nil, err
 	}

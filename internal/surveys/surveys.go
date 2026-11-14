@@ -106,6 +106,22 @@ type Response struct {
 	UpdatedAt      time.Time
 }
 
+// ResponseCursor is a position in ListResponses' order: the CreatedAt (epoch
+// seconds) and ID of the last response already read. The zero value is the
+// start.
+type ResponseCursor struct {
+	CreatedAtUnix int64
+	ID            int64
+}
+
+// Started reports whether the cursor names a position past the start.
+func (c ResponseCursor) Started() bool { return c != ResponseCursor{} }
+
+// CursorAfter is the cursor positioned just after r.
+func CursorAfter(r Response) ResponseCursor {
+	return ResponseCursor{CreatedAtUnix: r.CreatedAt.Unix(), ID: r.ID}
+}
+
 // NewResponse is what the create endpoint hands the repository. PublicID is
 // minted by the caller (securetoken) so the repository never needs an
 // entropy source.
@@ -178,14 +194,38 @@ type Repository interface {
 	UpdateSurvey(ctx context.Context, id int64, def Definition, now time.Time) (Survey, error) // ErrNotFound, ErrQuestionsFrozen, ErrUnknownQuestion
 	DeleteSurvey(ctx context.Context, id int64) error                                          // ErrNotFound, ErrHasResponses
 	CountResponses(ctx context.Context, surveyID int64) (int64, error)
+	// CountResponsesByUser counts one rider's responses to one survey (the
+	// per-rider cap on creates).
+	CountResponsesByUser(ctx context.Context, surveyID int64, userIdentifier string) (int64, error)
 
 	CreateResponse(ctx context.Context, in NewResponse, now time.Time) (Response, error)                    // ErrNotFound for the survey
 	GetResponse(ctx context.Context, publicID string) (Response, error)                                     // ErrNotFound
 	AmendResponse(ctx context.Context, publicID string, incoming []Answer, now time.Time) (Response, error) // ErrNotFound, ErrTooManyAnswers
 	ListResponses(ctx context.Context, surveyID int64) ([]Response, error)
+	// ListResponsesPage is one bounded page of ListResponses (SC-21): at
+	// most limit responses strictly after the cursor, in ListResponses'
+	// (CreatedAt, ID) order. The zero cursor starts at the beginning.
+	ListResponsesPage(ctx context.Context, surveyID int64, after ResponseCursor, limit int) ([]Response, error)
 	// GetResponseInRegion resolves one response through its survey's study's
 	// region, in a single query.
 	GetResponseInRegion(ctx context.Context, regionID int64, publicID string) (Response, error)
+}
+
+// ActiveAt reports whether the survey is one the rider-facing list shows at
+// now (spec §7.1): available, and inside its window when one is set, both
+// bounds inclusive at whole-second precision like ListActiveSurveys.
+func (s Survey) ActiveAt(now time.Time) bool {
+	if !s.Available {
+		return false
+	}
+	sec := now.Unix()
+	if s.StartTime != nil && s.StartTime.Unix() > sec {
+		return false
+	}
+	if s.EndTime != nil && s.EndTime.Unix() < sec {
+		return false
+	}
+	return true
 }
 
 // canonicalJSON is the one place json.RawMessage values are normalized, so

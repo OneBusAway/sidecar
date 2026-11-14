@@ -1024,3 +1024,40 @@ func TestArrivalsAndDeparturesForStop_NoKeyIsErrNotConfigured(t *testing.T) {
 		t.Error("no request must be made without a key")
 	}
 }
+
+// TestArrivalAndDeparture_DefinitiveRejectionIsErrRejected (SC-01): a 4xx
+// that says "this request can never resolve" -- a malformed stop or trip
+// id -- is ErrRejected, so the alarm reaper counts it instead of checking
+// the alarm every minute forever. 401/403 are about our credentials, and
+// 408/429 ask us to retry; none of those is a fact about the alarm.
+func TestArrivalAndDeparture_DefinitiveRejectionIsErrRejected(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusBadRequest, true},
+		{http.StatusGone, true},
+		{http.StatusUnprocessableEntity, true},
+		{http.StatusUnauthorized, false},
+		{http.StatusForbidden, false},
+		{http.StatusRequestTimeout, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			srv := newArrivalServer(t, tc.status, nil, nil)
+			_, err := New("", srv.Client(), slog.New(slog.DiscardHandler)).
+				ArrivalAndDeparture(context.Background(), testRegion(srv.URL, sentinelKey),
+					DepartureQuery{StopID: "1_100", TripID: "1_1", ServiceDate: 1})
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if got := errors.Is(err, ErrRejected); got != tc.want {
+				t.Errorf("errors.Is(err, ErrRejected) = %v, want %v (err = %v)", got, tc.want, err)
+			}
+			if errChainContains(err, sentinelKey) {
+				t.Errorf("error text leaks the API key: %v", err)
+			}
+		})
+	}
+}

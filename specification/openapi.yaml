@@ -163,13 +163,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/SurveyResponseCreated'
         '404':
-          description: Unknown survey.
+          description: >
+            Unknown survey, or one the rider-facing list would not show right
+            now (unavailable, not yet started, or ended) -- the same body
+            either way.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SimpleError'
         '422':
-          description: Validation failure.
+          description: >
+            Validation failure, or this `user_identifier` already has 3
+            responses to this survey (50 when the survey
+            `allows_multiple_responses`): "User identifier has already
+            responded to this survey". Amends are never counted.
           content:
             application/json:
               schema:
@@ -352,6 +359,8 @@ paths:
               example:
                 error: Unable to register alarm
                 messages: ["Push identifier can't be blank"]
+        '429':
+          $ref: '#/components/responses/AlarmCreateLimited'
         '500':
           description: >
             Region store failure, with an empty body. The V1 path also
@@ -405,9 +414,14 @@ paths:
           description: >
             Malformed JSON body sent with a JSON content type. (A malformed
             body sent without one reaches the handler's own parse and 500s
-            in the reference.)
+            in the reference.) Also an amount outside 100–1000000 cents, an
+            email that is not one bare address of at most 254 bytes, or a
+            name over 255 bytes; no Stripe object is created.
         '429':
-          description: Rate limited (10/minute per client address in this implementation; the reference had no throttle here).
+          description: >
+            Rate limited: 10/minute per client address, or the server-wide
+            cap of 500 valid requests per day is spent (this implementation;
+            the reference had no throttle here). Empty body.
         '500':
           description: Stripe error. Empty body. Clients treat any non-200 as a failed donation attempt.
 
@@ -448,6 +462,8 @@ paths:
               example:
                 error: Unable to register alarm
                 messages: ["Operating system can't be blank"]
+        '429':
+          $ref: '#/components/responses/AlarmCreateLimited'
         '500':
           $ref: '#/components/responses/RegionStoreFailure'
 
@@ -512,7 +528,16 @@ paths:
                 error: Unable to register live activity
                 messages: ["Push token can't be blank"]
         '429':
-          description: Rate limited (30/minute per client address). DELETE is not throttled.
+          description: >
+            Empty body. Rate limited (30/minute per client address; DELETE
+            is not throttled), or this `push_token` already has 5 live
+            subscriptions. A re-registration of an existing `activity_id`
+            is never refused by the count caps.
+        '503':
+          description: >
+            Empty body. At capacity: the region already has 5000 live
+            subscriptions or 1000 distinct stops (and this registration
+            names a new one), or the server has 20000 in all.
         '500':
           $ref: '#/components/responses/RegionStoreFailure'
 
@@ -817,6 +842,13 @@ components:
         The sidecar could not read the region from its own store. Empty body.
     StoreFailure:
       description: The sidecar could not read or write its own store. Empty body.
+    AlarmCreateLimited:
+      description: >
+        Empty body. Either this client address made more than 60 alarm
+        creates (V1 and V2 share the bucket) in the last minute -- an IPv6
+        client is keyed on its /64 -- or `user_push_id` already holds 50 live
+        alarms across every region. A V1 idempotent re-POST of an alarm the
+        device already has is still a 201 at the cap.
     ResourceUrlCreated:
       description: >
         Resource created. `url` is the fully-qualified, secure-token-addressed
@@ -905,26 +937,38 @@ components:
       description: |
         The `required` array documents the **client's obligation**, not
         server enforcement: only a missing `user_push_id` (and, on V2,
-        `operating_system`) produces a 422. The trip-identity fields are
-        stored unvalidated — a V2 request missing them still returns 201
-        with a generic-message alarm (README §5.2). An `operating_system`
-        outside the enum is a 422 on V2; V1 treats it as absent and falls
-        back to `ios`.
+        `operating_system`) produces a 422. The trip-identity fields may be
+        omitted — a V2 request missing them still returns 201 with a
+        generic-message alarm (README §5.2) — but when present they are
+        size- and range-checked (`maxLength`; a non-zero `service_date`
+        within 48 hours of now), and a violation is a 422. An
+        `operating_system` outside the enum is a 422 on V2; V1 treats it as
+        absent and falls back to `ios`.
       required: [user_push_id, stop_id, trip_id, service_date]
       properties:
         user_push_id:
           type: string
+          maxLength: 4096
           description: Push address for the device (meaning differs by API version; see each operation).
         stop_id:
           type: string
+          maxLength: 255
           examples: ["1_570"]
         trip_id:
           type: string
+          maxLength: 255
           examples: ["1_604370"]
         service_date:
-          $ref: '#/components/schemas/EpochMilliseconds'
+          type: integer
+          format: int64
+          description: >
+            Epoch milliseconds. When non-zero it must be within 48 hours of
+            the server's clock in either direction, or the request is a 422
+            ("Service date is out of range").
+          examples: [1754809200000]
         vehicle_id:
           type: string
+          maxLength: 255
           description: Optional; disambiguates the vehicle serving the trip.
         stop_sequence:
           type: integer
@@ -933,8 +977,10 @@ components:
           type: integer
           description: >
             How many seconds before departure to push. Values ≤ 0 or
-            non-numeric are replaced with the default 600.
+            non-numeric are replaced with the default 600; values above
+            86400 (24 hours) are clamped to 86400, never rejected.
           default: 600
+          maximum: 86400
         operating_system:
           type: string
           enum: [ios, android]
@@ -966,6 +1012,7 @@ components:
       properties:
         activity_id:
           type: string
+          maxLength: 255
           description: >
             The ActivityKit activity's id. Upsert key (with the region):
             re-registration with the same id updates the stored subscription.
@@ -977,20 +1024,25 @@ components:
             re-POSTed.
         stop_id:
           type: string
+          maxLength: 255
         route_short_name:
           type: string
+          maxLength: 255
           description: Display identity — arrivals are filtered to this route+headsign.
           examples: ["44"]
         trip_headsign:
           type: string
+          maxLength: 255
           examples: ["Ballard"]
         trip_id:
           type: string
+          maxLength: 255
           description: Optional display metadata; identity is bookmark-scoped, not trip-scoped.
         service_date:
           $ref: '#/components/schemas/EpochMilliseconds'
         vehicle_id:
           type: string
+          maxLength: 255
         stop_sequence:
           type: integer
         apns_sandbox:
@@ -1364,16 +1416,20 @@ components:
       properties:
         donation_amount_in_cents:
           type: integer
-          minimum: 1
+          minimum: 100
+          maximum: 1000000
+          description: US cents; outside 100–1000000 is a 400 before any Stripe call.
         donation_frequency:
           type: string
           description: '`recurring` creates a monthly subscription; any other value (or absent) is a one-time donation.'
           examples: ["one_time", "recurring"]
         name:
           type: string
+          maxLength: 255
         email:
           type: string
           format: email
+          maxLength: 254
           description: Stripe customer identity (found-or-created) and receipt address.
         test_mode:
           type: string

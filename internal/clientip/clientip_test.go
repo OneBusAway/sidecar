@@ -2,6 +2,7 @@ package clientip_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -96,7 +97,7 @@ func TestPrefixesAndFallbacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := request("192.0.2.10:5", map[string]string{"X-Real-IP": " 2001:db8::1 "})
-	if got := res(in); got != "2001:db8::1" {
+	if got := res(in); got != "2001:db8::/64" { // IPv6 keys are /64s (SC-05)
 		t.Fatalf("peer inside prefix: got %q", got)
 	}
 	out := request("192.0.3.10:5", map[string]string{"X-Real-IP": "2001:db8::1"})
@@ -131,5 +132,57 @@ func TestParsePrefixes(t *testing.T) {
 func TestPeerWithoutPort(t *testing.T) {
 	if got := clientip.Peer(request("unix-socket", nil)); got != "unix-socket" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestIPv6KeysCollapseToSlash64 pins SC-05: an IPv6 subscriber is handed a
+// whole /64, so keying a throttle on the full address gives one client
+// 2^64 buckets. Every resolver path reports the /64 instead; IPv4 (and
+// IPv4-mapped IPv6) keeps its full address.
+func TestIPv6KeysCollapseToSlash64(t *testing.T) {
+	header, err := clientip.Parse("header:X-Real-IP", secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxied := func(ip string) *http.Request {
+		return request("10.0.0.7:1", map[string]string{"X-Real-IP": ip, clientip.SecretHeader: "s3cret"})
+	}
+	resolvers := map[string]func(ip string) string{
+		"peer":   func(ip string) string { return clientip.Peer(request(net.JoinHostPort(ip, "443"), nil)) },
+		"header": func(ip string) string { return header(proxied(ip)) },
+	}
+	for name, resolve := range resolvers {
+		t.Run(name, func(t *testing.T) {
+			a, b := resolve("2001:db8:1:2::1"), resolve("2001:db8:1:2:ffff:ffff:ffff:ffff")
+			if a != b {
+				t.Fatalf("same /64 gave different keys: %q vs %q", a, b)
+			}
+			if a != "2001:db8:1:2::/64" {
+				t.Fatalf("key = %q, want the /64 prefix", a)
+			}
+			if c := resolve("2001:db8:1:3::1"); c == a {
+				t.Fatalf("different /64 shared key %q", c)
+			}
+			if got := resolve("203.0.113.5"); got != "203.0.113.5" {
+				t.Fatalf("IPv4 key = %q, want unchanged", got)
+			}
+			if got := resolve("::ffff:203.0.113.5"); got != "203.0.113.5" {
+				t.Fatalf("IPv4-mapped key = %q, want the IPv4 address", got)
+			}
+		})
+	}
+}
+
+// TestProxyProofUsesFullPeerAddress: the /64 collapse is for throttle keys
+// only. Deciding whether the peer is the proxy must still compare the full
+// address, or ::1/128 would stop matching loopback.
+func TestProxyProofUsesFullPeerAddress(t *testing.T) {
+	opts := clientip.Options{Prefixes: []netip.Prefix{netip.MustParsePrefix("::1/128")}}
+	res, err := clientip.Parse("header:X-Real-IP", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res(request("[::1]:5", map[string]string{"X-Real-IP": "203.0.113.7"})); got != "203.0.113.7" {
+		t.Fatalf("loopback proxy not trusted: got %q", got)
 	}
 }

@@ -116,3 +116,18 @@ RETURNING *;
 -- name: ListResponsesBySurvey :many
 SELECT * FROM survey_responses WHERE survey_id = @survey_id
 ORDER BY created_at ASC, id ASC;
+
+-- name: CountResponsesForSurveyByUser :one
+SELECT COUNT(*) FROM survey_responses
+WHERE survey_id = @survey_id AND user_identifier = @user_identifier;
+
+-- ListResponsesBySurveyPage is the admin list's bounded page (SC-21), in
+-- ListResponsesBySurvey's (created_at, id) order, strictly after the
+-- (after_created_at, after_id) cursor.
+
+-- name: ListResponsesBySurveyPage :many
+SELECT * FROM survey_responses
+WHERE survey_id = @survey_id
+  AND (created_at > @after_created_at OR (created_at = @after_created_at AND id > @after_id))
+ORDER BY created_at ASC, id ASC
+LIMIT @max_rows;

@@ -178,6 +178,10 @@ real client behavior:
 | `/api/v2/regions/{id}/push_registrations` (any method) | 30/minute per IP |
 | `POST /api/v2/regions/{id}/ghost_bus_reports` | 10/hour per IP **and** 20/day per `user_identifier` |
 
+"Per IP" means per IPv4 address, or per IPv6 **/64**: an IPv6 subscriber is
+routinely delegated a whole /64, so a limiter keyed on the full address is bypassed by
+rotating the interface bits.
+
 Push registration is throttled because junk tokens inflate an agency's apparent push
 reach and turn every alert send into a fan-out to garbage. (The reference throttle
 matches on path alone, so opt-out DELETEs share the POST bucket.) Ghost bus reports are
@@ -354,6 +358,10 @@ Request fields (both versions): `user_push_id`, `stop_id`, `trip_id`, `service_d
 `ios`), and on V2 `apns_sandbox`.
 
 - `seconds_before` values ≤ 0 or non-numeric MUST be replaced with the default **600**.
+  Implementations SHOULD clamp very large values rather than reject them (the reference
+  clamps to 86400, a day — far above the apps' own maxima: Android offers up to 30
+  minutes, iOS at most the minutes until the departure on screen). An unbounded lead time
+  turns any real trip into an immediate push to a caller-chosen token.
 - On creation the server SHOULD resolve the arrival via the region's OBA server
   (`arrival-and-departure-for-stop`) to compose a human message naming the route and
   headsign (e.g. *"The 44 to Ballard leaves in 10 minutes"*). The message is composed
@@ -367,10 +375,25 @@ produce a `422` when missing. The trip-identity fields (`stop_id`, `trip_id`,
 `service_date`, `stop_sequence`) are *client obligations, not server-enforced*: the
 reference stores whatever arrives, and a V2 registration missing them still returns
 `201` — the OBA lookup just fails and the alarm carries the generic message (and null
-trip fields in its eventual push payload). Don't build stricter validation than this,
-or clients that today get a degraded-but-working alarm will start getting errors. An
-`operating_system` outside `ios`/`android` is rejected with the standard `422` on V2;
-V1 treats it like an absent value and falls back to `ios`.
+trip fields in its eventual push payload). Don't require them, or clients that today get
+a degraded-but-working alarm will start getting errors. An `operating_system` outside
+`ios`/`android` is rejected with the standard `422` on V2; V1 treats it like an absent
+value and falls back to `ios`.
+
+**Abuse bounds.** Because the endpoint is unauthenticated and every alarm costs an OBA
+lookup at creation and on later sweeps, conforming implementations SHOULD bound it. The
+reference, on both versions:
+
+| Bound | Reference value | Response |
+|---|---|---|
+| Creates per client address (V1 + V2 share one bucket; DELETE unthrottled) | 60/minute | `429`, empty body |
+| Live alarms per `user_push_id`, across regions | 50 (a V1 idempotent re-POST still answers `201`) | `429`, empty body |
+| `user_push_id` length | 4096 bytes (the push-registration cap) | `422` |
+| `stop_id`, `trip_id`, `vehicle_id` length | 255 bytes each | `422` |
+| Non-zero `service_date` | within 48 hours of now | `422` "Service date is out of range" |
+
+Each limit sits well above what the shipped apps send: one alarm per tapped departure,
+real OBA ids of tens of bytes, the service date of a departure on screen.
 
 **Side effect (V2):** every successful V2 alarm creation also upserts a push
 registration (§4) for `user_push_id` — refreshing `operating_system` and
@@ -405,7 +428,17 @@ most an hour out, and returns to the per-minute cadence within a few minutes of 
 empty response, increment a per-alarm consecutive-failure counter; after **3 consecutive
 failures**, delete the alarm. A successful lookup resets the counter. Without this, an
 alarm whose trip has aged out of the feed is re-checked every minute forever — it never
-fires and never dies. Transient network errors SHOULD NOT count toward the streak.
+fires and never dies. Transient network errors SHOULD NOT count toward the streak. A
+4xx that is a fact about the request itself (the reference counts every 4xx except
+401/403, which concern the server's API key, and 408/429, which ask for a retry) counts
+like a 404.
+
+**Lifetime bound.** Independently of lookups, an implementation SHOULD delete an alarm
+that has outlived any plausible use: the reference deletes, without a lookup, any alarm
+created more than **48 hours** ago or whose non-zero `service_date` is more than 48 hours
+from now. Without this, an alarm whose lookups keep failing transiently — which by the
+rule above never count — lives forever. Each sweep SHOULD also load a bounded batch
+(the reference: 5000 due alarms, longest-due first).
 
 ### 5.4 Push payload
 
@@ -469,6 +502,17 @@ not trip-scoped. The trip fields are display metadata only. An activity lives th
 many individual trips (the "next bus" keeps changing); that's the point.
 
 Set a hard expiry at registration: **8 hours** (Apple's HIG ceiling for Live Activities).
+
+Because registration is unauthenticated and every live subscription costs a push per
+minute (and every distinct stop an upstream call per minute) for those eight hours,
+implementations SHOULD cap text field lengths and the number of live subscriptions, and
+MUST NOT apply count caps to a re-registration of an existing activity (token rotation),
+which would freeze a card mid-trip. `activity_id` is the only ownership proof for an
+upsert, but its format is not part of the contract (ActivityKit documents it only as an
+opaque string), so the reference caps its length and does not enforce a UUID shape. The
+reference: 255 bytes per text field, `activity_id` included (`422`); 5
+subscriptions per push token (`429`); 5000 per region, 20000 in all, and 1000 distinct
+stops per region (`503`).
 
 ### 6.2 The content-state contract
 
@@ -695,6 +739,16 @@ some shipped clients POST to `update_path` rather than PATCH.
 Unknown `{id}` on amend → `404 {"error": …}`, the same shape as an unknown `survey_id`
 on create.
 
+Survey ids are sequential, so a create MUST check the survey the way the list does
+(§7.1): a survey that is unavailable or outside its window answers the same `404` as an
+unknown id. Amends are not gated on the window — a rider who answered the first question
+just before the survey closed can still send the rest. Implementations SHOULD also cap
+creates per `user_identifier` per survey (never amends, which are how the apps send
+every answer after the first); the reference allows 3 on a single-response survey
+(headroom for a create retried after its `201` was lost) and 50 when the survey
+`allows_multiple_responses`, answering `422` "User identifier has already responded to
+this survey" past it.
+
 ---
 
 ## 8. Ghost bus reports
@@ -814,6 +868,12 @@ JSON (§2.2 exception):
 - `test_mode: "1"` routes to Stripe test keys, letting app builds exercise the flow
   against production infrastructure.
 - Stripe errors → `500` with empty body.
+- Every request creates Stripe objects on an unauthenticated route, which makes it a
+  card-testing target. Implementations SHOULD reject (`400`, before calling Stripe)
+  amounts outside a sane range and malformed emails, and SHOULD bound volume per client
+  and server-wide. The reference: `100`–`1000000` cents, one bare RFC 5322 address of at
+  most 254 bytes, a name of at most 255 bytes, 10/minute per client address, and 500
+  valid requests per day server-wide (`429`).
 
 This service is **optional**: a sidecar that doesn't take donations simply doesn't
 implement it, and the apps hide the donations UI for regions that don't advertise it.
@@ -836,12 +896,16 @@ conforming implementation runs:
 All loops MUST be safe under at-least-once execution (a crashed worker's work re-runs).
 An implementation that runs more than one process against one database SHOULD also
 coordinate the loops so that one process at a time runs each (the reference uses a
-per-loop expiring lease in the database); at-least-once tolerance covers the residual
-overlap, not routine double execution.
+per-loop expiring lease in the database, and cancels a cycle still in flight when its
+process loses the lease); at-least-once tolerance covers the residual overlap, not
+routine double execution.
 Alarm delivery is itself at-least-once: the alarm is deleted only *after* the push
 send returns (a send can't join a database transaction), so a crash in the gap between
 send and delete re-fires the alarm on the next cycle — an accepted duplicate, preferred
-over deleting first and losing the notification. Live Activity pushes are naturally
+over deleting first and losing the notification. A delete that merely *fails* (the
+process is still running) is not that gap: the implementation SHOULD remember the
+alarms it has pushed and retry only the delete, rather than pushing again every cycle
+until the departure passes. Live Activity pushes are naturally
 idempotent (same content state); alert fan-out should track a cursor so a resumed send
 doesn't re-push the whole audience.
 

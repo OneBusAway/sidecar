@@ -128,4 +128,7 @@ type Repository interface {
 	// pushed. It does not touch the failure streak; callers that need it
 	// reset call ResetFailures separately.
 	RecordPush(ctx context.Context, id int64, state ContentState, pushedAt time.Time) error
+	// Usage reports the counts the registration caps check (see Caps) for
+	// a registration of activityID with pushToken on stopID in regionID.
+	Usage(ctx context.Context, regionID int64, activityID, pushToken, stopID string) (Usage, error)
 }

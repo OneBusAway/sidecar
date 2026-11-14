@@ -145,7 +145,7 @@ func TestCreateV2_ComposedMessage(t *testing.T) {
 	h, alarmRepo, _, regionRepo := newAlarmsTestServer(t, oba)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
 
-	body := "user_push_id=push1&operating_system=ios&stop_id=1_100&trip_id=1_200&service_date=1700000000000&seconds_before=600"
+	body := "user_push_id=push1&operating_system=ios&stop_id=1_100&trip_id=1_200&service_date=1767225600000&seconds_before=600"
 	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT, body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
@@ -177,7 +177,7 @@ func TestCreateV2_JSONBody(t *testing.T) {
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
 
 	body := `{"user_push_id":"push1","operating_system":"ios","stop_id":"1_100","trip_id":"1_200",` +
-		`"service_date":1700000000000,"stop_sequence":0,"seconds_before":600}`
+		`"service_date":1767225600000,"stop_sequence":0,"seconds_before":600}`
 	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", jsonCT, body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
@@ -197,7 +197,7 @@ func TestCreateV2_LookupFailureDegradesToGeneric(t *testing.T) {
 	h, alarmRepo, _, regionRepo := newAlarmsTestServer(t, oba)
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
 
-	body := "user_push_id=push1&operating_system=ios&stop_id=1_100&trip_id=1_200&service_date=1700000000000&seconds_before=600"
+	body := "user_push_id=push1&operating_system=ios&stop_id=1_100&trip_id=1_200&service_date=1767225600000&seconds_before=600"
 	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT, body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
@@ -357,11 +357,10 @@ func TestCreateV2_SideEffectRefreshesExisting(t *testing.T) {
 }
 
 // TestCreateV2_SideEffectSkipsOversizedUserPushID asserts an oversized
-// user_push_id (> maxTokenLen) still creates the alarm -- the side-effect
-// registry upsert is not on the 201's critical path -- but the side-effect
-// itself is skipped rather than reaching the store, since that upsert
-// bypasses the registration endpoint's own length validation and throttle
-// (spec §2.6).
+// user_push_id (> maxTokenLen) never reaches the push registry through the
+// V2 side-effect upsert, which bypasses the registration endpoint's own
+// validation. Since SC-01 the whole create is a 422 (the alarm row has the
+// same cap), so neither row exists.
 func TestCreateV2_SideEffectSkipsOversizedUserPushID(t *testing.T) {
 	t.Parallel()
 	h, _, pushRepo, regionRepo := newAlarmsTestServer(t, &fakeAlarmsOBA{})
@@ -370,8 +369,8 @@ func TestCreateV2_SideEffectSkipsOversizedUserPushID(t *testing.T) {
 	oversized := strings.Repeat("a", 4097)
 	body := "user_push_id=" + oversized + "&operating_system=ios"
 	rec := alarmRequest(t, h, http.MethodPost, "/api/v2/regions/1/alarms", formCT, body)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body.String())
 	}
 
 	if _, err := pushRepo.Get(context.Background(), 1, oversized); !errors.Is(err, pushreg.ErrNotFound) {
@@ -413,7 +412,7 @@ func TestCreateV1_Dedupe(t *testing.T) {
 	h, alarmRepo, _, regionRepo := newAlarmsTestServer(t, &fakeAlarmsOBA{})
 	putRegionWithBaseURL(t, regionRepo, 1, "https://sidecar.example.org")
 
-	body := "user_push_id=push1&operating_system=ios&trip_id=1_200&stop_id=1_100&service_date=1700000000000&seconds_before=600"
+	body := "user_push_id=push1&operating_system=ios&trip_id=1_200&stop_id=1_100&service_date=1767225600000&seconds_before=600"
 	rec1 := alarmRequest(t, h, http.MethodPost, "/api/v1/regions/1/alarms", formCT, body)
 	if rec1.Code != http.StatusCreated {
 		t.Fatalf("first: status = %d, want 201; body = %s", rec1.Code, rec1.Body.String())
@@ -429,7 +428,7 @@ func TestCreateV1_Dedupe(t *testing.T) {
 		t.Errorf("url2 = %q, want same as url1 %q", url2, url1)
 	}
 
-	changedBody := "user_push_id=push1&operating_system=ios&trip_id=1_200&stop_id=1_100&service_date=1700000000000&seconds_before=120"
+	changedBody := "user_push_id=push1&operating_system=ios&trip_id=1_200&stop_id=1_100&service_date=1767225600000&seconds_before=120"
 	rec3 := alarmRequest(t, h, http.MethodPost, "/api/v1/regions/1/alarms", formCT, changedBody)
 	if rec3.Code != http.StatusCreated {
 		t.Fatalf("third: status = %d, want 201; body = %s", rec3.Code, rec3.Body.String())
@@ -626,7 +625,10 @@ func (erroringAlarmsRepo) DeleteByID(context.Context, int64) error {
 func (erroringAlarmsRepo) List(context.Context) ([]alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.List: unused by these tests")
 }
-func (erroringAlarmsRepo) ListDue(context.Context, time.Time) ([]alarms.Alarm, error) {
+func (erroringAlarmsRepo) CountByUserPushID(context.Context, string) (int64, error) {
+	return 0, nil
+}
+func (erroringAlarmsRepo) ListDue(context.Context, time.Time, int) ([]alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.ListDue: unused by these tests")
 }
 func (erroringAlarmsRepo) Defer(context.Context, int64, time.Time) error {
@@ -640,6 +642,9 @@ func (erroringAlarmsRepo) ResetFailures(context.Context, int64) error {
 }
 func (erroringAlarmsRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.ListByRegion: unused by these tests")
+}
+func (erroringAlarmsRepo) ListByRegionPage(context.Context, int64, int64, int) ([]alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.ListByRegionPage: unused by these tests")
 }
 func (erroringAlarmsRepo) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.GetInRegion: unused by these tests")

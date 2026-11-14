@@ -24,13 +24,19 @@ DELETE FROM alarms WHERE id = @id;
 -- name: ListAlarms :many
 SELECT * FROM alarms ORDER BY id;
 
--- ListDueAlarms is deliberately unordered and unindexed: the sweep fans
--- out concurrently, and fire-then-delete plus the 3-strike reaper keep
--- the table small, so a scan per minute is cheaper than maintaining an
--- index on a column every deferral rewrites.
+-- ListDueAlarms is unindexed: fire-then-delete, the 3-strike reaper, the
+-- age bound and the per-device cap keep the table small, so a scan per
+-- minute is cheaper than maintaining an index on a column every deferral
+-- rewrites. It is ordered and LIMITed so one sweep's work is bounded even
+-- when those do not hold (longest-due first).
 
 -- name: ListDueAlarms :many
-SELECT * FROM alarms WHERE check_after <= @now;
+SELECT * FROM alarms WHERE check_after <= @now
+ORDER BY check_after, id
+LIMIT @max_rows;
+
+-- name: CountAlarmsByUserPushID :one
+SELECT COUNT(*) FROM alarms WHERE user_push_id = @user_push_id;
 
 -- name: DeferAlarm :exec
 UPDATE alarms SET check_after = @check_after WHERE id = @id;
@@ -56,3 +62,11 @@ SELECT * FROM alarms WHERE region_id = @region_id ORDER BY id;
 
 -- name: GetAlarmInRegion :one
 SELECT * FROM alarms WHERE id = @id AND region_id = @region_id;
+
+-- ListAlarmsByRegionPage is the admin list's bounded page (SC-21): ids
+-- strictly after after_id, oldest first.
+
+-- name: ListAlarmsByRegionPage :many
+SELECT * FROM alarms WHERE region_id = @region_id AND id > @after_id
+ORDER BY id
+LIMIT @max_rows;

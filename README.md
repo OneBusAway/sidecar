@@ -226,6 +226,23 @@ are aggregate only, never a token listing, gated on `Deps.PushRegs` (feature
 below, gated on `Deps.APIKeys` (feature `"api_keys"`, which also gates
 bearer authentication itself).
 
+**Bounded lists.** The three JSON lists over rider rows -- alarms, a
+survey's responses, ghost bus reports -- return at most 10,000 rows per
+request (`Deps.AdminListCap`). A caller that sends no paging parameters
+gets every row, unchanged, whenever there are at most that many; past it
+the response carries the first 10,000 plus `X-Sidecar-Truncated: true` and
+`X-Sidecar-Next-Cursor: <opaque>`, and passing `?cursor=<that value>` (with
+any other parameters, such as ghost bus `since`, unchanged) returns the
+next page. `?limit=N` asks for smaller pages (values above the cap are
+clamped). A `limit` that is not a positive integer, or a `cursor` that did
+not come from that header, is a `400`. Order is oldest first: alarms and
+ghost bus reports by id, responses by creation time then id. The CSV
+exports (`responses.csv`, `ghost_bus_reports.csv`) are never truncated:
+they stream in pages of the same size, so memory is one page however many
+rows there are (a ghost bus export's `trip_report_count` is counted across
+the whole export in SQL first). A consumer that must see every row of a
+very large region follows the cursor until the header is absent.
+
 #### Sending from `sidecar-admin`
 
 ```sh
@@ -301,6 +318,14 @@ survey response endpoints the apps submit to.
   `survey_response.id` and `update_path`.
 - `POST|PUT|PATCH /api/v1/survey_responses/{id}` — merges more answers into a
   response by `question_id`.
+
+A create against a survey the list would not show (unavailable, not started,
+or ended) is the same `404` as an unknown survey id. One `user_identifier` may
+create at most 3 responses to a survey (50 if it `allows_multiple_responses`);
+past that the create is a `422` ("User identifier has already responded to this
+survey"). Amends are never counted or window-gated, so the apps' flow -- create
+with the first answer, then amend with the rest -- is unaffected. Imported
+responses (`sidecar-admin import`) bypass both rules: they are history.
 
 The write endpoints share one throttle of 60 requests per minute per source
 address. The throttle keys on the connection's remote address: behind a
@@ -474,7 +499,22 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
   the same every time; every field, including `apns_sandbox`, is re-read.
 - Required: `activity_id`, `push_token` (≤ 4096 chars — a sidecar addition), `stop_id`,
   `route_short_name`, `trip_headsign`. Optional trip metadata: `trip_id`,
-  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`.
+  `service_date` (epoch ms), `vehicle_id`, `stop_sequence`. `activity_id`, `stop_id`,
+  `route_short_name`, `trip_headsign`, `trip_id` and `vehicle_id` are capped at
+  255 bytes each (`422`).
+- New subscriptions are capped (a re-registration of an existing activity —
+  token rotation — never is): 5 per ActivityKit push token (`429`; a push token
+  belongs to one activity), and 5000 per region, 20000 in all, and 1000
+  distinct stops per region (`503`, logged as `live activity registration
+  refused at capacity`). Each live row costs a push a minute and each distinct
+  stop an upstream call a minute for up to eight hours; the updater's per-cycle
+  stop cache holds every stop those caps admit, so a cycle makes at most one
+  upstream call per distinct stop.
+- `activity_id` is the only proof of ownership for a re-registration (a re-POST
+  with a known id takes over the row). Its shape is deliberately not enforced:
+  ActivityKit documents `Activity.id` only as an opaque `String` and the app
+  forwards it verbatim, so only its length is capped. In practice it is a
+  random UUID, which is what makes it unguessable.
 - `apns_sandbox` follows the §2.7 allow-list. The stakes are highest here: a
   misrouted push bounces `BadDeviceToken`, which the feedback webhook treats as
   terminal and deletes the subscription.
@@ -489,7 +529,8 @@ DELETE /api/v2/regions/{regionId}/live_activities/{token}  → 204 | 404
 
 Deviations from OBACloud, all deliberate: route/headsign matching resolves
 names through the response `references` like the app does; the push-token
-length cap and the POST throttle are new.
+length cap, the field caps, the subscription caps and the POST throttle are
+new.
 
 ## Weather and vehicle search
 
@@ -597,7 +638,16 @@ since the route is unauthenticated and a recurring response hands the
 caller that customer's id and an ephemeral key to its saved payment
 methods. A Stripe failure is a `500` with an empty
 body, which is what the shipped apps expect; a malformed request is a
-`400`. The endpoint is throttled at 10/minute per client address.
+`400`. A request is also a `400`, before any Stripe call, when the amount
+is outside $1–$10,000 (`100`–`1000000` cents), the email is not exactly one
+bare address of at most 254 bytes, or the name is over 255 bytes: every
+request creates Stripe objects, and cents-sized charges are how stolen
+cards get tested. The endpoint is throttled at 10/minute per client
+address, and requests that pass validation share one server-wide bucket of
+500 per day (`429` past it, logged as `donation refused: server-wide daily
+cap reached`) so a run spread over many addresses is bounded too. No
+Stripe idempotency key is sent: each tap is a distinct donation, so a key
+would only dedupe a client's own retries, not abuse.
 
 ## Admin UI
 
@@ -814,8 +864,8 @@ in front of sidecar must:
   turns ordinary log retention into credential retention -- anyone who can
   read the logs can read every live key that ever made a request.
 
-Every per-IP throttle (push registrations, Live Activities, surveys, ghost
-bus reports, failed bearer attempts) keys on the TCP peer address of the
+Every per-IP throttle (push registrations, alarm creates, Live Activities,
+surveys, ghost bus reports, donations, failed bearer attempts) keys on the TCP peer address of the
 request by default -- it does not read `X-Forwarded-For` or similar
 headers, since those are trivially spoofable by the client they're meant to
 throttle. A reverse proxy in front of sidecar must either preserve the real
@@ -836,7 +886,12 @@ Render's `*.onrender.com` hostname directly, where anyone could set
 buckets -- keys on the peer, as with the setting off. Requests with the
 proof but no header, or a value that is not an IP address, also fall back
 to the peer. There is deliberately no `X-Forwarded-For` mode: its first
-entry is whatever the client sent. Leaving the setting off
+entry is whatever the client sent. Whichever source is used, an IPv6
+client is keyed on its /64 (`2001:db8:1:2::/64`), not its full address:
+a subscriber is routinely handed a whole /64 and could otherwise mint a
+fresh bucket per request by rotating the low bits. IPv4 (and IPv4-mapped
+IPv6) addresses are keyed as-is. The request log's `ip` field shows the
+same key. Leaving the setting off
 behind a proxy that terminates and re-originates TCP means every request
 throttles against the proxy's own address -- one shared bucket for all
 clients, which at any real traffic level is a 429 for nearly everyone.
@@ -1085,7 +1140,12 @@ under a named lease in the `leases` table: a process ticks a loop only
 while it holds that loop's lease, renews it once a minute, and releases
 every lease on a clean shutdown. A holder that dies loses its leases three
 minutes later and the next process to poll takes them over (logged as
-`lease: acquired` / `lease: lost to another process`). On the single
+`lease: acquired` / `lease: lost to another process`). A cycle that is
+still running when its process loses the lease -- another holder answered
+the renewal, or the store stayed unreachable for a whole TTL -- has its
+context cancelled (`lease: lease lost; cancelling the in-flight cycle`),
+so it stops at its next database or OBA call instead of finishing beside
+the new holder. On the single
 SQLite instance this is bookkeeping; it is what makes a second process --
 a rolling deploy, or a future multi-instance deployment on Postgres --
 safe to run against the same database without doubling every OBA lookup
@@ -1096,7 +1156,17 @@ hours out becomes 90 minutes, then 45, 22, ... -- and returns to the
 once-a-minute cadence once under four minutes of slack remain (a
 deferral is never shorter than two minutes nor longer than an hour), so
 an alarm set hours ahead
-costs a handful of lookups rather than hundreds. A clean shutdown hands
+costs a handful of lookups rather than hundreds. Alarm creation is bounded
+on both API versions (spec §5.2): 60 creates per minute per client
+address (`429`), 50 live alarms per `user_push_id` across regions
+(`429`; a V1 idempotent re-POST still answers `201`), `user_push_id` at
+most 4096 bytes and `stop_id`/`trip_id`/`vehicle_id` at most 255
+(`422`), a non-zero `service_date` within 48 hours of now (`422`), and
+`seconds_before` clamped to 86400. Each sweep loads at most 5000 due
+alarms, longest-due first, and deletes without a lookup any alarm created
+more than 48 hours ago or whose service date has left that window (spec
+§5.3) -- so an alarm whose lookups keep failing transiently cannot live
+forever. A clean shutdown hands
 each loop to the replacement at its next poll, within a minute. An admin
 "send now" that reaches a process not holding the `alert-pushes` lease
 is covered by the holder's next 15-second tick.
