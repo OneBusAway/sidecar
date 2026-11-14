@@ -1715,6 +1715,9 @@ func (failingSurveys) AmendResponse(context.Context, string, []surveys.Answer, t
 func (failingSurveys) ListResponses(context.Context, int64) ([]surveys.Response, error) {
 	return nil, errStoreBroken
 }
+func (failingSurveys) ListResponsesPage(context.Context, int64, surveys.ResponseCursor, int) ([]surveys.Response, error) {
+	return nil, errStoreBroken
+}
 func (failingSurveys) GetResponseInRegion(context.Context, int64, string) (surveys.Response, error) {
 	return surveys.Response{}, errStoreBroken
 }
@@ -1740,6 +1743,12 @@ func (failingGhostBus) RecordSnapshotFailure(context.Context, int64, time.Time) 
 	return 0, errStoreBroken
 }
 func (failingGhostBus) ListForExport(context.Context, int64, int64) ([]ghostbus.Report, error) {
+	return nil, errStoreBroken
+}
+func (failingGhostBus) ListForExportPage(context.Context, int64, int64, int64, int) ([]ghostbus.Report, error) {
+	return nil, errStoreBroken
+}
+func (failingGhostBus) TripReportCounts(context.Context, int64, int64) (map[ghostbus.TripKey]int, error) {
 	return nil, errStoreBroken
 }
 func (failingGhostBus) GetByPublicID(context.Context, int64, string) (ghostbus.Report, error) {
@@ -1774,6 +1783,9 @@ func (failingAlarms) RecordFailure(context.Context, int64) (int64, error) {
 }
 func (failingAlarms) ResetFailures(context.Context, int64) error { return errStoreBroken }
 func (failingAlarms) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
+	return nil, errStoreBroken
+}
+func (failingAlarms) ListByRegionPage(context.Context, int64, int64, int) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
 func (failingAlarms) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {

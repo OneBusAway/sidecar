@@ -172,6 +172,11 @@ type Deps struct {
 	// the response -- only a recorder can prove it still happens.
 	VerifyPassword func(phc, password string) (bool, error)
 
+	// AdminListCap bounds one page of the admin lists over rider rows --
+	// alarms, survey responses, ghost bus reports -- and is the page size
+	// their CSV exports stream in (SC-21). Zero means 10000.
+	AdminListCap int
+
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS

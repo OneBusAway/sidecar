@@ -128,6 +128,10 @@ func (r *fakeAlarmRepo) CountByUserPushID(context.Context, string) (int64, error
 	panic("not used by the scheduler")
 }
 
+func (r *fakeAlarmRepo) ListByRegionPage(context.Context, int64, int64, int) ([]alarms.Alarm, error) {
+	panic("not used by the scheduler")
+}
+
 func (r *fakeAlarmRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
 	panic("not used by the scheduler")
 }

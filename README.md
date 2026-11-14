@@ -226,6 +226,23 @@ are aggregate only, never a token listing, gated on `Deps.PushRegs` (feature
 below, gated on `Deps.APIKeys` (feature `"api_keys"`, which also gates
 bearer authentication itself).
 
+**Bounded lists.** The three JSON lists over rider rows -- alarms, a
+survey's responses, ghost bus reports -- return at most 10,000 rows per
+request (`Deps.AdminListCap`). A caller that sends no paging parameters
+gets every row, unchanged, whenever there are at most that many; past it
+the response carries the first 10,000 plus `X-Sidecar-Truncated: true` and
+`X-Sidecar-Next-Cursor: <opaque>`, and passing `?cursor=<that value>` (with
+any other parameters, such as ghost bus `since`, unchanged) returns the
+next page. `?limit=N` asks for smaller pages (values above the cap are
+clamped). A `limit` that is not a positive integer, or a `cursor` that did
+not come from that header, is a `400`. Order is oldest first: alarms and
+ghost bus reports by id, responses by creation time then id. The CSV
+exports (`responses.csv`, `ghost_bus_reports.csv`) are never truncated:
+they stream in pages of the same size, so memory is one page however many
+rows there are (a ghost bus export's `trip_report_count` is counted across
+the whole export in SQL first). A consumer that must see every row of a
+very large region follows the cursor until the header is absent.
+
 #### Sending from `sidecar-admin`
 
 ```sh

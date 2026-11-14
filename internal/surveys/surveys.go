@@ -106,6 +106,22 @@ type Response struct {
 	UpdatedAt      time.Time
 }
 
+// ResponseCursor is a position in ListResponses' order: the CreatedAt (epoch
+// seconds) and ID of the last response already read. The zero value is the
+// start.
+type ResponseCursor struct {
+	CreatedAtUnix int64
+	ID            int64
+}
+
+// Started reports whether the cursor names a position past the start.
+func (c ResponseCursor) Started() bool { return c != ResponseCursor{} }
+
+// CursorAfter is the cursor positioned just after r.
+func CursorAfter(r Response) ResponseCursor {
+	return ResponseCursor{CreatedAtUnix: r.CreatedAt.Unix(), ID: r.ID}
+}
+
 // NewResponse is what the create endpoint hands the repository. PublicID is
 // minted by the caller (securetoken) so the repository never needs an
 // entropy source.
@@ -186,6 +202,10 @@ type Repository interface {
 	GetResponse(ctx context.Context, publicID string) (Response, error)                                     // ErrNotFound
 	AmendResponse(ctx context.Context, publicID string, incoming []Answer, now time.Time) (Response, error) // ErrNotFound, ErrTooManyAnswers
 	ListResponses(ctx context.Context, surveyID int64) ([]Response, error)
+	// ListResponsesPage is one bounded page of ListResponses (SC-21): at
+	// most limit responses strictly after the cursor, in ListResponses'
+	// (CreatedAt, ID) order. The zero cursor starts at the beginning.
+	ListResponsesPage(ctx context.Context, surveyID int64, after ResponseCursor, limit int) ([]Response, error)
 	// GetResponseInRegion resolves one response through its survey's study's
 	// region, in a single query.
 	GetResponseInRegion(ctx context.Context, regionID int64, publicID string) (Response, error)

@@ -62,3 +62,11 @@ SELECT * FROM alarms WHERE region_id = @region_id ORDER BY id;
 
 -- name: GetAlarmInRegion :one
 SELECT * FROM alarms WHERE id = @id AND region_id = @region_id;
+
+-- ListAlarmsByRegionPage is the admin list's bounded page (SC-21): ids
+-- strictly after after_id, oldest first.
+
+-- name: ListAlarmsByRegionPage :many
+SELECT * FROM alarms WHERE region_id = @region_id AND id > @after_id
+ORDER BY id
+LIMIT @max_rows;

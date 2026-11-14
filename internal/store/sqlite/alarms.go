@@ -214,6 +214,17 @@ func (r *alarmRepo) ResetFailures(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ListByRegionPage returns one bounded page of a region's alarms after afterID.
+func (r *alarmRepo) ListByRegionPage(ctx context.Context, regionID, afterID int64, limit int) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListAlarmsByRegionPage(ctx, gen.ListAlarmsByRegionPageParams{
+		RegionID: regionID, AfterID: afterID, MaxRows: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list alarms page (region %d): %w", regionID, err)
+	}
+	return alarmsFromRows(rows), nil
+}
+
 // ListByRegion returns one region's alarms, oldest first, for the admin API.
 func (r *alarmRepo) ListByRegion(ctx context.Context, regionID int64) ([]alarms.Alarm, error) {
 	rows, err := r.q.ListAlarmsByRegion(ctx, regionID)

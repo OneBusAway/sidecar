@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 )
@@ -66,11 +67,22 @@ func (h *adminAlarmsHandler) list(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	list, err := h.deps.Alarms.ListByRegion(r.Context(), region.ID)
+	limit, err := pageLimit(r, h.deps.adminListCap())
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	after, err := idCursor(r)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := h.deps.Alarms.ListByRegionPage(r.Context(), region.ID, after, limit+1)
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "list alarms", err)
 		return
 	}
+	list = trimPage(w, list, limit, func(a alarms.Alarm) string { return strconv.FormatInt(a.ID, 10) })
 	// make, not nil: the response is always an array.
 	out := make([]adminAlarmJSON, 0, len(list))
 	for _, a := range list {

@@ -112,6 +112,12 @@ type Repository interface {
 	// 'unavailable' in the same UPDATE. Returns the post-increment count.
 	RecordSnapshotFailure(ctx context.Context, id int64, now time.Time) (int64, error)
 	ListForExport(ctx context.Context, regionID int64, sinceUnix int64) ([]Report, error) // created_at >= sinceUnix; 0 = all
+	// ListForExportPage is one bounded page of ListForExport (SC-21): at
+	// most limit reports with id > afterID, in id order.
+	ListForExportPage(ctx context.Context, regionID, sinceUnix, afterID int64, limit int) ([]Report, error)
+	// TripReportCounts counts ListForExport's reports per trip instance,
+	// for the CSV export's trip_report_count column.
+	TripReportCounts(ctx context.Context, regionID, sinceUnix int64) (map[TripKey]int, error)
 	// GetByPublicID resolves one report within a region. The region is a
 	// query condition: a report in another region is ErrNotFound, never a
 	// row the caller has to remember to check.

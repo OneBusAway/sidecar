@@ -152,6 +152,9 @@ type Repository interface {
 	// ListByRegion returns one region's alarms, oldest first, for the admin
 	// API. The scheduler sweeps ListDue instead.
 	ListByRegion(ctx context.Context, regionID int64) ([]Alarm, error)
+	// ListByRegionPage is one bounded page of ListByRegion (SC-21): at
+	// most limit alarms with ID > afterID, in ID order.
+	ListByRegionPage(ctx context.Context, regionID, afterID int64, limit int) ([]Alarm, error)
 	// GetInRegion takes the region as a query condition rather than
 	// comparing it afterwards, so an alarm addressed through the wrong
 	// region is ErrNotFound in SQL and cannot become a Go check somebody

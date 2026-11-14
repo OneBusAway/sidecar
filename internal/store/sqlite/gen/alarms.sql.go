@@ -308,6 +308,63 @@ func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Ala
 	return items, nil
 }
 
+const listAlarmsByRegionPage = `-- name: ListAlarmsByRegionPage :many
+
+SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE region_id = ?1 AND id > ?2
+ORDER BY id
+LIMIT ?3
+`
+
+type ListAlarmsByRegionPageParams struct {
+	RegionID int64
+	AfterID  int64
+	MaxRows  int64
+}
+
+// ListAlarmsByRegionPage is the admin list's bounded page (SC-21): ids
+// strictly after after_id, oldest first.
+func (q *Queries) ListAlarmsByRegionPage(ctx context.Context, arg ListAlarmsByRegionPageParams) ([]Alarm, error) {
+	rows, err := q.db.QueryContext(ctx, listAlarmsByRegionPage, arg.RegionID, arg.AfterID, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Alarm{}
+	for rows.Next() {
+		var i Alarm
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.Token,
+			&i.ApiVersion,
+			&i.UserPushID,
+			&i.OperatingSystem,
+			&i.ApnsSandbox,
+			&i.StopID,
+			&i.TripID,
+			&i.ServiceDate,
+			&i.VehicleID,
+			&i.StopSequence,
+			&i.SecondsBefore,
+			&i.Message,
+			&i.FailureCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.CheckAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueAlarms = `-- name: ListDueAlarms :many
 
 SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE check_after <= ?1

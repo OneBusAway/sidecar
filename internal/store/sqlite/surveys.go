@@ -749,6 +749,29 @@ func (r *surveyRepo) AmendResponse(ctx context.Context, publicID string, incomin
 	return out, nil
 }
 
+func (r *surveyRepo) ListResponsesPage(ctx context.Context, surveyID int64, after surveys.ResponseCursor, limit int) ([]surveys.Response, error) {
+	afterCreated := after.CreatedAtUnix
+	if !after.Started() {
+		// created_at is epoch seconds, never negative: -1 admits every row.
+		afterCreated = -1
+	}
+	rows, err := r.q.ListResponsesBySurveyPage(ctx, gen.ListResponsesBySurveyPageParams{
+		SurveyID: surveyID, AfterCreatedAt: afterCreated, AfterID: after.ID, MaxRows: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list responses page for survey %d: %w", surveyID, err)
+	}
+	out := make([]surveys.Response, 0, len(rows))
+	for _, row := range rows {
+		resp, err := responseFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: list responses page for survey %d: %w", surveyID, err)
+		}
+		out = append(out, resp)
+	}
+	return out, nil
+}
+
 func (r *surveyRepo) ListResponses(ctx context.Context, surveyID int64) ([]surveys.Response, error) {
 	rows, err := r.q.ListResponsesBySurvey(ctx, surveyID)
 	if err != nil {

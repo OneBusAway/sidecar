@@ -643,6 +643,9 @@ func (erroringAlarmsRepo) ResetFailures(context.Context, int64) error {
 func (erroringAlarmsRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.ListByRegion: unused by these tests")
 }
+func (erroringAlarmsRepo) ListByRegionPage(context.Context, int64, int64, int) ([]alarms.Alarm, error) {
+	panic("erroringAlarmsRepo.ListByRegionPage: unused by these tests")
+}
 func (erroringAlarmsRepo) GetInRegion(context.Context, int64, int64) (alarms.Alarm, error) {
 	panic("erroringAlarmsRepo.GetInRegion: unused by these tests")
 }

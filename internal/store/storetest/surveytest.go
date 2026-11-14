@@ -48,6 +48,7 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("AmendNotFoundAndCap", func(t *testing.T) { testAmendNotFoundAndCap(t, newStore) })
 	t.Run("ConcurrentAmendsBothLand", func(t *testing.T) { testConcurrentAmendsBothLand(t, newStore) })
 	t.Run("ListResponsesOrdered", func(t *testing.T) { testListResponsesOrdered(t, newStore) })
+	t.Run("ListResponsesPageFollowsCursor", func(t *testing.T) { testListResponsesPage(t, newStore) })
 	t.Run("CountResponses", func(t *testing.T) { testCountResponses(t, newStore) })
 	t.Run("UpdateStudyIsRegionScoped", func(t *testing.T) { testUpdateStudyRegionScoped(t, newStore) })
 	t.Run("CreateSurveyInRegionRejectsForeignStudy", func(t *testing.T) { testCreateSurveyInRegion(t, newStore) })
@@ -818,6 +819,30 @@ func testListResponsesOrdered(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 	if len(list) != 2 || list[0].ID != earlier.ID || list[1].ID != later.ID {
 		t.Fatalf("ListResponses = %+v, want [earlier, later] by created_at", list)
+	}
+}
+
+// testListResponsesPage pins the bounded read (SC-21): ListResponses'
+// (created_at, id) order, resumed strictly after a cursor -- including a
+// later-created row with a lower id, which an id-only cursor would skip.
+func testListResponsesPage(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regs := newStore(t)
+	ctx := context.Background()
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("paged"))
+	later, err := repo.CreateResponse(ctx, surveys.NewResponse{SurveyID: s.ID, PublicID: "later", UserIdentifier: "d"}, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := mustCreateResponse(t, repo, s.ID, "a")
+	b := mustCreateResponse(t, repo, s.ID, "b")
+	page, err := repo.ListResponsesPage(ctx, s.ID, surveys.ResponseCursor{}, 2)
+	if err != nil || len(page) != 2 || page[0].ID != a.ID || page[1].ID != b.ID {
+		t.Fatalf("first page = %+v, %v; want [a b]", page, err)
+	}
+	page, err = repo.ListResponsesPage(ctx, s.ID, surveys.CursorAfter(page[1]), 2)
+	if err != nil || len(page) != 1 || page[0].ID != later.ID {
+		t.Fatalf("second page = %+v, %v; want [later]", page, err)
 	}
 }
 
