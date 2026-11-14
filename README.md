@@ -384,7 +384,9 @@ sidecar-admin survey  create    --study N --file <path|->
 
 `survey responses` writes rider-sourced cells (identifiers, question type/label,
 answer) with a leading apostrophe when the cell would otherwise open with a
-spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return), so
+spreadsheet formula character (`=`, `+`, `-`, `@`, a tab, or a carriage return, or
+the full-width/small-form `=`, `+`, `-`, `@`) -- looking past any leading
+whitespace, control, or invisible format characters, as spreadsheets do -- so
 opening the export can't execute a formula a rider embedded in their answer.
 
 ## Ghost bus reports
@@ -461,7 +463,8 @@ JSON). `--since` is optional and, like every other CLI instant in this repo,
 requires an explicit UTC offset. Rider-sourced and GTFS-derived cells go
 through the same formula-injection guard as `survey responses`: a leading
 apostrophe when a cell would otherwise open with `=`, `+`, `-`, `@`, a tab,
-or a carriage return.
+or a carriage return (or a full-width/small-form variant, after any leading
+whitespace or control characters).
 
 ## Live Activities
 

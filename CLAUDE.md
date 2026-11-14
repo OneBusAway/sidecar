@@ -55,7 +55,7 @@ Local config: copy `.env.example` to `.env`; `cmd/sidecar` loads it at boot and 
 - The alarm scheduler sweeps `ListDue(now)`, not `List`: a `Wait` defers the alarm's next check halfway to its fire window (`alarms.check_after`; a deferral shorter than `MinDeferral` is skipped, so alarms within ~4 minutes of their window are checked every minute). Keep `List` returning every row — the admin API and tests read it.
 - Several status codes are shipped-client contracts, not placeholders: weather failures are `403` (apps hide the UI on any non-200; tested against 403), ghost bus duplicates/validation are `422`, vehicle upstream failure is `502` not empty `200`. Check README before changing any response code.
 - `revive` enforces doc comments on exported identifiers and packages; `nolint` directives need a specific linter and an explanation.
-- Rider-sourced cells in CSV exports go through the formula-injection guard (leading apostrophe for `= + - @ \t \r`).
+- Rider-sourced cells in CSV exports go through the formula-injection guard (leading apostrophe for `= + - @ \t \r` and their full-width/small-form variants, checked after skipping leading whitespace/control/format characters).
 - When writing a test, make sure it can fail: mutate the code under test and confirm the assertion fires. Timezone-dependent assertions must hold under both `make test-tz` zones.
 
 ## Workflow notes
