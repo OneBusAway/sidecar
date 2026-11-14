@@ -639,6 +639,29 @@ redirecting.
 
 ### Admin API hardening
 
+- **Sign-in throttling.** `POST /api/admin/v1/session` charges every
+  *failed* sign-in to two fixed 15-minute budgets: 10 per client address
+  (the same address the other per-IP throttles use; see `SIDECAR_TRUSTED_PROXY`
+  under Deployment) and 20 per username (normalized, so `Admin` and `admin`
+  share one). A spent budget answers `429` with a `Retry-After` header and
+  the SPA shows "too many failed sign-in attempts; try again later" --
+  decided before any password hashing, and identically for real and unknown
+  usernames. Successful sign-ins are never charged. Password verification
+  itself runs at most 2 at a time process-wide (each argon2id derivation
+  holds ~19 MiB); a sign-in that waits more than 10 seconds for a slot gets
+  `503`. Bearer-key authentication is unaffected: it keeps its own
+  failure-only bucket (60/minute per address).
+
+  The per-username budget is a throttle, not a lockout, by design. Once it
+  is spent, only addresses that have themselves failed in the window are
+  refused; an address with a clean record still gets its attempt checked.
+  So someone hammering an operator's username from many addresses cannot
+  keep that operator out -- the operator signs in from any address that has
+  not been guessing -- and the price is that an attacker gets one guess per
+  fresh address per window once the username budget is spent (each failure
+  marks that address). An operator who shares a NAT address with the
+  attacker, or who mistypes during an attack, waits out the 15-minute
+  window.
 - **One JSON value per body.** Every JSON body on `/api/admin/v1` (and the
   gorush webhook and the donations endpoint) must be exactly one JSON value;
   trailing data after it -- a second object, stray bytes -- is a `400`.

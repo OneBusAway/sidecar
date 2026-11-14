@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/auth"
+	"github.com/OneBusAway/sidecar/internal/ratelimit"
 )
 
 // maxAuthBody caps the request body on the auth endpoints at 8 KB. Credentials
@@ -31,6 +34,13 @@ type loginRequest struct {
 // password changed while it was being verified -- returns the same status and
 // the same bytes after the same argon2 cost and the same fixed delay, so the
 // endpoint cannot be used to discover which accounts exist (design spec §4.3).
+//
+// Failures are also charged to a per-address and a per-username budget, and
+// a spent budget is a 429 before anything is hashed (SC-02); the 429 is
+// decided on the address and the typed username alone, so it is identical
+// for real and unknown accounts. Verifications themselves run under a
+// process-wide semaphore, so a flood from many addresses cannot run more
+// than LoginVerifySlots argon2 derivations at once.
 func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := decodeJSON(w, r, maxAuthBody, &req); err != nil {
@@ -38,20 +48,40 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip, userKey := h.deps.clientIP(r), loginUserKey(req.Username)
+	if h.throttled(ip, userKey) {
+		h.deps.Logger.Debug("httpapi: login throttled", "remote", ip)
+		w.Header().Set("Retry-After", strconv.Itoa(int(loginFailureWindow/time.Second)))
+		writeJSONError(w, h.deps.Logger, http.StatusTooManyRequests, "too many failed sign-in attempts; try again later")
+		return
+	}
+
 	fail := func() {
+		// Charged before the delay, so a burst of concurrent guesses is
+		// counted as soon as each one is known to have failed.
+		h.deps.LoginIPLimiter.Allow(ip, h.deps.Now())
+		h.deps.LoginUserLimiter.Allow(userKey, h.deps.Now())
 		h.deps.Sleep(h.deps.FailDelay)
 		h.deps.Logger.Warn("httpapi: failed login",
-			"username", auth.LogSafeUsername(req.Username), "remote", h.deps.clientIP(r))
+			"username", auth.LogSafeUsername(req.Username), "remote", ip)
 		writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, "invalid credentials")
 	}
 
 	ctx := r.Context()
 	user, err := h.deps.Auth.GetUserByUsername(ctx, req.Username)
-	if err != nil {
-		if !errors.Is(err, auth.ErrNotFound) {
-			serverErrorJSON(w, h.deps.Logger, "get user", err)
-			return
-		}
+	if err != nil && !errors.Is(err, auth.ErrNotFound) {
+		serverErrorJSON(w, h.deps.Logger, "get user", err)
+		return
+	}
+	known := err == nil
+
+	release, ok := h.acquireVerifySlot(ctx)
+	if !ok {
+		h.deps.Logger.Warn("httpapi: login verification queue full", "remote", ip)
+		writeJSONError(w, h.deps.Logger, http.StatusServiceUnavailable, "sign-in is busy; try again shortly")
+		return
+	}
+	if !known {
 		// Burn the same argon2 cost as a real verification so response timing
 		// does not reveal which usernames exist (design spec §4.3). This runs
 		// through the injected Deps.VerifyPassword purely so a test can prove
@@ -63,11 +93,13 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 			// something invalid, which silently removes the timing defence.
 			h.deps.Logger.Error("httpapi: dummy password hash is unusable", "err", dummyErr)
 		}
+		release()
 		fail()
 		return
 	}
 
-	ok, err := h.deps.VerifyPassword(user.PasswordHash, req.Password)
+	ok, err = h.deps.VerifyPassword(user.PasswordHash, req.Password)
+	release()
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "verify password", err)
 		return
@@ -167,3 +199,78 @@ func sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
 		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 	}
 }
+
+// throttled reports whether a login from ip for userKey must be refused
+// before hashing (SC-02).
+//
+// The address budget is a plain brake: an address that has spent it waits
+// out the window. The username budget is what stops a guesser spreading one
+// account's attempts across many addresses -- but applied the same way it
+// would let anyone lock the operator out of their own account, forever, by
+// hammering the username. So it is a throttle, not a lockout: once a
+// username's budget is spent, only addresses that have themselves failed
+// recently are refused. An address with a clean record still has its attempt
+// verified, which is one guess per clean address per window for an attacker
+// (each failure marks the address) and no lockout for an operator signing in
+// from somewhere that has not been guessing. The trade-off is documented in
+// the README (Admin API hardening).
+func (h *sessionHandler) throttled(ip, userKey string) bool {
+	now := h.deps.Now()
+	if h.deps.LoginIPLimiter.Exhausted(ip, now) {
+		return true
+	}
+	return h.deps.LoginUserLimiter.Exhausted(userKey, now) && h.deps.LoginIPLimiter.Count(ip, now) > 0
+}
+
+// acquireVerifySlot takes one of the LoginVerifySlots verification slots,
+// waiting at most LoginVerifyWait (or until the client goes away). It
+// returns the release function and true, or false when no slot came free.
+func (h *sessionHandler) acquireVerifySlot(ctx context.Context) (func(), bool) {
+	ctx, cancel := context.WithTimeout(ctx, h.deps.LoginVerifyWait)
+	defer cancel()
+	select {
+	case h.deps.loginSlots <- struct{}{}:
+		return func() { <-h.deps.loginSlots }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+// loginUserKey is the per-username bucket key: the normalized form, so case
+// and padding cannot mint fresh buckets, cut to the longest valid username
+// so an 8 KB "username" cannot become an 8 KB map key. (Every name longer
+// than that is invalid, so the cut only ever merges invalid names.)
+func loginUserKey(username string) string {
+	u := auth.NormalizeUsername(username)
+	if len(u) > auth.MaxUsernameLen {
+		u = u[:auth.MaxUsernameLen]
+	}
+	return u
+}
+
+// applyLoginDefaults fills the SC-02 throttle and semaphore settings a
+// caller left zero, and builds the semaphore.
+func applyLoginDefaults(d *Deps) {
+	if d.LoginIPLimiter == nil {
+		d.LoginIPLimiter = ratelimit.New(loginFailuresPerIP, loginFailureWindow)
+	}
+	if d.LoginUserLimiter == nil {
+		d.LoginUserLimiter = ratelimit.New(loginFailuresPerUser, loginFailureWindow)
+	}
+	if d.LoginVerifySlots <= 0 {
+		d.LoginVerifySlots = loginVerifySlots
+	}
+	if d.LoginVerifyWait <= 0 {
+		d.LoginVerifyWait = loginVerifyWait
+	}
+	d.loginSlots = make(chan struct{}, d.LoginVerifySlots)
+}
+
+// Login throttle defaults (SC-02). Fixed windows, charged on failure only.
+const (
+	loginFailuresPerIP   = 10
+	loginFailuresPerUser = 20
+	loginFailureWindow   = 15 * time.Minute
+	loginVerifySlots     = 2
+	loginVerifyWait      = 10 * time.Second
+)
