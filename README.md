@@ -926,14 +926,23 @@ should not trip them. An alert header or agency id that is only whitespace
 counts as missing, while a description or translation that is only
 whitespace imports as none, and a non-test device's description is dropped
 (the registration API keeps none). The document itself is capped at 256 MiB.
-Rows that already exist under this region (same id, public id, or
-region+token) are skipped and counted, which makes the migration two runs
-of the same command: a bulk import the day before the region's
-`sidecar_base_url` flips, and a delta from a fresh export right after --
-translations added to an already migrated alert land on the delta run. An
-id that already belongs to another region's content (alerts, studies,
-surveys, and questions share one id sequence) is an error naming the row,
-never a silent skip. `--dry-run` runs the same checks, including that the
+Rows that an earlier import already wrote under this region (same id,
+public id, or region+token) are skipped and counted, which makes the
+migration two runs of the same command: a bulk import the day before the
+region's `sidecar_base_url` flips, and a delta from a fresh export right
+after -- translations added to an already migrated alert land on the delta
+run, and re-running either is a no-op. The delta is insert-if-absent: an
+edit made in OBACloud to a row the bulk run already imported is *not*
+carried over (OBACloud's cutover preflight reports that drift before any
+flip). An id that already belongs to another region's content (alerts,
+studies, surveys, and questions share one id sequence), or to an alert,
+study, or survey authored on this sidecar rather than imported, is an error
+naming the row, never a silent skip -- skipping would attach the export's
+translations, surveys, or questions to unrelated content -- and nothing
+from the document is written. Imported alerts, studies, and surveys record
+when they were imported (`imported_at`); a row imported by a binary older
+than that column is recognized by the `created_at` the export carries
+verbatim and stamped on the next run. `--dry-run` runs the same checks, including that the
 region exists, without writing. The region itself must already be present
 (`sidecar-admin region sync`); alarms and Live Activities are deliberately
 not part of the document -- OBACloud keeps firing the ones it owns until

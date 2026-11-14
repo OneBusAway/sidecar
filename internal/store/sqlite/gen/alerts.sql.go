@@ -16,7 +16,7 @@ INSERT INTO alerts (
   cause, effect, severity_level, start_time, end_time,
   published, is_test, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at
+RETURNING id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at
 `
 
 type CreateAlertParams struct {
@@ -70,6 +70,7 @@ func (q *Queries) CreateAlert(ctx context.Context, arg CreateAlertParams) (Alert
 		&i.IsTest,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -106,7 +107,7 @@ func (q *Queries) DeleteAlertTranslations(ctx context.Context, arg DeleteAlertTr
 }
 
 const feedAlerts = `-- name: FeedAlerts :many
-SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
+SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at FROM alerts
 WHERE region_id = ?1
   AND published = TRUE
   AND (is_test = FALSE OR CAST(?2 AS BOOLEAN))
@@ -154,6 +155,7 @@ func (q *Queries) FeedAlerts(ctx context.Context, arg FeedAlertsParams) ([]Alert
 			&i.IsTest,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -225,7 +227,7 @@ func (q *Queries) FeedTranslations(ctx context.Context, arg FeedTranslationsPara
 }
 
 const getAlert = `-- name: GetAlert :one
-SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts WHERE id = ?
+SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at FROM alerts WHERE id = ?
 `
 
 func (q *Queries) GetAlert(ctx context.Context, id int64) (Alert, error) {
@@ -247,6 +249,7 @@ func (q *Queries) GetAlert(ctx context.Context, id int64) (Alert, error) {
 		&i.IsTest,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
@@ -288,7 +291,7 @@ func (q *Queries) ListAlertTranslations(ctx context.Context, alertID int64) ([]A
 }
 
 const listAlerts = `-- name: ListAlerts :many
-SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
+SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at FROM alerts
 ORDER BY start_time DESC, id DESC
 `
 
@@ -320,6 +323,7 @@ func (q *Queries) ListAlerts(ctx context.Context) ([]Alert, error) {
 			&i.IsTest,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -335,7 +339,7 @@ func (q *Queries) ListAlerts(ctx context.Context) ([]Alert, error) {
 }
 
 const listAlertsByRegion = `-- name: ListAlertsByRegion :many
-SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at FROM alerts
+SELECT id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at FROM alerts
 WHERE region_id = ?
 ORDER BY start_time DESC, id DESC
 `
@@ -365,6 +369,7 @@ func (q *Queries) ListAlertsByRegion(ctx context.Context, regionID int64) ([]Ale
 			&i.IsTest,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ImportedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -406,7 +411,7 @@ UPDATE alerts SET
   cause = ?, effect = ?, severity_level = ?, start_time = ?, end_time = ?,
   is_test = ?, updated_at = ?
 WHERE id = ?
-RETURNING id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at
+RETURNING id, region_id, agency_id, header_text, description_text, url, cause, effect, severity_level, start_time, end_time, published, is_test, created_at, updated_at, imported_at
 `
 
 type UpdateAlertParams struct {
@@ -456,6 +461,7 @@ func (q *Queries) UpdateAlert(ctx context.Context, arg UpdateAlertParams) (Alert
 		&i.IsTest,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ImportedAt,
 	)
 	return i, err
 }
