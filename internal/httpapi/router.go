@@ -177,6 +177,12 @@ type Deps struct {
 	// loginSlots is the semaphore NewRouter builds from LoginVerifySlots.
 	loginSlots chan struct{}
 
+	// SessionLifetime is the absolute admin session lifetime from login and
+	// SessionIdleTimeout the idle timeout (SC-25). NewRouter defaults them to
+	// auth.SessionLifetime and auth.SessionIdleTimeout.
+	SessionLifetime    time.Duration
+	SessionIdleTimeout time.Duration
+
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS

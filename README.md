@@ -662,6 +662,37 @@ redirecting.
   marks that address). An operator who shares a NAT address with the
   attacker, or who mistypes during an attack, waits out the 15-minute
   window.
+- **Session lifetime.** An admin UI session ends 24 hours after sign-in
+  however busy it is (`--admin-session-lifetime` /
+  `SIDECAR_ADMIN_SESSION_LIFETIME`), and earlier if it goes unused for 2
+  hours (`--admin-session-idle-timeout` /
+  `SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT`, at most the lifetime). Activity
+  slides the idle deadline, written at most once per twentieth of the idle
+  window. The lifetime is checked against each session's sign-in time on
+  every request, so lowering it -- or upgrading from the old 30-day,
+  no-idle-timeout sessions -- ends existing sessions that are already older.
+- **`__Host-` cookie over HTTPS.** Over HTTPS (direct TLS or
+  `X-Forwarded-Proto: https` from the proxy) the session cookie is
+  `__Host-sidecar_session`: always `Secure`, `Path=/`, no `Domain`, so a
+  sibling subdomain or a plain-HTTP response cannot plant or overwrite it.
+  Plain-HTTP development keeps `sidecar_session` (browsers reject a
+  non-`Secure` `__Host-` cookie). Over HTTPS only the prefixed name
+  authenticates -- accepting the old name there would reopen the hole the
+  prefix closes -- so **every operator signs in once more after upgrading**;
+  the old cookie is cleared on that sign-in.
+- **Listing and revoking sessions.** `sidecar-admin user sessions
+  [--username NAME]` lists live sessions (a 12-character id -- a prefix of
+  the token's SHA-256, never the token -- the username, sign-in time, and
+  current idle deadline). `sidecar-admin user revoke --session ID` ends one
+  (at least 8 characters, matching exactly one session); `user revoke
+  --username NAME` ends all of one account's. `user passwd` and `user
+  delete` already revoke an account's sessions.
+- **Bearer keys do not expire.** Region keys (`obask_`) and service
+  principals (`obasp_`) are valid until revoked; OBACloud rotates region
+  keys itself. Treat the `obasp_` principal as deployment-root in practice:
+  it can mint a push-scoped key for any region (see below), so store it
+  like a root credential and revoke it (`sidecar-admin principal revoke`)
+  if it may have leaked.
 - **One JSON value per body.** Every JSON body on `/api/admin/v1` (and the
   gorush webhook and the donations endpoint) must be exactly one JSON value;
   trailing data after it -- a second object, stray bytes -- is a `400`.

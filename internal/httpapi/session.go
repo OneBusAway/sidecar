@@ -115,7 +115,10 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := h.deps.Now()
-	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, now.Add(auth.SessionLifetime)); err != nil {
+	// The row's expires_at is the idle deadline (never past the absolute
+	// one); every authenticated request slides it (SC-25).
+	expiresAt := now.Add(min(h.deps.SessionIdleTimeout, h.deps.SessionLifetime))
+	if err := h.deps.Auth.CreateSession(ctx, tokenHash, user.ID, user.PasswordHash, now, expiresAt); err != nil {
 		if errors.Is(err, auth.ErrPasswordChanged) || errors.Is(err, auth.ErrNotFound) {
 			// `user passwd` or `user delete` committed while this login was
 			// verifying, so the password it checked no longer opens the
@@ -134,16 +137,29 @@ func (h *sessionHandler) login(w http.ResponseWriter, r *http.Request) {
 		h.deps.Logger.Warn("httpapi: sweep expired sessions", "err", err)
 	}
 
-	http.SetCookie(w, sessionCookie(r, token, int(auth.SessionLifetime/time.Second)))
+	http.SetCookie(w, sessionCookie(r, sessionCookieName(r), token, int(h.deps.SessionLifetime/time.Second)))
+	if isHTTPS(r) {
+		// Retire a pre-SC-25 unprefixed cookie so the browser stops sending
+		// a credential nothing reads any more.
+		http.SetCookie(w, sessionCookie(r, auth.CookieName, "", -1))
+	}
 	writeJSON(w, h.deps.Logger, http.StatusOK, map[string]string{"username": user.Username})
 }
 
 // logout handles DELETE /api/admin/v1/session. It is idempotent: logging out
 // without a live session is a success, because the SPA calls it to tidy up
 // after a 401.
+//
+// Both cookie names are honoured here, unlike in authentication: revoking
+// the session a presented token names is exactly what its holder is asking
+// for, whichever name it arrived under, and both are cleared.
 func (h *sessionHandler) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(auth.CookieName); err == nil {
-		err := h.deps.Auth.DeleteSession(r.Context(), auth.HashToken(cookie.Value))
+	for _, name := range []string{auth.SecureCookieName, auth.CookieName} {
+		cookie, err := r.Cookie(name)
+		if err != nil {
+			continue
+		}
+		err = h.deps.Auth.DeleteSession(r.Context(), auth.HashToken(cookie.Value))
 		if err != nil && !errors.Is(err, auth.ErrNotFound) {
 			// The row is still there, so the token is still live. Clearing
 			// the cookie now would take away the only handle the operator has
@@ -153,7 +169,10 @@ func (h *sessionHandler) logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	http.SetCookie(w, sessionCookie(r, "", -1))
+	http.SetCookie(w, sessionCookie(r, sessionCookieName(r), "", -1))
+	if isHTTPS(r) {
+		http.SetCookie(w, sessionCookie(r, auth.CookieName, "", -1))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -188,16 +207,35 @@ func (h *sessionHandler) whoami(w http.ResponseWriter, r *http.Request) {
 // terminated at a reverse proxy that says so with X-Forwarded-Proto -- because
 // a Secure cookie on a plain-HTTP development server is one the browser will
 // accept and then never send back.
-func sessionCookie(r *http.Request, value string, maxAge int) *http.Cookie {
+func sessionCookie(r *http.Request, name, value string, maxAge int) *http.Cookie {
 	return &http.Cookie{
-		Name:     auth.CookieName,
+		Name:     name,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   isHTTPS(r),
 	}
+}
+
+// isHTTPS reports whether r arrived over TLS, directly or through a
+// terminating proxy that says so (the README's Deployment section covers
+// trusting X-Forwarded-Proto).
+func isHTTPS(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+// sessionCookieName is the one cookie name that sets and authenticates a
+// session on r's scheme: __Host- prefixed over HTTPS, plain over HTTP
+// (browsers refuse a __Host- cookie that is not Secure). Authentication
+// reads only this name, never the other, so an unprefixed cookie planted on
+// an HTTPS deployment is ignored (SC-25).
+func sessionCookieName(r *http.Request) string {
+	if isHTTPS(r) {
+		return auth.SecureCookieName
+	}
+	return auth.CookieName
 }
 
 // throttled reports whether a login from ip for userKey must be refused
@@ -248,9 +286,15 @@ func loginUserKey(username string) string {
 	return u
 }
 
-// applyLoginDefaults fills the SC-02 throttle and semaphore settings a
-// caller left zero, and builds the semaphore.
+// applyLoginDefaults fills the SC-02 throttle and semaphore settings and
+// the SC-25 session lifetimes a caller left zero, and builds the semaphore.
 func applyLoginDefaults(d *Deps) {
+	if d.SessionLifetime <= 0 {
+		d.SessionLifetime = auth.SessionLifetime
+	}
+	if d.SessionIdleTimeout <= 0 {
+		d.SessionIdleTimeout = auth.SessionIdleTimeout
+	}
 	if d.LoginIPLimiter == nil {
 		d.LoginIPLimiter = ratelimit.New(loginFailuresPerIP, loginFailureWindow)
 	}

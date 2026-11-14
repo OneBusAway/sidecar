@@ -70,6 +70,66 @@ func RunAuthRepository(t *testing.T, newRepo newAuthRepoFunc) {
 		testCreateSessionUnknownUserIsErrNotFound(t, newRepo)
 	})
 	t.Run("TimestampsSurvive32BitBoundary", func(t *testing.T) { testTimestampsSurvive32BitBoundary(t, newRepo) })
+	t.Run("ExtendSessionMovesExpiry", func(t *testing.T) { testExtendSessionMovesExpiry(t, newRepo) })
+	t.Run("ListSessionsReturnsLiveRows", func(t *testing.T) { testListSessionsReturnsLiveRows(t, newRepo) })
+}
+
+// testExtendSessionMovesExpiry pins the write behind the idle timeout
+// (SC-25): the middleware slides a live session's expires_at forward (or
+// pulls it in), and GetSession must then honour the new value -- in both
+// directions, since a lowered lifetime shortens rows minted under the old
+// one. created_at must not move: it anchors the absolute lifetime.
+func testExtendSessionMovesExpiry(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+	user := mustCreateUser(t, repo, "admin")
+	_, hash := mustCreateSession(t, repo, user, base, base.Add(time.Hour))
+
+	later := base.Add(3 * time.Hour)
+	if err := repo.ExtendSession(ctx, hash, later); err != nil {
+		t.Fatalf("ExtendSession: %v", err)
+	}
+	got, err := repo.GetSession(ctx, hash, base.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("GetSession after extension, past the old expiry: %v", err)
+	}
+	assertInstant(t, "extended ExpiresAt", got.ExpiresAt, later)
+	assertInstant(t, "CreatedAt after extension", got.CreatedAt, base)
+
+	if err := repo.ExtendSession(ctx, hash, base.Add(30*time.Minute)); err != nil {
+		t.Fatalf("ExtendSession (shorten): %v", err)
+	}
+	if _, err := repo.GetSession(ctx, hash, base.Add(2*time.Hour)); !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("GetSession after shortening below now = %v, want ErrNotFound", err)
+	}
+
+	if err := repo.ExtendSession(ctx, "no-such-token-hash", later); !errors.Is(err, auth.ErrNotFound) {
+		t.Errorf("ExtendSession(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+// testListSessionsReturnsLiveRows backs `sidecar-admin user sessions`: every
+// session row, with its user id and both timestamps, oldest first.
+func testListSessionsReturnsLiveRows(t *testing.T, newRepo newAuthRepoFunc) {
+	repo := newRepo(t)
+	ctx := context.Background()
+	alice := mustCreateUser(t, repo, "alice")
+	bob := mustCreateUser(t, repo, "bob")
+	_, h2 := mustCreateSession(t, repo, bob, base.Add(time.Minute), base.Add(time.Hour))
+	_, h1 := mustCreateSession(t, repo, alice, base, base.Add(2*time.Hour))
+
+	got, err := repo.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListSessions = %d rows, want 2", len(got))
+	}
+	if got[0].TokenHash != h1 || got[0].UserID != alice.ID || got[1].TokenHash != h2 || got[1].UserID != bob.ID {
+		t.Errorf("ListSessions = %+v, want alice's then bob's (oldest first)", got)
+	}
+	assertInstant(t, "listed CreatedAt", got[0].CreatedAt, base)
+	assertInstant(t, "listed ExpiresAt", got[0].ExpiresAt, base.Add(2*time.Hour))
 }
 
 // assertInstant checks both that got names the same instant as want AND that

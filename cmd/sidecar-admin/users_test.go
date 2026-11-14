@@ -410,3 +410,75 @@ func TestUserDelete_UnknownUserRejected(t *testing.T) {
 		t.Fatal("user delete of an unknown username: want error, got nil (silent success is never acceptable here)")
 	}
 }
+
+// TestUserSessions_ListsAndRevokes pins SC-25's operator tooling: `user
+// sessions` lists live admin sessions by a short id (a token-hash prefix,
+// never the token), and `user revoke` ends one session by that id or every
+// session of one account.
+func TestUserSessions_ListsAndRevokes(t *testing.T) {
+	t.Parallel()
+	dbPath, store := newDB(t)
+	ctx := context.Background()
+	aliceHash, now := createUserWithSession(t, dbPath, store, "alice", "alice-token-1")
+	bobHash, _ := createUserWithSession(t, dbPath, store, "bob", "bob-token-1")
+	bob, err := store.Auth().GetUserByUsername(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob2 := auth.HashToken("bob-token-2")
+	if err = store.Auth().CreateSession(ctx, bob2, bob.ID, bob.PasswordHash, now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := cli(t, dbPath, "user", "sessions")
+	if err != nil {
+		t.Fatalf("user sessions: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("user sessions printed %d lines, want 3: %q", len(lines), stdout)
+	}
+	if !strings.Contains(stdout, aliceHash[:12]) || strings.Contains(stdout, aliceHash) {
+		t.Errorf("user sessions should show a 12-char id, not the full hash: %q", stdout)
+	}
+	if strings.Contains(stdout, "alice-token-1") {
+		t.Error("user sessions printed a raw token")
+	}
+
+	filtered, _, err := cli(t, dbPath, "user", "sessions", "--username", "bob")
+	if err != nil {
+		t.Fatalf("user sessions --username: %v", err)
+	}
+	if n := strings.Count(filtered, "\tbob\t"); n != 2 || strings.Contains(filtered, "alice") {
+		t.Errorf("user sessions --username bob = %q, want bob's two sessions only", filtered)
+	}
+
+	if _, _, err = cli(t, dbPath, "user", "revoke", "--session", aliceHash[:12]); err != nil {
+		t.Fatalf("user revoke --session: %v", err)
+	}
+	if _, gerr := store.Auth().GetSession(ctx, aliceHash, now); !errors.Is(gerr, auth.ErrNotFound) {
+		t.Errorf("alice's session after revoke = %v, want ErrNotFound", gerr)
+	}
+
+	if _, _, err = cli(t, dbPath, "user", "revoke", "--username", "bob"); err != nil {
+		t.Fatalf("user revoke --username: %v", err)
+	}
+	for _, h := range []string{bobHash, bob2} {
+		if _, gerr := store.Auth().GetSession(ctx, h, now); !errors.Is(gerr, auth.ErrNotFound) {
+			t.Errorf("bob's session after revoke --username = %v, want ErrNotFound", gerr)
+		}
+	}
+
+	// Refusals: a too-short or unknown id, and neither/both selectors.
+	for _, args := range [][]string{
+		{"user", "revoke", "--session", "abc"},
+		{"user", "revoke", "--session", "ffffffffffff"},
+		{"user", "revoke"},
+		{"user", "revoke", "--session", aliceHash[:12], "--username", "bob"},
+		{"user", "revoke", "--username", "nobody"},
+	} {
+		if _, _, rerr := cli(t, dbPath, args...); rerr == nil {
+			t.Errorf("%v succeeded, want an error", args)
+		}
+	}
+}

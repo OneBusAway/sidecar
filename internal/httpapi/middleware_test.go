@@ -43,7 +43,8 @@ type stubAuth struct {
 	deleteSessionErr error
 
 	// Call counters.
-	gcCalls int
+	gcCalls     int
+	extendCalls int
 }
 
 func newStubAuth() *stubAuth {
@@ -645,4 +646,34 @@ func TestPrincipalFrom_NoPrincipal(t *testing.T) {
 	if p.kind != principalKind(0) {
 		t.Errorf("principalFrom(background).kind = %v, want the zero kind", p.kind)
 	}
+}
+
+func (s *stubAuth) ExtendSession(_ context.Context, tokenHash string, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[tokenHash]
+	if !ok {
+		return auth.ErrNotFound
+	}
+	sess.ExpiresAt = expiresAt
+	s.sessions[tokenHash] = sess
+	s.extendCalls++
+	return nil
+}
+
+func (s *stubAuth) ListSessions(context.Context) ([]auth.Session, error) {
+	return nil, errStubUnused
+}
+
+func (s *stubAuth) extendCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.extendCalls
+}
+
+func (s *stubAuth) session(tokenHash string) (auth.Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.sessions[tokenHash]
+	return sess, ok
 }

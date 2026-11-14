@@ -27,6 +27,7 @@ import (
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/alertpush"
+	"github.com/OneBusAway/sidecar/internal/auth"
 	"github.com/OneBusAway/sidecar/internal/cache"
 	"github.com/OneBusAway/sidecar/internal/clientip"
 	"github.com/OneBusAway/sidecar/internal/donations"
@@ -165,6 +166,10 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		"id of the live Stripe product recurring donations bill against (prod_...)")
 	stripeTestProduct := fs.String("stripe-test-recurring-product-id", envOrDefault("SIDECAR_STRIPE_TEST_RECURRING_PRODUCT_ID", ""),
 		"id of the test-mode Stripe product recurring donations bill against")
+	sessionLifetime := fs.String("admin-session-lifetime", envOrDefault("SIDECAR_ADMIN_SESSION_LIFETIME", auth.SessionLifetime.String()),
+		"absolute lifetime of an admin UI session from sign-in; activity never extends it")
+	sessionIdle := fs.String("admin-session-idle-timeout", envOrDefault("SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT", auth.SessionIdleTimeout.String()),
+		"an admin UI session unused for this long expires; must not exceed --admin-session-lifetime")
 	apnsTopic := fs.String("apns-topic", envOrDefault("SIDECAR_APNS_TOPIC", ""),
 		"APNs topic (the iOS app's bundle id) stamped on every iOS push; required for pushes to be accepted under .p8 token auth")
 
@@ -193,6 +198,11 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// in the sidecar's logs to say why. Reject it here, where it is visible.
 	if strings.ContainsAny(*webhookSecret, ": \t\r\n") {
 		return errors.New("--gorush-webhook-secret/SIDECAR_GORUSH_WEBHOOK_SECRET must not contain ':' or whitespace (gorush splits its header setting on ':')")
+	}
+
+	sessionTTL, sessionIdleTTL, err := parseSessionDurations(*sessionLifetime, *sessionIdle)
+	if err != nil {
+		return err
 	}
 
 	// --refresh=0 is a natural way to try to disable directory sync, and
@@ -343,6 +353,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 	// constructing a second one.
 	deps := buildDeps(store, logger, *obaAPIKey, *pirateKey, *webhookSecret, waker)
 	deps.ClientIP = resolveClientIP
+	deps.SessionLifetime, deps.SessionIdleTimeout = sessionTTL, sessionIdleTTL
 	deps.Donations, err = newDonations(logger, *stripeKey, *stripeTestKey, *stripeProduct, *stripeTestProduct)
 	if err != nil {
 		return err
@@ -499,6 +510,24 @@ func serve(ctx context.Context, server *http.Server, logger *slog.Logger) error 
 		}
 		return <-errCh
 	}
+}
+
+// parseSessionDurations validates the two admin session settings (SC-25):
+// both positive, and the idle timeout no longer than the lifetime (a longer
+// one could never fire, so it is almost certainly the two values swapped).
+func parseSessionDurations(lifetime, idle string) (time.Duration, time.Duration, error) {
+	l, err := time.ParseDuration(lifetime)
+	if err != nil || l <= 0 {
+		return 0, 0, fmt.Errorf("--admin-session-lifetime/SIDECAR_ADMIN_SESSION_LIFETIME must be a positive duration, got %q", lifetime)
+	}
+	i, err := time.ParseDuration(idle)
+	if err != nil || i <= 0 {
+		return 0, 0, fmt.Errorf("--admin-session-idle-timeout/SIDECAR_ADMIN_SESSION_IDLE_TIMEOUT must be a positive duration, got %q", idle)
+	}
+	if i > l {
+		return 0, 0, fmt.Errorf("--admin-session-idle-timeout (%s) must not exceed --admin-session-lifetime (%s)", i, l)
+	}
+	return l, i, nil
 }
 
 // envOrDefault returns the value of the environment variable key, or def if
