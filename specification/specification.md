@@ -840,8 +840,9 @@ conforming implementation runs:
 All loops MUST be safe under at-least-once execution (a crashed worker's work re-runs).
 An implementation that runs more than one process against one database SHOULD also
 coordinate the loops so that one process at a time runs each (the reference uses a
-per-loop expiring lease in the database); at-least-once tolerance covers the residual
-overlap, not routine double execution.
+per-loop expiring lease in the database, and cancels a cycle still in flight when its
+process loses the lease); at-least-once tolerance covers the residual overlap, not
+routine double execution.
 Alarm delivery is itself at-least-once: the alarm is deleted only *after* the push
 send returns (a send can't join a database transaction), so a crash in the gap between
 send and delete re-fires the alarm on the next cycle — an accepted duplicate, preferred

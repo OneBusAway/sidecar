@@ -1090,7 +1090,12 @@ under a named lease in the `leases` table: a process ticks a loop only
 while it holds that loop's lease, renews it once a minute, and releases
 every lease on a clean shutdown. A holder that dies loses its leases three
 minutes later and the next process to poll takes them over (logged as
-`lease: acquired` / `lease: lost to another process`). On the single
+`lease: acquired` / `lease: lost to another process`). A cycle that is
+still running when its process loses the lease -- another holder answered
+the renewal, or the store stayed unreachable for a whole TTL -- has its
+context cancelled (`lease: lease lost; cancelling the in-flight cycle`),
+so it stops at its next database or OBA call instead of finishing beside
+the new holder. On the single
 SQLite instance this is bookkeeping; it is what makes a second process --
 a rolling deploy, or a future multi-instance deployment on Postgres --
 safe to run against the same database without doubling every OBA lookup
