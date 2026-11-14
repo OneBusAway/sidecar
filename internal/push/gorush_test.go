@@ -3,12 +3,14 @@ package push
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -591,5 +593,40 @@ func TestGorushSendBatchErrorNeverEchoesBody(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "SECRET-TOKEN") {
 		t.Errorf("error %q echoes the response body", err)
+	}
+}
+
+// TestGorushTransportErrorOmitsURL pins SC-18: a transport failure used to
+// wrap net/http's *url.Error, whose text is `Post "http://gorush.internal:8088/api/push": ...`.
+// The dispatcher stores that text as the push's last_error and the admin API
+// returns it, so every region key holder learned the deployment's internal
+// gateway address. The error must keep its cause (errors.Is still works) and
+// drop the URL.
+func TestGorushTransportErrorOmitsURL(t *testing.T) {
+	// A listener that is closed before the request: connection refused.
+	server := httptest.NewServer(http.NotFoundHandler())
+	base := server.URL
+	server.Close()
+
+	g := NewGorush(base+"/secret-path-segment", "com.example.app", http.DefaultClient)
+	n := Notification{Tokens: []string{"tok1"}, Platform: PlatformAndroid, Title: "T", Message: "M"}
+
+	_, batchErr := g.SendBatch(context.Background(), n, "alert-push-1")
+	sendErr := g.Send(context.Background(), n)
+	laErr := g.SendLiveActivity(context.Background(), LiveActivityPush{
+		Token: "tok1", Event: "update", Timestamp: time.Unix(1700000000, 0), ContentState: map[string]any{},
+	})
+	host := strings.TrimPrefix(base, "http://")
+	for name, err := range map[string]error{"SendBatch": batchErr, "Send": sendErr, "SendLiveActivity": laErr} {
+		if err == nil {
+			t.Fatalf("%s against a closed port returned nil", name)
+		}
+		msg := err.Error()
+		if strings.Contains(msg, host) || strings.Contains(msg, "secret-path-segment") || strings.Contains(msg, "/api/push") {
+			t.Errorf("%s error leaks the gateway URL: %q", name, msg)
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) || !strings.Contains(msg, "connection refused") {
+			t.Errorf("%s error lost its cause: %q", name, msg)
+		}
 	}
 }

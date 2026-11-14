@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/httpx"
@@ -170,7 +172,7 @@ func (g *Gorush) post(ctx context.Context, batch any) ([]byte, error) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("push: gorush request: %w", err)
+		return nil, &transportError{err: err}
 	}
 	defer resp.Body.Close()
 	// Read (rather than discard) the body so the connection is reused and
@@ -236,4 +238,40 @@ func (g *Gorush) SendLiveActivity(ctx context.Context, p LiveActivityPush) error
 	}
 	_, err := g.post(ctx, map[string]any{"notifications": []gorushLiveActivity{n}})
 	return err
+}
+
+// transportError is a failed request to gorush with the gateway's address
+// kept out of its text (SC-18). net/http's *url.Error prints the full URL,
+// and the *net.OpError inside it prints the dialled host:port; the alert
+// push dispatcher stores this text as last_error and the admin API returns
+// it to every region key holder, so neither may reach Error(). The cause is
+// still reachable through Unwrap, so errors.Is(err, context.DeadlineExceeded)
+// and friends behave exactly as before.
+type transportError struct{ err error }
+
+func (e *transportError) Error() string {
+	return "push: gorush request failed: " + describeTransportFailure(e.err)
+}
+
+func (e *transportError) Unwrap() error { return e.err }
+
+// describeTransportFailure names the class of a transport failure in words
+// that carry no address.
+func describeTransportFailure(err error) string {
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return "timed out"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.As(err, &dnsErr):
+		return "host lookup failed"
+	default:
+		return "transport error"
+	}
 }
