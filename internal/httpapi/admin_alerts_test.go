@@ -1759,7 +1759,10 @@ func (failingAlarms) DeleteByID(context.Context, int64) error     { return errSt
 func (failingAlarms) List(context.Context) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
-func (failingAlarms) ListDue(context.Context, time.Time) ([]alarms.Alarm, error) {
+func (failingAlarms) CountByUserPushID(context.Context, string) (int64, error) {
+	return 0, errStoreBroken
+}
+func (failingAlarms) ListDue(context.Context, time.Time, int) ([]alarms.Alarm, error) {
 	return nil, errStoreBroken
 }
 func (failingAlarms) Defer(context.Context, int64, time.Time) error { return errStoreBroken }

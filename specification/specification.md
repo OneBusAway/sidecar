@@ -358,6 +358,10 @@ Request fields (both versions): `user_push_id`, `stop_id`, `trip_id`, `service_d
 `ios`), and on V2 `apns_sandbox`.
 
 - `seconds_before` values ≤ 0 or non-numeric MUST be replaced with the default **600**.
+  Implementations SHOULD clamp very large values rather than reject them (the reference
+  clamps to 86400, a day — far above the apps' own maxima: Android offers up to 30
+  minutes, iOS at most the minutes until the departure on screen). An unbounded lead time
+  turns any real trip into an immediate push to a caller-chosen token.
 - On creation the server SHOULD resolve the arrival via the region's OBA server
   (`arrival-and-departure-for-stop`) to compose a human message naming the route and
   headsign (e.g. *"The 44 to Ballard leaves in 10 minutes"*). The message is composed
@@ -371,10 +375,25 @@ produce a `422` when missing. The trip-identity fields (`stop_id`, `trip_id`,
 `service_date`, `stop_sequence`) are *client obligations, not server-enforced*: the
 reference stores whatever arrives, and a V2 registration missing them still returns
 `201` — the OBA lookup just fails and the alarm carries the generic message (and null
-trip fields in its eventual push payload). Don't build stricter validation than this,
-or clients that today get a degraded-but-working alarm will start getting errors. An
-`operating_system` outside `ios`/`android` is rejected with the standard `422` on V2;
-V1 treats it like an absent value and falls back to `ios`.
+trip fields in its eventual push payload). Don't require them, or clients that today get
+a degraded-but-working alarm will start getting errors. An `operating_system` outside
+`ios`/`android` is rejected with the standard `422` on V2; V1 treats it like an absent
+value and falls back to `ios`.
+
+**Abuse bounds.** Because the endpoint is unauthenticated and every alarm costs an OBA
+lookup at creation and on later sweeps, conforming implementations SHOULD bound it. The
+reference, on both versions:
+
+| Bound | Reference value | Response |
+|---|---|---|
+| Creates per client address (V1 + V2 share one bucket; DELETE unthrottled) | 60/minute | `429`, empty body |
+| Live alarms per `user_push_id`, across regions | 50 (a V1 idempotent re-POST still answers `201`) | `429`, empty body |
+| `user_push_id` length | 4096 bytes (the push-registration cap) | `422` |
+| `stop_id`, `trip_id`, `vehicle_id` length | 255 bytes each | `422` |
+| Non-zero `service_date` | within 48 hours of now | `422` "Service date is out of range" |
+
+Each limit sits well above what the shipped apps send: one alarm per tapped departure,
+real OBA ids of tens of bytes, the service date of a departure on screen.
 
 **Side effect (V2):** every successful V2 alarm creation also upserts a push
 registration (§4) for `user_push_id` — refreshing `operating_system` and
@@ -409,7 +428,17 @@ most an hour out, and returns to the per-minute cadence within a few minutes of 
 empty response, increment a per-alarm consecutive-failure counter; after **3 consecutive
 failures**, delete the alarm. A successful lookup resets the counter. Without this, an
 alarm whose trip has aged out of the feed is re-checked every minute forever — it never
-fires and never dies. Transient network errors SHOULD NOT count toward the streak.
+fires and never dies. Transient network errors SHOULD NOT count toward the streak. A
+4xx that is a fact about the request itself (the reference counts every 4xx except
+401/403, which concern the server's API key, and 408/429, which ask for a retry) counts
+like a 404.
+
+**Lifetime bound.** Independently of lookups, an implementation SHOULD delete an alarm
+that has outlived any plausible use: the reference deletes, without a lookup, any alarm
+created more than **48 hours** ago or whose non-zero `service_date` is more than 48 hours
+from now. Without this, an alarm whose lookups keep failing transiently — which by the
+rule above never count — lives forever. Each sweep SHOULD also load a bounded batch
+(the reference: 5000 due alarms, longest-due first).
 
 ### 5.4 Push payload
 

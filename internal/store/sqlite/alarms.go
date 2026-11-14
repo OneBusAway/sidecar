@@ -165,12 +165,20 @@ func (r *alarmRepo) List(ctx context.Context) ([]alarms.Alarm, error) {
 	return alarmsFromRows(rows), nil
 }
 
-func (r *alarmRepo) ListDue(ctx context.Context, now time.Time) ([]alarms.Alarm, error) {
-	rows, err := r.q.ListDueAlarms(ctx, now.Unix())
+func (r *alarmRepo) ListDue(ctx context.Context, now time.Time, limit int) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListDueAlarms(ctx, gen.ListDueAlarmsParams{Now: now.Unix(), MaxRows: int64(limit)})
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list due alarms: %w", err)
 	}
 	return alarmsFromRows(rows), nil
+}
+
+func (r *alarmRepo) CountByUserPushID(ctx context.Context, userPushID string) (int64, error) {
+	n, err := r.q.CountAlarmsByUserPushID(ctx, userPushID)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count alarms by device: %w", err)
+	}
+	return n, nil
 }
 
 // Defer treats a missing row as success, like DeleteByID: the sweep may

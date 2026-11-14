@@ -10,6 +10,17 @@ import (
 	"database/sql"
 )
 
+const countAlarmsByUserPushID = `-- name: CountAlarmsByUserPushID :one
+SELECT COUNT(*) FROM alarms WHERE user_push_id = ?1
+`
+
+func (q *Queries) CountAlarmsByUserPushID(ctx context.Context, userPushID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAlarmsByUserPushID, userPushID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAlarm = `-- name: CreateAlarm :one
 INSERT INTO alarms (
   region_id, token, api_version, user_push_id, operating_system, apns_sandbox,
@@ -300,14 +311,22 @@ func (q *Queries) ListAlarmsByRegion(ctx context.Context, regionID int64) ([]Ala
 const listDueAlarms = `-- name: ListDueAlarms :many
 
 SELECT id, region_id, token, api_version, user_push_id, operating_system, apns_sandbox, stop_id, trip_id, service_date, vehicle_id, stop_sequence, seconds_before, message, failure_count, created_at, updated_at, check_after FROM alarms WHERE check_after <= ?1
+ORDER BY check_after, id
+LIMIT ?2
 `
 
-// ListDueAlarms is deliberately unordered and unindexed: the sweep fans
-// out concurrently, and fire-then-delete plus the 3-strike reaper keep
-// the table small, so a scan per minute is cheaper than maintaining an
-// index on a column every deferral rewrites.
-func (q *Queries) ListDueAlarms(ctx context.Context, now int64) ([]Alarm, error) {
-	rows, err := q.db.QueryContext(ctx, listDueAlarms, now)
+type ListDueAlarmsParams struct {
+	Now     int64
+	MaxRows int64
+}
+
+// ListDueAlarms is unindexed: fire-then-delete, the 3-strike reaper, the
+// age bound and the per-device cap keep the table small, so a scan per
+// minute is cheaper than maintaining an index on a column every deferral
+// rewrites. It is ordered and LIMITed so one sweep's work is bounded even
+// when those do not hold (longest-due first).
+func (q *Queries) ListDueAlarms(ctx context.Context, arg ListDueAlarmsParams) ([]Alarm, error) {
+	rows, err := q.db.QueryContext(ctx, listDueAlarms, arg.Now, arg.MaxRows)
 	if err != nil {
 		return nil, err
 	}

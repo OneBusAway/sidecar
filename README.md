@@ -814,8 +814,8 @@ in front of sidecar must:
   turns ordinary log retention into credential retention -- anyone who can
   read the logs can read every live key that ever made a request.
 
-Every per-IP throttle (push registrations, Live Activities, surveys, ghost
-bus reports, failed bearer attempts) keys on the TCP peer address of the
+Every per-IP throttle (push registrations, alarm creates, Live Activities,
+surveys, ghost bus reports, donations, failed bearer attempts) keys on the TCP peer address of the
 request by default -- it does not read `X-Forwarded-For` or similar
 headers, since those are trivially spoofable by the client they're meant to
 throttle. A reverse proxy in front of sidecar must either preserve the real
@@ -1106,7 +1106,17 @@ hours out becomes 90 minutes, then 45, 22, ... -- and returns to the
 once-a-minute cadence once under four minutes of slack remain (a
 deferral is never shorter than two minutes nor longer than an hour), so
 an alarm set hours ahead
-costs a handful of lookups rather than hundreds. A clean shutdown hands
+costs a handful of lookups rather than hundreds. Alarm creation is bounded
+on both API versions (spec §5.2): 60 creates per minute per client
+address (`429`), 50 live alarms per `user_push_id` across regions
+(`429`; a V1 idempotent re-POST still answers `201`), `user_push_id` at
+most 4096 bytes and `stop_id`/`trip_id`/`vehicle_id` at most 255
+(`422`), a non-zero `service_date` within 48 hours of now (`422`), and
+`seconds_before` clamped to 86400. Each sweep loads at most 5000 due
+alarms, longest-due first, and deletes without a lookup any alarm created
+more than 48 hours ago or whose service date has left that window (spec
+§5.3) -- so an alarm whose lookups keep failing transiently cannot live
+forever. A clean shutdown hands
 each loop to the replacement at its next poll, within a minute. An admin
 "send now" that reaches a process not holding the `alert-pushes` lease
 is covered by the holder's next 15-second tick.

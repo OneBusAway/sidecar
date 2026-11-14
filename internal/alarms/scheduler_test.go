@@ -3,6 +3,7 @@ package alarms_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -29,6 +30,8 @@ type fakeAlarmRepo struct {
 	mu       sync.Mutex
 	alarms   map[int64]alarms.Alarm
 	deferErr error // returned by every Defer when set
+	// lastLimit is the limit the most recent ListDue was called with.
+	lastLimit int
 }
 
 func newFakeAlarmRepo(as ...alarms.Alarm) *fakeAlarmRepo {
@@ -68,9 +71,10 @@ func (r *fakeAlarmRepo) List(context.Context) ([]alarms.Alarm, error) {
 	return out, nil
 }
 
-func (r *fakeAlarmRepo) ListDue(_ context.Context, now time.Time) ([]alarms.Alarm, error) {
+func (r *fakeAlarmRepo) ListDue(_ context.Context, now time.Time, limit int) ([]alarms.Alarm, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.lastLimit = limit
 	out := make([]alarms.Alarm, 0, len(r.alarms))
 	for _, a := range r.alarms {
 		if a.CheckAfter.After(now) {
@@ -118,6 +122,10 @@ func (r *fakeAlarmRepo) ResetFailures(_ context.Context, id int64) error {
 	a.FailureCount = 0
 	r.alarms[id] = a
 	return nil
+}
+
+func (r *fakeAlarmRepo) CountByUserPushID(context.Context, string) (int64, error) {
+	panic("not used by the scheduler")
 }
 
 func (r *fakeAlarmRepo) ListByRegion(context.Context, int64) ([]alarms.Alarm, error) {
@@ -215,6 +223,7 @@ func testAlarm(id int64, secondsBefore int64) alarms.Alarm {
 		TripID:          "1_604370",
 		SecondsBefore:   secondsBefore,
 		Message:         "The 44 to Ballard leaves in 10 minutes",
+		CreatedAt:       base,
 	}
 }
 
@@ -695,6 +704,7 @@ func TestUnresolvableAlarmsAreReaped(t *testing.T) {
 	}{
 		{"trip aged out of the upstream", nil, obaapi.ErrNotFound},
 		{"region has no API key and never will", nil, obaapi.ErrNotConfigured},
+		{"upstream rejects the request outright (SC-01)", nil, fmt.Errorf("wrapped: %w", obaapi.ErrRejected)},
 		{"no stop id, so no lookup is possible", func(a *alarms.Alarm) { a.StopID = "" }, nil},
 		{"no trip id, so no lookup is possible", func(a *alarms.Alarm) { a.TripID = "" }, nil},
 		{"neither stop nor trip id", func(a *alarms.Alarm) { a.StopID, a.TripID = "", "" }, nil},
@@ -796,5 +806,72 @@ func TestFiredAlarmIsNotResentWhenDeleteFails(t *testing.T) {
 	}
 	if lookups != 1 {
 		t.Errorf("OBA lookups = %d; want 1 (a fired alarm needs no second lookup)", lookups)
+	}
+}
+
+// TestOverAgeAlarmIsDeletedRegardlessOfLookup pins SC-01's lifetime bound:
+// an alarm created more than MaxAge ago, or whose service date has left the
+// window, is deleted without a lookup -- even while the upstream is
+// failing, which never counts toward the reaper and so used to keep such
+// rows alive indefinitely.
+func TestOverAgeAlarmIsDeletedRegardlessOfLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*alarms.Alarm)
+	}{
+		{"created too long ago", func(a *alarms.Alarm) { a.CreatedAt = base.Add(-alarms.MaxAge - time.Second) }},
+		{"service date too old", func(a *alarms.Alarm) { a.ServiceDate = base.Add(-72 * time.Hour).UnixMilli() }},
+		{"service date too far ahead", func(a *alarms.Alarm) { a.ServiceDate = base.Add(72 * time.Hour).UnixMilli() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alarm := testAlarm(1, 600)
+			tc.mutate(&alarm)
+			repo := newFakeAlarmRepo(alarm)
+			lookups := 0
+			oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+				lookups++
+				return obaapi.Departure{}, errors.New("upstream returned status 500")
+			}}
+			sender := &fakeSender{}
+			newScheduler(repo, oba, sender).CheckAll(context.Background())
+			if _, ok := repo.get(1); ok {
+				t.Fatal("over-age alarm still present; want deleted")
+			}
+			if lookups != 0 || sender.count() != 0 {
+				t.Errorf("lookups=%d sent=%d; want 0 and 0", lookups, sender.count())
+			}
+		})
+	}
+}
+
+// TestAlarmInsideAgeWindowIsKept: the bound must not touch a live alarm.
+func TestAlarmInsideAgeWindowIsKept(t *testing.T) {
+	t.Parallel()
+	alarm := testAlarm(1, 600)
+	alarm.CreatedAt = base.Add(-alarms.MaxAge + time.Minute)
+	alarm.ServiceDate = base.Add(-30 * time.Hour).UnixMilli()
+	repo := newFakeAlarmRepo(alarm)
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		return obaapi.Departure{}, errors.New("upstream returned status 500")
+	}}
+	newScheduler(repo, oba, &fakeSender{}).CheckAll(context.Background())
+	if _, ok := repo.get(1); !ok {
+		t.Fatal("alarm inside the age window was deleted")
+	}
+}
+
+// TestSweepAsksForABoundedBatch: the sweep never asks the store for an
+// unbounded list.
+func TestSweepAsksForABoundedBatch(t *testing.T) {
+	t.Parallel()
+	repo := newFakeAlarmRepo(testAlarm(1, 600))
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(3600)}, nil
+	}}
+	newScheduler(repo, oba, &fakeSender{}).CheckAll(context.Background())
+	if repo.lastLimit != alarms.SweepBatch {
+		t.Fatalf("ListDue limit = %d, want %d", repo.lastLimit, alarms.SweepBatch)
 	}
 }

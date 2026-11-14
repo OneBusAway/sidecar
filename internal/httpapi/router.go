@@ -115,6 +115,10 @@ type Deps struct {
 	// Alarms backs the alarm create/delete endpoints (spec §5.1-§5.2). Nil
 	// means those routes are not registered.
 	Alarms alarms.Repository
+	// AlarmLimiter is the per-source throttle shared by both alarm create
+	// routes (SC-01). NewRouter defaults it (60/minute); tests inject
+	// tighter ones. DELETE is unthrottled, like Live Activities.
+	AlarmLimiter *ratelimit.Limiter
 	// OBA resolves the arrival/departure an alarm's creation-time message is
 	// composed from. Nil (or any lookup failure) degrades every alarm to the
 	// generic message rather than failing the create.
@@ -275,9 +279,12 @@ func NewRouter(deps Deps) http.Handler {
 			"Deps.PushRegs": deps.PushRegs == nil, depNow: deps.Now == nil,
 			depRegions: deps.Regions == nil,
 		})
+		if deps.AlarmLimiter == nil {
+			deps.AlarmLimiter = ratelimit.New(alarmCreatesPerMinute, time.Minute)
+		}
 		ah := &alarmsHandler{deps: deps}
-		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
-		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
+		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", throttleByIP(deps.AlarmLimiter, deps, ah.create(1)))
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", throttleByIP(deps.AlarmLimiter, deps, ah.create(2)))
 		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 	}

@@ -73,12 +73,18 @@ type Scheduler struct {
 // loop wiring) drive cycles without a ticker.
 func (s *Scheduler) CheckAll(ctx context.Context) {
 	started := s.Now()
-	pending, err := s.Repo.ListDue(ctx, started)
+	pending, err := s.Repo.ListDue(ctx, started, SweepBatch)
 	if err != nil {
 		s.Logger.Error("alarms: list pending", "err", err)
 		return
 	}
-	s.forgetFiredNotIn(pending)
+	if len(pending) == SweepBatch {
+		// More may be due than one cycle loads; they follow next cycle.
+		s.Logger.Warn("alarms: sweep batch full", "batch", SweepBatch)
+	} else {
+		// Only a complete listing proves a fired id's row is gone.
+		s.forgetFiredNotIn(pending)
+	}
 
 	// One region fetch per region per cycle, not per alarm. The failure is
 	// cached alongside the region: check has to tell "this region is gone"
@@ -142,6 +148,17 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 		s.deleteFired(ctx, alarm)
 		return
 	}
+	if alarm.Expired(s.Now()) {
+		// Past MaxAge or outside the service-date window: nothing a lookup
+		// says can make it worth keeping, and a failing upstream (which the
+		// streak deliberately ignores) must not keep it alive.
+		if err := s.Repo.DeleteByID(ctx, alarm.ID); err != nil {
+			s.Logger.Warn("alarms: delete over-age alarm", "region_id", alarm.RegionID, "err", err)
+			return
+		}
+		s.Logger.Info("alarms: deleted over-age alarm", "region_id", alarm.RegionID, "alarm_id", alarm.ID)
+		return
+	}
 	if lookup.region == nil {
 		if !errors.Is(lookup.err, regions.ErrNotFound) {
 			// A transient store failure is a fact about the database, not
@@ -172,9 +189,10 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 		VehicleID: alarm.VehicleID, StopSequence: alarm.StopSequence,
 	})
 	switch {
-	case errors.Is(err, obaapi.ErrNotFound), errors.Is(err, obaapi.ErrNotConfigured):
-		// Trip aged out (or the region has no key and never will resolve):
-		// both count toward the §5.3 reaping streak.
+	case errors.Is(err, obaapi.ErrNotFound), errors.Is(err, obaapi.ErrNotConfigured), errors.Is(err, obaapi.ErrRejected):
+		// Trip aged out, the upstream rejected the request outright, or the
+		// region has no key and never will resolve: all count toward the
+		// §5.3 reaping streak.
 		s.countFailure(ctx, alarm)
 		return
 	case err != nil:

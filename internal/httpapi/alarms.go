@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 	"github.com/OneBusAway/sidecar/internal/obaapi"
@@ -15,6 +16,22 @@ import (
 )
 
 type alarmsHandler struct{ deps Deps }
+
+const (
+	// alarmCreatesPerMinute is the per-source throttle shared by the V1 and
+	// V2 create routes (SC-01). A rider sets an alarm by hand, a few a
+	// minute at most; the headroom is for many riders behind one carrier
+	// NAT address (an IPv6 client is keyed on its /64).
+	alarmCreatesPerMinute = 60
+	// MaxAlarmsPerDevice caps the live alarms one user_push_id may hold
+	// across every region (SC-01). Each alarm is one departure a rider
+	// asked to be woken for, and alarms delete themselves once they fire
+	// or the bus leaves, so a real device holds a handful.
+	MaxAlarmsPerDevice = 50
+	// maxAlarmIDLen caps stop_id, trip_id and vehicle_id (SC-01). OBA ids
+	// are agency-prefixed GTFS ids, tens of bytes long.
+	maxAlarmIDLen = 255
+)
 
 // create handles both API versions (spec §5.1-§5.2). The two versions share
 // almost everything -- validation of user_push_id, trip-field handling,
@@ -52,6 +69,9 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 			// V1 treats an invalid value like an absent one (spec §5.2).
 			os = pushreg.OSIOS
 		}
+		stopID, _ := p.str("stop_id")
+		trip := parseTripIdentity(p)
+		msgs = append(msgs, alarmBoundsMessages(userPushID, stopID, trip, h.deps.Now())...)
 		if len(msgs) > 0 {
 			errorWithMessages(w, h.deps.Logger, "Unable to register alarm", msgs)
 			return
@@ -62,8 +82,6 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 			sandbox = parseAPNSSandbox(p, h.deps.Logger)
 		}
 
-		stopID, _ := p.str("stop_id")
-		trip := parseTripIdentity(p)
 		tripID, serviceDate, vehicleID, stopSeq := trip.TripID, trip.ServiceDate, trip.VehicleID, trip.StopSequence
 		sb, sbOK := p.int64("seconds_before")
 		secondsBefore := alarms.NormalizeSecondsBefore(sb, sbOK)
@@ -76,6 +94,13 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 			if done := h.respondExistingV1(w, r, region, v1Key); done {
 				return
 			}
+		}
+		if full, capErr := h.deviceAtCap(r.Context(), userPushID); capErr != nil {
+			writeServerError(w, h.deps.Logger, region.ID, "count device alarms", sanitizeToken(capErr, userPushID))
+			return
+		} else if full {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
 		}
 
 		message := h.composeMessage(r.Context(), region, stopID, tripID, serviceDate, vehicleID, stopSeq, secondsBefore)
@@ -112,15 +137,11 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 			// Every V2 alarm creation also refreshes the alert-push audience
 			// (spec §5.2): OS and last_seen_at only, no locale, and -- the
 			// documented reference wart -- no apns_sandbox propagation. This
-			// upsert bypasses the registration endpoint's own validation, so
-			// it must re-apply the length cap that endpoint enforces
-			// (maxTokenLen, spec §2.6) itself -- otherwise an oversized
-			// user_push_id would reach the store through a path the
-			// endpoint's throttle and 422 never see.
-			if len(userPushID) > maxTokenLen {
-				h.deps.Logger.Warn("httpapi: alarm side-effect registration skipped: user_push_id too long",
-					"region_id", region.ID, "len", len(userPushID))
-			} else if err := h.deps.PushRegs.Upsert(r.Context(), pushreg.Upsert{
+			// upsert bypasses the registration endpoint's own validation; the
+			// length cap that endpoint enforces (maxTokenLen, spec §2.6) was
+			// already applied to user_push_id above (alarmBoundsMessages),
+			// and the alarm throttle bounds how often this path runs.
+			if err := h.deps.PushRegs.Upsert(r.Context(), pushreg.Upsert{
 				RegionID: region.ID, Token: userPushID, OperatingSystem: os,
 			}, h.deps.Now()); err != nil {
 				// The alarm exists and its 201 must stand; the registry miss
@@ -134,6 +155,39 @@ func (h *alarmsHandler) create(version int) http.HandlerFunc {
 		writeJSON(w, h.deps.Logger, http.StatusCreated,
 			map[string]string{"url": alarmURL(region, r, version, created.Token)})
 	}
+}
+
+// alarmBoundsMessages applies the SC-01 size and age limits: the device
+// token is capped like every other push token (maxTokenLen), the trip
+// identifiers at maxAlarmIDLen, and a non-zero service date must be within
+// alarms.ServiceDateWindow of now.
+func alarmBoundsMessages(userPushID, stopID string, trip tripIdentity, now time.Time) []string {
+	var msgs []string
+	if len(userPushID) > maxTokenLen {
+		msgs = append(msgs, fmt.Sprintf("Push identifier is too long (maximum is %d characters)", maxTokenLen))
+	}
+	for _, f := range []struct{ label, value string }{
+		{"Stop", stopID}, {"Trip", trip.TripID}, {"Vehicle", trip.VehicleID},
+	} {
+		if len(f.value) > maxAlarmIDLen {
+			msgs = append(msgs, fmt.Sprintf("%s is too long (maximum is %d characters)", f.label, maxAlarmIDLen))
+		}
+	}
+	if !alarms.ServiceDateInWindow(trip.ServiceDate, now) {
+		msgs = append(msgs, "Service date is out of range")
+	}
+	return msgs
+}
+
+// deviceAtCap reports whether userPushID already holds MaxAlarmsPerDevice
+// live alarms. Checked after the V1 idempotency lookup, so re-POSTing an
+// alarm the device already has still answers 201.
+func (h *alarmsHandler) deviceAtCap(ctx context.Context, userPushID string) (bool, error) {
+	n, err := h.deps.Alarms.CountByUserPushID(ctx, userPushID)
+	if err != nil {
+		return false, err
+	}
+	return n >= MaxAlarmsPerDevice, nil
 }
 
 // respondExistingV1 answers a V1 registration from the idempotency key
