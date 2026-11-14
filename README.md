@@ -46,6 +46,10 @@ each stale field.
 `sidecar-admin` is the CLI for creating and publishing alerts. It never talks to the
 server over HTTP — it opens the same SQLite database file directly, so run it against a
 copy of (or the same file as) whatever `--db`/`SIDECAR_DB` the server uses.
+Both binaries keep the database and its `-wal` and `-shm` files owner-only
+(mode `0600`, narrowing files an older build left `0644`): they hold password
+hashes, key digests, OBA keys, push tokens, and rider data. Run the CLI as the
+same user as the server (in the image, `sidecar`).
 
 The steps below are sequential, not independent examples: `region sync` populates the
 regions table that `region set` updates, and `region set` must run before the first
