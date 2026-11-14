@@ -754,3 +754,47 @@ func TestMissingRegionCountsAsFailure(t *testing.T) {
 		t.Fatalf("got=%+v ok=%v; want FailureCount=1 (missing region counts as a lookup failure)", got, ok)
 	}
 }
+
+// failingDeleteRepo is a fakeAlarmRepo whose DeleteByID always fails, as a
+// database briefly refusing writes would.
+type failingDeleteRepo struct {
+	*fakeAlarmRepo
+	deletes int
+}
+
+func (r *failingDeleteRepo) DeleteByID(context.Context, int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deletes++
+	return errors.New("database is locked")
+}
+
+// TestFiredAlarmIsNotResentWhenDeleteFails pins SC-12: firing is
+// send-then-delete, so a delete that fails after a successful send used to
+// leave the row due and push it again every cycle until the departure
+// passed. The scheduler remembers what it fired and only retries the
+// delete.
+func TestFiredAlarmIsNotResentWhenDeleteFails(t *testing.T) {
+	t.Parallel()
+	repo := &failingDeleteRepo{fakeAlarmRepo: newFakeAlarmRepo(testAlarm(1, 600))}
+	lookups := 0
+	oba := fakeOBA{fn: func(context.Context, regions.Region, obaapi.DepartureQuery) (obaapi.Departure, error) {
+		lookups++
+		return obaapi.Departure{Predicted: true, PredictedDepartureTime: msAt(300)}, nil
+	}}
+	sender := &fakeSender{}
+	s := newScheduler(repo, oba, sender)
+
+	s.CheckAll(context.Background())
+	s.CheckAll(context.Background())
+
+	if sender.count() != 1 {
+		t.Fatalf("sent = %d across two cycles; want exactly 1", sender.count())
+	}
+	if repo.deletes != 2 {
+		t.Errorf("delete attempts = %d; want 2 (the failed delete is retried)", repo.deletes)
+	}
+	if lookups != 1 {
+		t.Errorf("OBA lookups = %d; want 1 (a fired alarm needs no second lookup)", lookups)
+	}
+}

@@ -846,7 +846,10 @@ routine double execution.
 Alarm delivery is itself at-least-once: the alarm is deleted only *after* the push
 send returns (a send can't join a database transaction), so a crash in the gap between
 send and delete re-fires the alarm on the next cycle — an accepted duplicate, preferred
-over deleting first and losing the notification. Live Activity pushes are naturally
+over deleting first and losing the notification. A delete that merely *fails* (the
+process is still running) is not that gap: the implementation SHOULD remember the
+alarms it has pushed and retry only the delete, rather than pushing again every cycle
+until the departure passes. Live Activity pushes are naturally
 idempotent (same content state); alert fan-out should track a cursor so a resumed send
 doesn't re-push the whole audience.
 
