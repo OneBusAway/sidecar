@@ -172,6 +172,29 @@ func (q *Queries) CountInFlightAlertPushes(ctx context.Context, alertID int64) (
 	return count, err
 }
 
+const countReachingAllPushesSince = `-- name: CountReachingAllPushesSince :one
+SELECT COUNT(*) FROM alert_pushes
+WHERE region_id = ?1
+  AND audience = 'all'
+  AND created_at >= ?2
+  AND NOT (status IN ('failed', 'canceled') AND submitted_count = 0)
+`
+
+type CountReachingAllPushesSinceParams struct {
+	RegionID int64
+	Since    int64
+}
+
+// Pushes to the whole region created at or after since that may have
+// reached a device: everything except a failed or canceled push that never
+// submitted a batch (SC-27 cooldown, design spec section 2.2).
+func (q *Queries) CountReachingAllPushesSince(ctx context.Context, arg CountReachingAllPushesSinceParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countReachingAllPushesSince, arg.RegionID, arg.Since)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAlertPush = `-- name: CreateAlertPush :one
 
 INSERT INTO alert_pushes (

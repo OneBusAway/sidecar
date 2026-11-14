@@ -161,6 +161,8 @@ var (
 	ErrTerminal      = errors.New("alert push already completed")
 	ErrNotPublished  = errors.New("alert is not published")
 	ErrEmptyAudience = errors.New("no registered devices in the audience")
+	// ErrCooldown refuses an "all" push that would exceed the SC-27 cooldown.
+	ErrCooldown = errors.New("push cooldown")
 )
 
 // Repository stores alert pushes. Implementations must be safe for
@@ -209,6 +211,10 @@ type Repository interface {
 	// completed_at; false if the push was not sending (already canceled) or
 	// status is not one of StatusSent, StatusFailed, or StatusCanceled.
 	MarkCompleted(ctx context.Context, id int64, status Status, lastError string, now time.Time) (bool, error)
+	// CountReachingAllSince counts the region's "all"-audience pushes created
+	// at or after since that may have reached a device: every push except a
+	// failed or canceled one with submitted_count 0 (SC-27).
+	CountReachingAllSince(ctx context.Context, regionID int64, since time.Time) (int64, error)
 	// Cancel moves a queued or sending push to canceled. ErrNotFound if
 	// absent, ErrTerminal if already completed.
 	Cancel(ctx context.Context, id int64, now time.Time) error
@@ -250,4 +256,11 @@ func CleanFailureReason(s string) string {
 		n++
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// MayHaveReached reports whether p may have delivered to any device: false
+// only for a failed or canceled push that never submitted a batch. The
+// SC-27 cooldown counts only these.
+func (p Push) MayHaveReached() bool {
+	return (p.Status != StatusFailed && p.Status != StatusCanceled) || p.SubmittedCount > 0
 }

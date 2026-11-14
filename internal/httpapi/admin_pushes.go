@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/alerts"
@@ -85,11 +86,37 @@ type adminPushesHandler struct {
 // drift on what "may this be sent" means.
 func (h *adminPushesHandler) enqueuer() *alertpush.Enqueuer {
 	return &alertpush.Enqueuer{
-		Repo:     h.deps.AlertPushes,
-		Alerts:   h.deps.Alerts,
-		PushRegs: h.deps.PushRegs,
+		Repo:              h.deps.AlertPushes,
+		Alerts:            h.deps.Alerts,
+		PushRegs:          h.deps.PushRegs,
+		AlertSpacing:      pushAlertSpacing,
+		RegionHourlyLimit: regionHourlyLimit(h.deps.PushRegionHourlyLimit),
 	}
 }
+
+// regionHourlyLimit resolves Deps.PushRegionHourlyLimit: zero is the
+// default, negative disables (Enqueuer treats zero as off).
+func regionHourlyLimit(configured int) int {
+	switch {
+	case configured < 0:
+		return 0
+	case configured == 0:
+		return pushRegionHourlyLimit
+	default:
+		return configured
+	}
+}
+
+// The SC-27 cooldown on "all" pushes through the admin API. Deliberately
+// loose: the spacing only stops a repeat of the same alert within a minute
+// (a double submit or a loop), so a correction sent minutes later goes
+// through, and 20 an hour per region is far above any real agency's
+// cadence while still capping what a leaked push-scoped key can do. The
+// test audience is never throttled.
+const (
+	pushAlertSpacing      = time.Minute
+	pushRegionHourlyLimit = 20
+)
 
 // create handles POST /api/admin/v1/regions/{regionId}/alerts/{id}/pushes.
 func (h *adminPushesHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +260,12 @@ func (h *adminPushesHandler) enqueueError(w http.ResponseWriter, err error) {
 	// Each sentinel's own text is what reaches the client, never err.Error():
 	// a wrapped copy would carry the failing statement into the response
 	// (design spec §5).
+	if errors.Is(err, alertpush.ErrCooldown) {
+		// Built by Enqueue from constants and counts, never from a store
+		// error, so its text is safe to show; Rails displays it verbatim.
+		writeJSONError(w, h.deps.Logger, http.StatusConflict, err.Error())
+		return
+	}
 	for _, sentinel := range []error{
 		alertpush.ErrNotPublished, alertpush.ErrInFlight, alertpush.ErrEmptyAudience,
 	} {

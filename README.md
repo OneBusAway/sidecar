@@ -190,6 +190,17 @@ unknown push, or a `pushId` belonging to a different alert, and `409` for each
 precondition (unpublished alert, a push already in flight, empty audience) and
 for canceling a push that has already finished.
 
+`POST` also applies a deliberately loose cooldown to `all`-audience pushes,
+answered as `409` with the reason in the body ("push cooldown: …", which
+OBACloud shows to the operator as the reason the push was not sent): the
+same alert cannot be pushed to everyone again within **1 minute** of its
+last such push (a double submit or a loop; a correction sent a few minutes
+later goes through), and a region cannot send more than **20** `all` pushes
+in a trailing hour. Pushes that were canceled or failed before submitting a
+single batch do not count. `test`-audience sends -- including every send of
+a test alert -- are never throttled, and `sidecar-admin alert push` (an
+operator with database access) is not throttled at all.
+
 **These four routes are registered only when `SIDECAR_GORUSH_URL` is set.**
 Without a transport the admin UI reports that push notifications are not
 configured on this server, rather than letting an operator queue a send that

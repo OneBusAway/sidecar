@@ -183,6 +183,11 @@ type Deps struct {
 	SessionLifetime    time.Duration
 	SessionIdleTimeout time.Duration
 
+	// PushRegionHourlyLimit overrides the SC-27 cap on "all" pushes per
+	// region per hour through the admin API: zero keeps the default, a
+	// negative value disables it.
+	PushRegionHourlyLimit int
+
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS

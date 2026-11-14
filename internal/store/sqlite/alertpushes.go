@@ -300,3 +300,11 @@ func (r *alertPushRepo) Cancel(ctx context.Context, id int64, now time.Time) err
 	}
 	return fmt.Errorf("sqlite: cancel alert push %d: %w", id, alertpush.ErrTerminal)
 }
+
+func (r *alertPushRepo) CountReachingAllSince(ctx context.Context, regionID int64, since time.Time) (int64, error) {
+	n, err := r.q.CountReachingAllPushesSince(ctx, gen.CountReachingAllPushesSinceParams{RegionID: regionID, Since: since.Unix()})
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count region %d pushes: %w", regionID, err)
+	}
+	return n, nil
+}

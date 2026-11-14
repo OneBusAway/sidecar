@@ -32,6 +32,7 @@ func RunAlertPushRepository(t *testing.T, newStore newAlertPushStoreFunc) {
 	t.Run("AdvanceCursorIsConditional", func(t *testing.T) { testAlertPushAdvanceCursor(t, newStore) })
 	t.Run("RecordFailureDedupsAndCounts", func(t *testing.T) { testAlertPushRecordFailure(t, newStore) })
 	t.Run("RecordFailureIsBounded", func(t *testing.T) { testAlertPushRecordFailureBounded(t, newStore) })
+	t.Run("CountReachingAllSince", func(t *testing.T) { testAlertPushCountReachingAllSince(t, newStore) })
 	t.Run("RecordAttemptAndMarkCompleted", func(t *testing.T) { testAlertPushAttemptsAndCompletion(t, newStore) })
 	t.Run("CancelTransitions", func(t *testing.T) { testAlertPushCancel(t, newStore) })
 	t.Run("CascadesWithAlert", func(t *testing.T) { testAlertPushCascade(t, newStore) })
@@ -538,5 +539,41 @@ func testAlertPushRecordFailureBounded(t *testing.T, newStore newAlertPushStoreF
 	}
 	if got := getPush(t, repo, q.ID); got.FailedCount != 1 {
 		t.Errorf("failed_count after one in-window and one stale bounce = %d, want 1", got.FailedCount)
+	}
+}
+
+// testAlertPushCountReachingAllSince backs the SC-27 region cap: "all"
+// pushes in the region at or after since, minus failed/canceled pushes that
+// never submitted a batch. Test-audience pushes and other regions never count.
+func testAlertPushCountReachingAllSince(t *testing.T, newStore newAlertPushStoreFunc) {
+	repo, alertsRepo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	a := seedPushAlert(t, alertsRepo, regionsRepo, 1)
+	b := seedPushAlert(t, alertsRepo, regionsRepo, 2)
+
+	old := createPush(t, repo, a, base.Add(-2*time.Hour))
+	claimPushes(t, repo, base.Add(-2*time.Hour), base.Add(-3*time.Hour))
+	advanceCursor(t, repo, old.ID, 0, 1, 1, base.Add(-2*time.Hour))
+	markCompleted(t, repo, old.ID, alertpush.StatusSent, "", base.Add(-2*time.Hour))
+
+	unsent := createPush(t, repo, a, base)
+	if err := repo.Cancel(ctx, unsent.ID, base); err != nil {
+		t.Fatalf(cancelFailFmt, err)
+	}
+	createPush(t, repo, a, base.Add(time.Minute)) // queued: counts
+	if _, err := repo.Create(ctx, alertpush.NewPush{AlertID: b.ID, RegionID: b.RegionID, Audience: alertpush.AudienceTest,
+		Messages: alertpush.Messages{"en": {Title: "t", Body: "b"}}}, base); err != nil {
+		t.Fatalf("Create test push: %v", err)
+	}
+
+	n, err := repo.CountReachingAllSince(ctx, a.RegionID, base.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CountReachingAllSince: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("CountReachingAllSince = %d, want 1 (the queued push; not the old one, the unsent cancel, or a test push)", n)
+	}
+	if n, err = repo.CountReachingAllSince(ctx, a.RegionID, base.Add(-3*time.Hour)); err != nil || n != 2 {
+		t.Errorf("CountReachingAllSince over 3h = %d, %v; want 2", n, err)
 	}
 }
