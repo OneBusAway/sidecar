@@ -643,6 +643,11 @@ redirecting.
   gorush webhook and the donations endpoint) must be exactly one JSON value;
   trailing data after it -- a second object, stray bytes -- is a `400`.
   Trailing whitespace is fine.
+- **Bounded password-hash cost.** Verification uses the argon2id parameters
+  stored in each user row, so it refuses a stored hash naming more than
+  64 MiB, 10 passes, or 8 lanes (or an out-of-range salt/key length) instead
+  of running it. The defaults (19 MiB, 2 passes, 1 lane) leave room to raise
+  them without a code change.
 
 ### Region API keys and service principals
 
