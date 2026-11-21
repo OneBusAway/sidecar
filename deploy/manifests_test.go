@@ -105,3 +105,19 @@ func TestLitestreamDownloadVerified(t *testing.T) {
 		t.Error("Dockerfile: the litestream download is piped straight into tar, unverified")
 	}
 }
+
+// TestRuntimeUserHasLoginShell: Render SSH logs in as the image's USER, and
+// every operator step in the cutover runbook is `render ssh sidecar --
+// sidecar-admin ...`. Alpine's `adduser -S` defaults the shell to
+// /sbin/nologin, which refuses the session ("This account is not
+// available"), so the runtime user must be created with a real shell.
+func TestRuntimeUserHasLoginShell(t *testing.T) {
+	t.Parallel()
+	s := read(t, "Dockerfile")
+	if !strings.Contains(s, "adduser -S -s /bin/sh -G sidecar sidecar") {
+		t.Fatal("Dockerfile must create the sidecar user with `-s /bin/sh`; the /sbin/nologin default breaks render ssh")
+	}
+	if !strings.Contains(s, "\nUSER sidecar\n") {
+		t.Fatal("Dockerfile must run as the sidecar user")
+	}
+}

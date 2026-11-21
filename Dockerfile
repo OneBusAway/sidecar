@@ -59,8 +59,12 @@ RUN apk add --no-cache curl \
 
 # --- Stage 4: runtime --------------------------------------------------------
 FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+# The runtime user needs a real login shell: Render SSH (`render ssh sidecar
+# -- sidecar-admin ...`, every operator step in the cutover runbook) logs in as
+# the image's USER, and Alpine's `adduser -S` defaults to /sbin/nologin, which
+# refuses the session with "This account is not available".
 RUN apk add --no-cache ca-certificates tzdata \
- && addgroup -S sidecar && adduser -S -G sidecar sidecar \
+ && addgroup -S sidecar && adduser -S -s /bin/sh -G sidecar sidecar \
  && mkdir -p /data && chown sidecar:sidecar /data
 COPY --from=build /out/sidecar /out/sidecar-admin /usr/local/bin/
 COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/
