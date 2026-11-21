@@ -116,9 +116,12 @@ func buildAlert(a Alert, dur time.Duration, opts FeedOptions) *gtfs.Alert {
 		// correctly seeing none.
 		out.DescriptionText = a.translated(a.DescriptionText, FieldDescription)
 	}
-	if a.URL != "" {
+	if a.URL != "" && ValidateURL(a.URL) == nil {
 		// url is English-only per the feed contract, so it goes out with no
 		// translation candidates at all rather than through translated().
+		// A stored value the write side would refuse (a javascript: or
+		// data: URL written straight into the database, or stored before
+		// validation existed) is withheld; the alert itself still goes out.
 		out.Url = englishOnly(a.URL)
 	}
 	return out

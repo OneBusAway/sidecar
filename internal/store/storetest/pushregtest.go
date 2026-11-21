@@ -31,6 +31,7 @@ func RunPushRegistrationRepository(t *testing.T, newStore newPushRegStoreFunc) {
 	t.Run("NilPointersKeepStoredValues", func(t *testing.T) { testNilPointersKeepStoredValues(t, newStore) })
 	t.Run("ExplicitFalseDemotesAndClearsDescription", func(t *testing.T) { testExplicitFalseDemotesAndClearsDescription(t, newStore) })
 	t.Run("OperatingSystemAndSandboxAlwaysOverwritten", func(t *testing.T) { testOperatingSystemAndSandboxAlwaysOverwritten(t, newStore) })
+	t.Run("KeepStoredAPNSSandbox", func(t *testing.T) { testKeepStoredAPNSSandbox(t, newStore) })
 	t.Run("LocaleOverwrittenOnlyWhenSet", func(t *testing.T) { testLocaleOverwrittenOnlyWhenSet(t, newStore) })
 	t.Run("DescriptionOverwrittenOnlyWhenSet", func(t *testing.T) { testDescriptionOverwrittenOnlyWhenSet(t, newStore) })
 	t.Run("DeleteReportsNotFound", func(t *testing.T) { testPushRegDeleteReportsNotFound(t, newStore) })
@@ -284,6 +285,49 @@ func testOperatingSystemAndSandboxAlwaysOverwritten(t *testing.T, newStore newPu
 	}
 	if got.APNSSandbox {
 		t.Errorf("APNSSandbox = true, want false (must always follow the latest registration)")
+	}
+}
+
+// testKeepStoredAPNSSandbox asserts KeepStoredAPNSSandbox: on an existing
+// row the stored apns_sandbox survives whatever APNSSandbox carries (the V2
+// alarm side effect, whose request may omit the flag), while a first insert
+// still writes APNSSandbox. Every other column follows its usual rules.
+func testKeepStoredAPNSSandbox(t *testing.T, newStore newPushRegStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+
+	if err := repo.Upsert(ctx, pushreg.Upsert{
+		RegionID: 1, Token: "tok-new", OperatingSystem: pushreg.OSIOS, APNSSandbox: true, KeepStoredAPNSSandbox: true,
+	}, base); err != nil {
+		t.Fatalf("Upsert(tok-new): %v", err)
+	}
+	if got, err := repo.Get(ctx, 1, "tok-new"); err != nil {
+		t.Fatalf("Get(tok-new): %v", err)
+	} else if !got.APNSSandbox {
+		t.Errorf("first insert APNSSandbox = false, want true (insert writes APNSSandbox)")
+	}
+
+	if err := repo.Upsert(ctx, pushreg.Upsert{
+		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: true,
+	}, base); err != nil {
+		t.Fatalf("Upsert(1): %v", err)
+	}
+	later := base.Add(time.Hour)
+	if err := repo.Upsert(ctx, pushreg.Upsert{
+		RegionID: 1, Token: "tok-1", OperatingSystem: pushreg.OSIOS, APNSSandbox: false, KeepStoredAPNSSandbox: true,
+	}, later); err != nil {
+		t.Fatalf("Upsert(2, keep): %v", err)
+	}
+	got, err := repo.Get(ctx, 1, "tok-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.APNSSandbox {
+		t.Errorf("APNSSandbox = false, want true (KeepStoredAPNSSandbox must preserve the stored value)")
+	}
+	if !got.LastSeenAt.Equal(later) {
+		t.Errorf("LastSeenAt = %v, want %v", got.LastSeenAt, later)
 	}
 }
 

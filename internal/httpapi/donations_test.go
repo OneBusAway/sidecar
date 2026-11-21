@@ -181,3 +181,56 @@ func TestDonations_TestModeSpellings(t *testing.T) {
 		t.Errorf("fractional amount: %d", rec.Code)
 	}
 }
+
+// TestDonations_RejectsOutOfRangeBeforeStripe (SC-04): a bad amount or
+// email is a 400 with no Stripe object created.
+func TestDonations_RejectsOutOfRangeBeforeStripe(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"donation_amount_in_cents":1,"donation_frequency":"onetime","name":"J","email":"jane@example.com"}`,
+		`{"donation_amount_in_cents":100000000,"donation_frequency":"onetime","name":"J","email":"jane@example.com"}`,
+		`{"donation_amount_in_cents":500,"donation_frequency":"onetime","name":"J","email":"@"}`,
+	} {
+		live := &donationGateway{}
+		rec := postDonation(newDonationsServer(t, live, nil), body, "203.0.113.1")
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", body, rec.Code)
+		}
+		if live.last != (donations.Request{}) {
+			t.Errorf("%s: gateway was called: %+v", body, live.last)
+		}
+	}
+}
+
+// TestDonations_GlobalDailyCap (SC-04): per-IP throttling does not stop a
+// distributed card-testing run, so valid requests also share one
+// server-wide daily bucket; past it every caller gets a 429 and Stripe is
+// not called. Invalid requests do not consume it.
+func TestDonations_GlobalDailyCap(t *testing.T) {
+	t.Parallel()
+	live := &donationGateway{}
+	store := sqlitetest.Open(t)
+	h := httpapi.NewRouter(httpapi.Deps{
+		Alerts:               store.Alerts(),
+		Regions:              store.Regions(),
+		Donations:            &donations.Service{Live: live, NewID: func() string { return "id" }},
+		DonationLimiter:      ratelimit.New(100, time.Minute),
+		DonationDailyLimiter: ratelimit.New(2, 24*time.Hour),
+		Now:                  func() time.Time { return base },
+		Logger:               slog.New(slog.DiscardHandler),
+	})
+	bad := `{"donation_amount_in_cents":1,"donation_frequency":"onetime","name":"J","email":"jane@example.com"}`
+	postDonation(h, bad, "203.0.113.9")
+	for i, ip := range []string{"203.0.113.1", "203.0.113.2"} {
+		if rec := postDonation(h, iosOneTime, ip); rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status %d", i, rec.Code)
+		}
+	}
+	live.last = donations.Request{}
+	if rec := postDonation(h, iosOneTime, "203.0.113.3"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third valid request from a fresh address: status %d, want 429", rec.Code)
+	}
+	if live.last != (donations.Request{}) {
+		t.Errorf("gateway called past the daily cap: %+v", live.last)
+	}
+}

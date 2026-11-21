@@ -410,3 +410,105 @@ func TestSurveyResponse_UnknownSurveyNoStoreWrite(t *testing.T) {
 		t.Fatalf("%d", rec.Code)
 	}
 }
+
+// TestSurveyResponse_InactiveSurveyIs404 (SC-09): a create against a survey
+// the rider-facing list would not show -- unavailable, not started, or
+// ended -- is the same 404 as an unknown id, and stores nothing.
+func TestSurveyResponse_InactiveSurveyIs404(t *testing.T) {
+	t.Parallel()
+	longAgo, past := base.Add(-3*time.Hour), base.Add(-2*time.Hour)
+	future, later := base.Add(2*time.Hour), base.Add(3*time.Hour)
+	for _, tc := range []struct {
+		name string
+		mut  func(*surveys.Definition)
+	}{
+		{"unavailable", func(d *surveys.Definition) { d.Available = false }},
+		{"ended", func(d *surveys.Definition) { d.StartTime, d.EndTime = &longAgo, &past }},
+		{"not started", func(d *surveys.Definition) { d.StartTime, d.EndTime = &future, &later }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, repo, regs := surveyDeps(t, nil, nil)
+			def := fullDefinition()
+			tc.mut(&def)
+			s := seedSurvey(t, repo, regs, 1, def)
+			rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", jsonCT, iosJSON(s.ID))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+			}
+			if n, err := repo.CountResponses(context.Background(), s.ID); err != nil || n != 0 {
+				t.Fatalf("responses stored = %d, %v; want 0", n, err)
+			}
+		})
+	}
+}
+
+// TestSurveyResponse_AmendStillWorksAfterSurveyEnds: the cap on creates
+// must not break the apps' amend flow -- a rider who answered the hero
+// question just before the window closed can still send the rest.
+func TestSurveyResponse_AmendStillWorksAfterSurveyEnds(t *testing.T) {
+	t.Parallel()
+	h, repo, regs := surveyDeps(t, nil, nil)
+	s := seedSurvey(t, repo, regs, 1, fullDefinition())
+	id := createOne(t, h, s.ID)
+	def := fullDefinition()
+	past := base.Add(-30 * time.Minute)
+	def.EndTime = &past
+	start := base.Add(-2 * time.Hour)
+	def.StartTime = &start
+	if _, err := repo.UpdateSurvey(context.Background(), s.ID, def, base); err != nil {
+		t.Fatalf("UpdateSurvey: %v", err)
+	}
+	body := `{"responses":"[{\"question_id\":22,\"answer\":\"more\"}]"}`
+	if rec := send(t, h, http.MethodPut, "/api/v1/survey_responses/"+id, jsonCT, body); rec.Code != http.StatusOK {
+		t.Fatalf("iOS PUT amend after end: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := send(t, h, http.MethodPost, "/api/v1/survey_responses/"+id, formCT, "responses="+url.QueryEscape(`[{"question_id":23,"answer":"x"}]`)); rec.Code != http.StatusOK {
+		t.Fatalf("Android POST amend after end: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSurveyResponse_PerRiderCap (SC-09): one user_identifier cannot file
+// unlimited responses to one survey. A single-response survey allows a few
+// creates (headroom for a retried hero-question POST whose 201 was lost);
+// amends of the response are never counted.
+func TestSurveyResponse_PerRiderCap(t *testing.T) {
+	t.Parallel()
+	h, repo, regs := surveyDeps(t, ratelimit.New(1000, time.Minute), nil)
+	s := seedSurvey(t, repo, regs, 1, fullDefinition())
+	var first string
+	for i := range httpapi.MaxResponsesPerRider {
+		id := createOne(t, h, s.ID)
+		if i == 0 {
+			first = id
+		}
+	}
+	rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", jsonCT, iosJSON(s.ID))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("over the cap: status = %d, want 422; body = %s", rec.Code, rec.Body.String())
+	}
+	for range 5 {
+		if rec := send(t, h, http.MethodPut, "/api/v1/survey_responses/"+first, jsonCT, `{"responses":"[]"}`); rec.Code != http.StatusOK {
+			t.Fatalf("amend at the cap: status = %d", rec.Code)
+		}
+	}
+	if rec := send(t, h, http.MethodPost, "/api/v1/survey_responses/", formCT, androidForm(s.ID)); rec.Code != http.StatusCreated {
+		t.Fatalf("another rider: status = %d, want 201", rec.Code)
+	}
+}
+
+// TestSurveyResponse_MultipleResponseSurveyHasHigherCap: a survey that
+// allows multiple responses takes many per rider, but still not unlimited.
+func TestSurveyResponse_MultipleResponseSurveyHasHigherCap(t *testing.T) {
+	t.Parallel()
+	h, repo, regs := surveyDeps(t, ratelimit.New(1000, time.Minute), nil)
+	def := fullDefinition()
+	def.AllowsMultipleResponses = true
+	s := seedSurvey(t, repo, regs, 1, def)
+	for range httpapi.MaxResponsesPerRiderMultiple {
+		createOne(t, h, s.ID)
+	}
+	if rec := send(t, h, http.MethodPost, "/api/v1/survey_responses", jsonCT, iosJSON(s.ID)); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("over the multiple-response cap: status = %d, want 422", rec.Code)
+	}
+}

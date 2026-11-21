@@ -72,6 +72,10 @@ type Deps struct {
 	// DonationLimiter is the per-source throttle on donation requests.
 	// NewRouter defaults it (10/minute).
 	DonationLimiter *ratelimit.Limiter
+	// DonationDailyLimiter is the server-wide daily cap on donation
+	// requests that pass validation (SC-04). NewRouter defaults it
+	// (500/day); every caller shares one bucket.
+	DonationDailyLimiter *ratelimit.Limiter
 
 	// Vehicles backs the vehicle search endpoint. Nil means the route is not
 	// registered, which is how a feed-only deployment (or a feed-only test)
@@ -115,6 +119,10 @@ type Deps struct {
 	// Alarms backs the alarm create/delete endpoints (spec §5.1-§5.2). Nil
 	// means those routes are not registered.
 	Alarms alarms.Repository
+	// AlarmLimiter is the per-source throttle shared by both alarm create
+	// routes (SC-01). NewRouter defaults it (60/minute); tests inject
+	// tighter ones. DELETE is unthrottled, like Live Activities.
+	AlarmLimiter *ratelimit.Limiter
 	// OBA resolves the arrival/departure an alarm's creation-time message is
 	// composed from. Nil (or any lookup failure) degrades every alarm to the
 	// generic message rather than failing the create.
@@ -128,6 +136,9 @@ type Deps struct {
 	// distinct stop a registration names costs one upstream call per
 	// minute for eight hours). NewRouter defaults it; tests inject tighter.
 	LiveActivityLimiter *ratelimit.Limiter
+	// LiveActivityCaps bounds live subscriptions (SC-03). Zero fields take
+	// liveactivities.DefaultCaps; tests set tight ones.
+	LiveActivityCaps liveactivities.Caps
 
 	// Surveys backs the survey list and survey response endpoints (spec
 	// §7). Nil means those routes are not registered.
@@ -160,6 +171,11 @@ type Deps struct {
 	// not exist (design spec §4.3), and that call has no observable effect on
 	// the response -- only a recorder can prove it still happens.
 	VerifyPassword func(phc, password string) (bool, error)
+
+	// AdminListCap bounds one page of the admin lists over rider rows --
+	// alarms, survey responses, ghost bus reports -- and is the page size
+	// their CSV exports stream in (SC-21). Zero means 10000.
+	AdminListCap int
 
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
@@ -230,7 +246,10 @@ func NewRouter(deps Deps) http.Handler {
 			depRegions: deps.Regions == nil, depNow: deps.Now == nil,
 		})
 		h := &alertsHandler{deps: deps}
+		// Both shipped apps request ".pb" (the legacy Rails route's default
+		// format), so it is the same handler as the bare path.
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts", h.feedBinary)
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pb", h.feedBinary)
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/alerts.pbtext", h.feedText)
 	}
 
@@ -241,11 +260,16 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Vehicles != nil {
 		vh := &vehiclesHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles", vh.search)
+		// Rails served vehicles with a ".json" suffix and its migrated-region
+		// redirect preserves the full path.
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/vehicles.json", vh.search)
 	}
 
 	if deps.Weather != nil {
 		wh := &weatherHandler{deps: deps}
 		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather", wh.forecast)
+		// Both shipped apps request "weather.json".
+		mux.HandleFunc("GET /api/v1/regions/{regionId}/weather.json", wh.forecast)
 	}
 
 	if deps.PushRegs != nil {
@@ -275,9 +299,12 @@ func NewRouter(deps Deps) http.Handler {
 			"Deps.PushRegs": deps.PushRegs == nil, depNow: deps.Now == nil,
 			depRegions: deps.Regions == nil,
 		})
+		if deps.AlarmLimiter == nil {
+			deps.AlarmLimiter = ratelimit.New(alarmCreatesPerMinute, time.Minute)
+		}
 		ah := &alarmsHandler{deps: deps}
-		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", ah.create(1))
-		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", ah.create(2))
+		mux.HandleFunc("POST /api/v1/regions/{regionId}/alarms", throttleByIP(deps.AlarmLimiter, deps, ah.create(1)))
+		mux.HandleFunc("POST /api/v2/regions/{regionId}/alarms", throttleByIP(deps.AlarmLimiter, deps, ah.create(2)))
 		mux.HandleFunc("DELETE /api/v1/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 		mux.HandleFunc("DELETE /api/v2/regions/{regionId}/alarms/{alarmToken}", ah.delete)
 	}
@@ -364,6 +391,9 @@ func NewRouter(deps Deps) http.Handler {
 	if deps.Donations != nil {
 		if deps.DonationLimiter == nil {
 			deps.DonationLimiter = ratelimit.New(donationsPerMinute, time.Minute)
+		}
+		if deps.DonationDailyLimiter == nil {
+			deps.DonationDailyLimiter = ratelimit.New(donationsPerDay, 24*time.Hour)
 		}
 		dh := &donationsHandler{deps: deps}
 		mux.HandleFunc("POST /api/v1/payment_intents", throttleByIP(deps.DonationLimiter, deps, dh.create))

@@ -9,7 +9,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
+)
+
+// Amount and contact bounds (SC-04). Every request creates a Stripe
+// customer and an intent or subscription, so an unbounded amount range is a
+// card-testing tool: carders probe stolen cards with cents-sized charges.
+// $1 is below any real donation and above Stripe's own floor; $10,000 is
+// far above any in-app donation.
+const (
+	// MinAmountCents is the smallest donation accepted.
+	MinAmountCents = 100
+	// MaxAmountCents is the largest donation accepted.
+	MaxAmountCents = 1_000_000
+	// maxEmailLen is the RFC 5321 path limit.
+	maxEmailLen = 254
+	// maxNameLen caps the donor name passed to Stripe.
+	maxNameLen = 255
 )
 
 // Request is the app's POST body (spec section 11): raw JSON, not form.
@@ -106,10 +123,24 @@ func (s *Service) Create(ctx context.Context, req Request) (Response, error) {
 // Validate reports ErrInvalid for a request the app should not have sent.
 func (r Request) Validate() error {
 	switch {
-	case r.AmountCents <= 0:
-		return fmt.Errorf("%w: donation_amount_in_cents must be positive", ErrInvalid)
-	case strings.TrimSpace(r.Email) == "" || !strings.Contains(r.Email, "@"):
+	case r.AmountCents < MinAmountCents || r.AmountCents > MaxAmountCents:
+		return fmt.Errorf("%w: donation_amount_in_cents must be between %d and %d", ErrInvalid, MinAmountCents, MaxAmountCents)
+	case strings.TrimSpace(r.Email) == "":
 		return fmt.Errorf("%w: email is required", ErrInvalid)
+	case !validEmail(r.Email):
+		return fmt.Errorf("%w: email is not a valid address", ErrInvalid)
+	case len(r.Name) > maxNameLen:
+		return fmt.Errorf("%w: name is too long (maximum is %d characters)", ErrInvalid, maxNameLen)
 	}
 	return nil
+}
+
+// validEmail accepts exactly one bare addr-spec ("jane@example.com"): no
+// display name, no list, at most maxEmailLen bytes.
+func validEmail(s string) bool {
+	if len(s) > maxEmailLen {
+		return false
+	}
+	addr, err := mail.ParseAddress(s)
+	return err == nil && addr.Name == "" && addr.Address == s
 }

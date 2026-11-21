@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/OneBusAway/sidecar/internal/ghostbus"
@@ -123,11 +124,22 @@ func (h *adminGhostBusHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	list, err := h.deps.GhostBus.ListForExport(r.Context(), region.ID, since)
+	limit, err := pageLimit(r, h.deps.adminListCap())
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	after, err := idCursor(r)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := h.deps.GhostBus.ListForExportPage(r.Context(), region.ID, since, after, limit+1)
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "list ghost bus reports", err)
 		return
 	}
+	list = trimPage(w, list, limit, func(rep ghostbus.Report) string { return strconv.FormatInt(rep.ID, 10) })
 	out := make([]ghostBusReportJSON, 0, len(list))
 	for _, rep := range list {
 		out = append(out, toGhostBusReportJSON(rep))
@@ -150,7 +162,16 @@ func (h *adminGhostBusHandler) csv(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
 		return
 	}
-	list, err := h.deps.GhostBus.ListForExport(r.Context(), region.ID, since)
+	// trip_report_count spans the whole export, so it is counted in the
+	// store up front; the rows then stream in pages (SC-21). Both reads that
+	// precede the headers can still fail cleanly with a 500.
+	counts, err := h.deps.GhostBus.TripReportCounts(r.Context(), region.ID, since)
+	if err != nil {
+		serverErrorJSON(w, h.deps.Logger, "count ghost bus reports", err)
+		return
+	}
+	pageSize := h.deps.adminListCap()
+	first, err := h.deps.GhostBus.ListForExportPage(r.Context(), region.ID, since, 0, pageSize)
 	if err != nil {
 		serverErrorJSON(w, h.deps.Logger, "list ghost bus reports", err)
 		return
@@ -160,7 +181,23 @@ func (h *adminGhostBusHandler) csv(w http.ResponseWriter, r *http.Request) {
 	// (the first Write below commits it if nothing already has); a write
 	// failure past that point can only be logged, never turned into a
 	// different status code.
-	if err := ghostbus.WriteReportsCSV(w, region, list); err != nil {
+	err = ghostbus.StreamReportsCSV(w, region, counts, func(yield func([]ghostbus.Report) error) error {
+		page := first
+		for {
+			if yieldErr := yield(page); yieldErr != nil {
+				return yieldErr
+			}
+			if len(page) < pageSize {
+				return nil
+			}
+			next, pageErr := h.deps.GhostBus.ListForExportPage(r.Context(), region.ID, since, page[len(page)-1].ID, pageSize)
+			if pageErr != nil {
+				return pageErr
+			}
+			page = next
+		}
+	})
+	if err != nil {
 		h.deps.Logger.Warn("httpapi: write ghost bus reports csv", "err", err)
 	}
 }

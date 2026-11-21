@@ -63,14 +63,21 @@ type AudienceCount struct {
 // OperatingSystem and APNSSandbox are deliberately non-sticky (always
 // written): each registration states its own build's platform and APNs
 // environment, and absent apns_sandbox means production (§2.7).
+//
+// KeepStoredAPNSSandbox is the one exception, for writers that are not a
+// registration (the V2 alarm side effect, spec §5.2): when set, an existing
+// row keeps its stored apns_sandbox and APNSSandbox only seeds a new row.
+// Without it an alarm that omits apns_sandbox would demote a sandbox
+// device's registration to production.
 type Upsert struct {
-	RegionID        int64
-	Token           string
-	OperatingSystem string
-	APNSSandbox     bool
-	Locale          *string
-	TestDevice      *bool
-	Description     *string
+	RegionID              int64
+	Token                 string
+	OperatingSystem       string
+	APNSSandbox           bool
+	KeepStoredAPNSSandbox bool
+	Locale                *string
+	TestDevice            *bool
+	Description           *string
 }
 
 // Repository stores push registrations. Implementations must be safe for

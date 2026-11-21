@@ -33,6 +33,107 @@ func RunAlarmRepository(t *testing.T, newStore newAlarmStoreFunc) {
 	t.Run("DeleteByIDTreatsMissingAsSuccess", func(t *testing.T) { testDeleteByIDTreatsMissingAsSuccess(t, newStore) })
 	t.Run("RegionScopedReads", func(t *testing.T) { testAlarmRegionScopedReads(t, newStore) })
 	t.Run("DeferHidesAlarmFromListDueUntilItsInstant", func(t *testing.T) { testDeferHidesAlarmFromListDue(t, newStore) })
+	t.Run("ListDueIsBoundedAndOrdered", func(t *testing.T) { testListDueIsBoundedAndOrdered(t, newStore) })
+	t.Run("CountByUserPushID", func(t *testing.T) { testAlarmCountByUserPushID(t, newStore) })
+	t.Run("ListByRegionPage", func(t *testing.T) { testAlarmListByRegionPage(t, newStore) })
+}
+
+// testAlarmListByRegionPage pins the admin list's bounded read (SC-21).
+func testAlarmListByRegionPage(t *testing.T, newStore newAlarmStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
+	var ids []int64
+	for _, tok := range []string{"p-a", "p-b", "p-c"} {
+		a, err := repo.Create(ctx, fullAlarmIn(tok, 2), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, a.ID)
+	}
+	other := fullAlarmIn("p-other", 2)
+	other.RegionID = 2
+	if _, err := repo.Create(ctx, other, base); err != nil {
+		t.Fatal(err)
+	}
+	page, err := repo.ListByRegionPage(ctx, 1, 0, 2)
+	if err != nil || len(page) != 2 || page[0].ID != ids[0] || page[1].ID != ids[1] {
+		t.Fatalf("first page = %+v, %v", page, err)
+	}
+	page, err = repo.ListByRegionPage(ctx, 1, ids[1], 2)
+	if err != nil || len(page) != 1 || page[0].ID != ids[2] {
+		t.Fatalf("second page = %+v, %v", page, err)
+	}
+}
+
+// testListDueIsBoundedAndOrdered pins the sweep's batch contract (SC-01):
+// at most limit rows, the longest-due first (check_after, then id), so a
+// flood of fresh alarms cannot make one sweep unbounded.
+func testListDueIsBoundedAndOrdered(t *testing.T, newStore newAlarmStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+	var ids []int64
+	for _, tok := range []string{"tok-a", "tok-b", "tok-c", "tok-d"} {
+		a, err := repo.Create(ctx, fullAlarmIn(tok, 2), base)
+		if err != nil {
+			t.Fatalf("Create(%s): %v", tok, err)
+		}
+		ids = append(ids, a.ID)
+	}
+	// tok-a was deferred and has since come due: its check_after is a real
+	// past instant, which sorts after the fresh rows' 0.
+	if err := repo.Defer(ctx, ids[0], base.Add(time.Minute)); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	got, err := repo.ListDue(ctx, base.Add(time.Hour), 2)
+	if err != nil {
+		t.Fatalf("ListDue: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != ids[1] || got[1].ID != ids[2] {
+		gotIDs := make([]int64, len(got))
+		for i, a := range got {
+			gotIDs[i] = a.ID
+		}
+		t.Fatalf("ListDue(limit 2) ids = %v, want [%d %d]", gotIDs, ids[1], ids[2])
+	}
+	all, err := repo.ListDue(ctx, base.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("ListDue: %v", err)
+	}
+	if len(all) != 4 || all[3].ID != ids[0] {
+		t.Fatalf("ListDue(limit 10) = %d rows, last id %v; want 4 rows ending with the deferred one", len(all), all)
+	}
+}
+
+// testAlarmCountByUserPushID backs the per-device live-alarm cap (SC-01):
+// it counts across every region and API version, and only that token.
+func testAlarmCountByUserPushID(t *testing.T, newStore newAlarmStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
+	in := fullAlarmIn("tok-1", 2)
+	if _, err := repo.Create(ctx, in, base); err != nil {
+		t.Fatal(err)
+	}
+	in = fullAlarmIn("tok-2", 1)
+	in.RegionID = 2
+	if _, err := repo.Create(ctx, in, base); err != nil {
+		t.Fatal(err)
+	}
+	in = fullAlarmIn("tok-3", 2)
+	in.UserPushID = "someone-else"
+	if _, err := repo.Create(ctx, in, base); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := repo.CountByUserPushID(ctx, "push-1"); err != nil || n != 2 {
+		t.Fatalf("CountByUserPushID(push-1) = %d, %v; want 2", n, err)
+	}
+	if n, err := repo.CountByUserPushID(ctx, "nobody"); err != nil || n != 0 {
+		t.Fatalf("CountByUserPushID(nobody) = %d, %v; want 0", n, err)
+	}
 }
 
 // seedAlarmRegions upserts the two regions testAlarmRegionScopedReads uses.
@@ -530,7 +631,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 		t.Errorf("Create() CheckAfter = %v, want the zero instant (due at once)", created.CheckAfter)
 	}
 
-	due, err := repo.ListDue(ctx, base)
+	due, err := repo.ListDue(ctx, base, 100)
 	if err != nil {
 		t.Fatalf("ListDue(base): %v", err)
 	}
@@ -542,7 +643,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 	}
 
 	for _, now := range []time.Time{base, until.Add(-time.Second)} {
-		got, listErr := repo.ListDue(ctx, now)
+		got, listErr := repo.ListDue(ctx, now, 100)
 		if listErr != nil {
 			t.Fatalf("ListDue(%v): %v", now, listErr)
 		}
@@ -551,7 +652,7 @@ func testDeferHidesAlarmFromListDue(t *testing.T, newStore newAlarmStoreFunc) {
 		}
 	}
 	for _, now := range []time.Time{until, until.Add(time.Hour)} {
-		got, listErr := repo.ListDue(ctx, now)
+		got, listErr := repo.ListDue(ctx, now, 100)
 		if listErr != nil {
 			t.Fatalf("ListDue(%v): %v", now, listErr)
 		}

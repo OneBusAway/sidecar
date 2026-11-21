@@ -102,10 +102,14 @@ func (r *Runner) validate(l Loop) error {
 // retried) every poll, and while it is held the loop ticks every
 // l.Interval, starting with an immediate tick on acquiring the lease so a
 // fresh deploy catches up at boot rather than an interval later. Renewal
-// continues underneath a running cycle, so a long cycle keeps its lease;
-// the residual overlap -- a holder whose store went unreachable for a TTL
-// while its cycle kept running -- is the at-least-once duplicate every
-// loop tolerates (spec section 12).
+// continues underneath a running cycle, so a long cycle keeps its lease.
+// Each cycle runs on its own context, which renewal cancels the moment the
+// lease is lost -- another holder answered, or a full TTL has passed since
+// the last successful renewal -- so a cycle stops at its next ctx check
+// instead of finishing alongside the new holder's. There is no fencing
+// token: work already past its last ctx check still completes, and that
+// residual overlap is the at-least-once duplicate every loop tolerates
+// (spec section 12).
 func (r *Runner) Run(ctx context.Context, l Loop) {
 	interval := l.Interval
 	if interval <= 0 {
@@ -160,6 +164,9 @@ type loopState struct {
 	// runs two cycles at once.
 	running     chan struct{}
 	tickStarted time.Time
+	// cancelTick cancels the in-flight cycle's context; nil when no cycle
+	// is running.
+	cancelTick context.CancelFunc
 }
 
 // renew acquires or renews the lease. On acquiring it, the loop ticks at
@@ -185,6 +192,12 @@ func (st *loopState) renew(ctx context.Context) {
 	if st.holding {
 		st.lastRenewed = now
 	}
+	// A failed Acquire on its own proves nothing -- the row is still ours
+	// until its TTL runs out -- so only a definite loss, or an outage that
+	// has outlasted the TTL, stops the cycle in flight.
+	if !st.holding && (err == nil || now.Sub(st.lastRenewed) >= st.ttl) {
+		st.stopTick()
+	}
 	if st.holding && !was {
 		st.r.Logger.Info("lease: acquired", "loop", st.l.Name, "holder", st.r.Holder)
 		st.startTick(ctx)
@@ -198,14 +211,34 @@ func (st *loopState) startTick(ctx context.Context) {
 	}
 	st.running = make(chan struct{})
 	st.tickStarted = st.r.Now()
+	tickCtx, cancel := context.WithCancel(ctx)
+	st.cancelTick = cancel
+	running := st.running
 	go func() {
-		defer close(st.running)
-		st.l.Tick(ctx)
+		defer close(running)
+		defer cancel()
+		st.l.Tick(tickCtx)
 	}()
+}
+
+// stopTick cancels the in-flight cycle's context, if there is one. The
+// cycle's goroutine still closes running when it returns, so tickDone and
+// the no-overlap rule are unchanged.
+func (st *loopState) stopTick() {
+	if st.cancelTick == nil {
+		return
+	}
+	st.r.Logger.Warn("lease: lease lost; cancelling the in-flight cycle", "loop", st.l.Name)
+	st.cancelTick()
+	st.cancelTick = nil
 }
 
 func (st *loopState) tickDone() {
 	st.running = nil
+	if st.cancelTick != nil {
+		st.cancelTick()
+		st.cancelTick = nil
+	}
 	if took := st.r.Now().Sub(st.tickStarted); took > st.interval {
 		st.r.Logger.Warn("lease: cycle outlived its interval; ticks were skipped", "loop", st.l.Name, "took", took, "interval", st.interval)
 	}

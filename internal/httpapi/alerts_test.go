@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net/http"
@@ -462,5 +463,57 @@ func TestAlertsFeedNotRoutedWithoutAlerts(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/regions/1/alerts", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestFeed_PbAliasMatchesBare pins the path the shipped iOS and Android apps
+// actually request (".pb", inherited from the legacy Rails route): it must
+// answer byte-for-byte what the bare path does, headers included, with and
+// without ?test=1 (which changes the body, so the comparison is per query).
+func TestFeed_PbAliasMatchesBare(t *testing.T) {
+	t.Parallel()
+	h, alertRepo, regionRepo := newTestServer(t)
+	putRegion(t, regionRepo, 1)
+	publishAlert(t, alertRepo, 1, "Route 44 detoured", false)
+	publishAlert(t, alertRepo, 1, "Test only", true)
+
+	for _, query := range []string{"", "?test=1"} {
+		bare := doGet(t, h, "/api/v1/regions/1/alerts"+query)
+		pb := doGet(t, h, "/api/v1/regions/1/alerts.pb"+query)
+		if bare.Code != http.StatusOK || pb.Code != http.StatusOK {
+			t.Fatalf("query %q: status bare=%d pb=%d, want 200", query, bare.Code, pb.Code)
+		}
+		if !bytes.Equal(bare.Body.Bytes(), pb.Body.Bytes()) {
+			t.Errorf("query %q: alerts.pb body differs from /alerts", query)
+		}
+		for _, hdr := range []string{"Content-Type", "Cache-Control"} {
+			if got, want := pb.Header().Get(hdr), bare.Header().Get(hdr); got != want {
+				t.Errorf("query %q: %s = %q, want %q", query, hdr, got, want)
+			}
+		}
+	}
+
+	var plain, withTest gtfs.FeedMessage
+	if err := proto.Unmarshal(doGet(t, h, "/api/v1/regions/1/alerts.pb").Body.Bytes(), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := proto.Unmarshal(doGet(t, h, "/api/v1/regions/1/alerts.pb?test=1").Body.Bytes(), &withTest); err != nil {
+		t.Fatal(err)
+	}
+	if len(withTest.GetEntity()) != len(plain.GetEntity())+1 {
+		t.Errorf("?test=1 entities = %d, want %d (plain + the test alert)", len(withTest.GetEntity()), len(plain.GetEntity())+1)
+	}
+
+	assertNotFound(t, doGet(t, h, "/api/v1/regions/999/alerts.pb"))
+}
+
+// Rails' alerts action only answers pb and pbtext; ".json" has no sidecar
+// representation, so it must stay a 404 rather than a fabricated feed.
+func TestFeed_JSONSuffixIsNotServed(t *testing.T) {
+	t.Parallel()
+	h, _, regionRepo := newTestServer(t)
+	putRegion(t, regionRepo, 1)
+	if rec := doGet(t, h, "/api/v1/regions/1/alerts.json"); rec.Code != http.StatusNotFound {
+		t.Errorf("alerts.json status = %d, want 404", rec.Code)
 	}
 }
