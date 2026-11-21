@@ -57,6 +57,15 @@ type Scheduler struct {
 	Sender push.Sender
 	Now    func() time.Time
 	Logger *slog.Logger
+
+	// fired holds the ids of alarms this process has pushed but not yet
+	// managed to delete. Firing is send-then-delete (spec section 12), so a
+	// failed delete would otherwise leave the row due and push it again
+	// every cycle; an id in here skips straight to retrying the delete.
+	// In-process only: a restart or a lease handover forgets it, which is
+	// the at-least-once duplicate the spec already accepts.
+	firedMu sync.Mutex
+	fired   map[int64]struct{}
 }
 
 // CheckAll runs one §5.3 cycle over every alarm that is due (a Wait can
@@ -64,10 +73,17 @@ type Scheduler struct {
 // loop wiring) drive cycles without a ticker.
 func (s *Scheduler) CheckAll(ctx context.Context) {
 	started := s.Now()
-	pending, err := s.Repo.ListDue(ctx, started)
+	pending, err := s.Repo.ListDue(ctx, started, SweepBatch)
 	if err != nil {
 		s.Logger.Error("alarms: list pending", "err", err)
 		return
+	}
+	if len(pending) == SweepBatch {
+		// More may be due than one cycle loads; they follow next cycle.
+		s.Logger.Warn("alarms: sweep batch full", "batch", SweepBatch)
+	} else {
+		// Only a complete listing proves a fired id's row is gone.
+		s.forgetFiredNotIn(pending)
 	}
 
 	// One region fetch per region per cycle, not per alarm. The failure is
@@ -127,6 +143,22 @@ type regionLookup struct {
 }
 
 func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup) {
+	if s.wasFired(alarm.ID) {
+		// Already pushed; only the delete failed. Never push it twice.
+		s.deleteFired(ctx, alarm)
+		return
+	}
+	if alarm.Expired(s.Now()) {
+		// Past MaxAge or outside the service-date window: nothing a lookup
+		// says can make it worth keeping, and a failing upstream (which the
+		// streak deliberately ignores) must not keep it alive.
+		if err := s.Repo.DeleteByID(ctx, alarm.ID); err != nil {
+			s.Logger.Warn("alarms: delete over-age alarm", "region_id", alarm.RegionID, "err", err)
+			return
+		}
+		s.Logger.Info("alarms: deleted over-age alarm", "region_id", alarm.RegionID, "alarm_id", alarm.ID)
+		return
+	}
 	if lookup.region == nil {
 		if !errors.Is(lookup.err, regions.ErrNotFound) {
 			// A transient store failure is a fact about the database, not
@@ -157,9 +189,10 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 		VehicleID: alarm.VehicleID, StopSequence: alarm.StopSequence,
 	})
 	switch {
-	case errors.Is(err, obaapi.ErrNotFound), errors.Is(err, obaapi.ErrNotConfigured):
-		// Trip aged out (or the region has no key and never will resolve):
-		// both count toward the §5.3 reaping streak.
+	case errors.Is(err, obaapi.ErrNotFound), errors.Is(err, obaapi.ErrNotConfigured), errors.Is(err, obaapi.ErrRejected):
+		// Trip aged out, the upstream rejected the request outright, or the
+		// region has no key and never will resolve: all count toward the
+		// §5.3 reaping streak.
 		s.countFailure(ctx, alarm)
 		return
 	case err != nil:
@@ -213,9 +246,59 @@ func (s *Scheduler) check(ctx context.Context, alarm Alarm, lookup regionLookup)
 			return
 		}
 		// Delete only after the send returned: a crash in the gap re-fires,
-		// which is the accepted duplicate (spec §12).
-		if err := s.Repo.DeleteByID(ctx, alarm.ID); err != nil {
-			s.Logger.Error("alarms: delete fired alarm", "err", err)
+		// which is the accepted duplicate (spec §12). A delete that merely
+		// fails is retried next cycle without another send.
+		s.markFired(alarm.ID)
+		s.deleteFired(ctx, alarm)
+	}
+}
+
+// deleteFired deletes an alarm that has already been pushed, forgetting it
+// once the row is gone and keeping it marked for another delete attempt
+// next cycle otherwise.
+func (s *Scheduler) deleteFired(ctx context.Context, alarm Alarm) {
+	if err := s.Repo.DeleteByID(ctx, alarm.ID); err != nil {
+		s.Logger.Error("alarms: delete fired alarm", "region_id", alarm.RegionID, "alarm_id", alarm.ID, "err", err)
+		return
+	}
+	s.firedMu.Lock()
+	delete(s.fired, alarm.ID)
+	s.firedMu.Unlock()
+}
+
+func (s *Scheduler) markFired(id int64) {
+	s.firedMu.Lock()
+	defer s.firedMu.Unlock()
+	if s.fired == nil {
+		s.fired = make(map[int64]struct{})
+	}
+	s.fired[id] = struct{}{}
+}
+
+func (s *Scheduler) wasFired(id int64) bool {
+	s.firedMu.Lock()
+	defer s.firedMu.Unlock()
+	_, ok := s.fired[id]
+	return ok
+}
+
+// forgetFiredNotIn drops fired ids that are no longer due -- deleted by the
+// rider or another path -- so the set stays bounded by the rows that
+// actually failed to delete. A fired alarm is never deferred, so while its
+// row exists it is in every sweep.
+func (s *Scheduler) forgetFiredNotIn(pending []Alarm) {
+	s.firedMu.Lock()
+	defer s.firedMu.Unlock()
+	if len(s.fired) == 0 {
+		return
+	}
+	due := make(map[int64]struct{}, len(pending))
+	for _, a := range pending {
+		due[a.ID] = struct{}{}
+	}
+	for id := range s.fired {
+		if _, ok := due[id]; !ok {
+			delete(s.fired, id)
 		}
 	}
 }

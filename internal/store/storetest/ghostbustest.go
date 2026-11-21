@@ -29,6 +29,7 @@ func RunGhostBusRepository(t *testing.T, newStore func(*testing.T) (ghostbus.Rep
 	t.Run("FailureCapMarksUnavailable", func(t *testing.T) { testGhostBusFailureCap(t, newStore) })
 	t.Run("CaptureRoundTrip", func(t *testing.T) { testGhostBusCaptureRoundTrip(t, newStore) })
 	t.Run("ExportSinceFilter", func(t *testing.T) { testGhostBusExportSince(t, newStore) })
+	t.Run("ExportPageAndTripCounts", func(t *testing.T) { testGhostBusExportPage(t, newStore) })
 	t.Run("GetByPublicIDIsRegionScoped", func(t *testing.T) { testGhostBusGetByPublicID(t, newStore) })
 }
 
@@ -269,6 +270,50 @@ func testGhostBusCaptureRoundTrip(t *testing.T, newStore newGhostBusStoreFunc) {
 	}
 	if r.SnapshotCapturedAt == nil || !r.SnapshotCapturedAt.Equal(capturedAt) {
 		t.Errorf("SnapshotCapturedAt = %v, want %v", r.SnapshotCapturedAt, capturedAt)
+	}
+}
+
+// testGhostBusExportPage pins the bounded export reads (SC-21): pages in id
+// order after a cursor, honoring since, and per-trip counts over the whole
+// filtered set.
+func testGhostBusExportPage(t *testing.T, newStore newGhostBusStoreFunc) {
+	repo, regionsRepo := newStore(t)
+	ctx := context.Background()
+	regionID := createGhostBusRegion(t, regionsRepo)
+	old := ghostBusFixture(regionID, "tok_page_000000000000", "user-o", "trip-x", 1000)
+	if _, err := repo.Create(ctx, old, base.Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for i, trip := range []string{"trip-x", "trip-x", "trip-y"} {
+		in := ghostBusFixture(regionID, fmt.Sprintf("tok_page_00000000000%d", i+1), fmt.Sprintf("user-%d", i), trip, 1000)
+		rep, err := repo.Create(ctx, in, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, rep.ID)
+	}
+	since := base.Add(-time.Hour).Unix()
+	page, err := repo.ListForExportPage(ctx, regionID, since, 0, 2)
+	if err != nil || len(page) != 2 || page[0].ID != ids[0] || page[1].ID != ids[1] {
+		t.Fatalf("first page = %+v, %v; want ids %v", page, err, ids[:2])
+	}
+	page, err = repo.ListForExportPage(ctx, regionID, since, ids[1], 2)
+	if err != nil || len(page) != 1 || page[0].ID != ids[2] {
+		t.Fatalf("second page = %+v, %v; want id %d", page, err, ids[2])
+	}
+	counts, err := repo.TripReportCounts(ctx, regionID, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[ghostbus.TripKey]int{{TripIdentifier: "trip-x", ServiceDate: 1000}: 2, {TripIdentifier: "trip-y", ServiceDate: 1000}: 1}
+	if len(counts) != len(want) {
+		t.Fatalf("TripReportCounts = %v, want %v", counts, want)
+	}
+	for k, n := range want {
+		if counts[k] != n {
+			t.Fatalf("TripReportCounts = %v, want %v", counts, want)
+		}
 	}
 }
 

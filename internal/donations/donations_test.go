@@ -111,10 +111,49 @@ func TestValidationAndGatewayErrors(t *testing.T) {
 	for _, step := range []string{"customer", "ephemeral", "subscription"} {
 		live := &fake{name: "live", fail: step}
 		_, err := newService(live, nil).Create(context.Background(), donations.Request{
-			AmountCents: 5, Email: "x@example.com", Recurring: true,
+			AmountCents: 500, Email: "x@example.com", Recurring: true,
 		})
 		if err == nil || errors.Is(err, donations.ErrInvalid) {
 			t.Errorf("failing %s: err %v", step, err)
+		}
+	}
+}
+
+// TestValidateBoundsAmountAndContact pins SC-04: an unauthenticated route
+// that creates Stripe objects per request is a card-testing tool unless
+// the amount is bounded (cents-sized "test" charges, absurd amounts) and
+// the contact fields look like a person's.
+func TestValidateBoundsAmountAndContact(t *testing.T) {
+	ok := donations.Request{AmountCents: 500, Email: "jane@example.com", Name: "Jane Rider"}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a normal donation is invalid: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		mut  func(*donations.Request)
+	}{
+		{"one cent", func(r *donations.Request) { r.AmountCents = 1 }},
+		{"just under the minimum", func(r *donations.Request) { r.AmountCents = donations.MinAmountCents - 1 }},
+		{"a million dollars", func(r *donations.Request) { r.AmountCents = 100_000_000 }},
+		{"just over the maximum", func(r *donations.Request) { r.AmountCents = donations.MaxAmountCents + 1 }},
+		{"bare at sign", func(r *donations.Request) { r.Email = "@" }},
+		{"no domain", func(r *donations.Request) { r.Email = "jane@" }},
+		{"display-name form", func(r *donations.Request) { r.Email = "Jane <jane@example.com>" }},
+		{"two addresses", func(r *donations.Request) { r.Email = "a@example.com, b@example.com" }},
+		{"over-long email", func(r *donations.Request) { r.Email = string(make([]byte, 250)) + "@x.co" }},
+		{"over-long name", func(r *donations.Request) { r.Name = string(make([]byte, 256)) }},
+	} {
+		r := ok
+		tc.mut(&r)
+		if err := r.Validate(); !errors.Is(err, donations.ErrInvalid) {
+			t.Errorf("%s: Validate = %v, want ErrInvalid", tc.name, err)
+		}
+	}
+	for _, amount := range []int64{donations.MinAmountCents, donations.MaxAmountCents} {
+		r := ok
+		r.AmountCents = amount
+		if err := r.Validate(); err != nil {
+			t.Errorf("amount %d at the boundary rejected: %v", amount, err)
 		}
 	}
 }

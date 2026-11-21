@@ -13,6 +13,12 @@ import (
 // (design spec §4).
 const liveActivityRegistrationsPerMinute = 30
 
+// maxLiveActivityFieldLen caps every rider-supplied text field of a
+// registration (SC-03, SC-10). activity_id is ActivityKit's opaque id (a
+// UUID string in practice, but documented only as a String), the rest are
+// GTFS ids and display strings tens of bytes long.
+const maxLiveActivityFieldLen = 255
+
 type liveActivitiesHandler struct{ deps Deps }
 
 // register is the §6.1 upsert on (region, activity_id). Every field is
@@ -56,12 +62,37 @@ func (h *liveActivitiesHandler) register(w http.ResponseWriter, r *http.Request)
 	if tripHeadsign == "" {
 		msgs = append(msgs, "Trip headsign can't be blank")
 	}
+	trip := parseTripIdentity(p)
+	for _, f := range []struct{ label, value string }{
+		{"Activity", activityID}, {"Stop", stopID}, {"Route short name", routeShortName},
+		{"Trip headsign", tripHeadsign}, {"Trip", trip.TripID}, {"Vehicle", trip.VehicleID},
+	} {
+		if len(f.value) > maxLiveActivityFieldLen {
+			msgs = append(msgs, fmt.Sprintf("%s is too long (maximum is %d characters)", f.label, maxLiveActivityFieldLen))
+		}
+	}
 	if len(msgs) > 0 {
 		errorWithMessages(w, h.deps.Logger, "Unable to register live activity", msgs)
 		return
 	}
 
-	trip := parseTripIdentity(p)
+	usage, err := h.deps.LiveActivities.Usage(r.Context(), region.ID, activityID, pushToken, stopID)
+	if err != nil {
+		writeServerError(w, h.deps.Logger, region.ID, "live activity usage", sanitizeToken(err, pushToken))
+		return
+	}
+	switch h.deps.LiveActivityCaps.Check(usage, stopID) {
+	case liveactivities.CapPushToken:
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	case liveactivities.CapCapacity:
+		h.deps.Logger.Warn("httpapi: live activity registration refused at capacity",
+			"region_id", region.ID, "rows", usage.Total, "region_rows", usage.InRegion, "region_stops", usage.StopsInRegion)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	case liveactivities.CapOK:
+	}
+
 	token, err := securetoken.New()
 	if err != nil {
 		writeServerError(w, h.deps.Logger, region.ID, "mint live activity token", err)

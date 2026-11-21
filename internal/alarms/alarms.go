@@ -27,6 +27,49 @@ var (
 // (spec §5.2).
 const DefaultSecondsBefore = 600
 
+// MaxSecondsBefore is the largest lead time an alarm keeps; larger values
+// are clamped to it (SC-01). Neither app comes near it -- Android offers at
+// most 30 minutes, the iOS quick path 15, and the iOS picker at most the
+// minutes until the departure being viewed -- but an unbounded value let a
+// caller turn any real trip into an immediate push to an arbitrary token.
+const MaxSecondsBefore = 24 * 60 * 60
+
+// MaxAge bounds how long an alarm row may live, whatever its lookups say:
+// the scheduler deletes an alarm created longer ago than this (SC-01). A
+// departure alarm is set from a departure list showing the next few hours,
+// so nothing legitimate is still waiting two days later; without the bound
+// an alarm whose lookups kept failing transiently was immortal.
+const MaxAge = 48 * time.Hour
+
+// ServiceDateWindow is how far a non-zero service date may sit from now,
+// in either direction, at creation and on every sweep (SC-01). Service
+// dates are the service day's midnight, so today's after-midnight trips
+// run up to ~30h past theirs; two days covers that and tomorrow.
+const ServiceDateWindow = 48 * time.Hour
+
+// SweepBatch caps how many due alarms one scheduler cycle loads (SC-01).
+// It sits far above any real backlog -- the per-device cap and the create
+// throttle bound the table -- and keeps one cycle's work finite when they
+// do not.
+const SweepBatch = 5000
+
+// ServiceDateInWindow reports whether serviceDateMs (epoch ms; 0 means the
+// client omitted it) is acceptable at now: omitted, or within
+// ServiceDateWindow of now in either direction.
+func ServiceDateInWindow(serviceDateMs int64, now time.Time) bool {
+	if serviceDateMs == 0 {
+		return true
+	}
+	sd := time.UnixMilli(serviceDateMs)
+	return !sd.Before(now.Add(-ServiceDateWindow)) && !sd.After(now.Add(ServiceDateWindow))
+}
+
+// Expired reports whether the alarm has outlived MaxAge or its service date
+// has left the window, either of which means it can be deleted unchecked.
+func (a Alarm) Expired(now time.Time) bool {
+	return a.CreatedAt.Before(now.Add(-MaxAge)) || !ServiceDateInWindow(a.ServiceDate, now)
+}
+
 // Alarm is one server-owned scheduled push, as stored: the fields a client
 // submitted at creation plus the scheduler bookkeeping (FailureCount,
 // CheckAfter, CreatedAt) that decides when and whether it still fires.
@@ -94,9 +137,13 @@ type Repository interface {
 	DeleteByID(ctx context.Context, id int64) error
 	// List returns every alarm across all regions, due or not.
 	List(ctx context.Context) ([]Alarm, error)
-	// ListDue is the scheduler sweep: every alarm whose CheckAfter is at
-	// or before now, across all regions.
-	ListDue(ctx context.Context, now time.Time) ([]Alarm, error)
+	// ListDue is the scheduler sweep: up to limit alarms whose CheckAfter
+	// is at or before now, across all regions, ordered by CheckAfter then
+	// ID so the longest-due go first.
+	ListDue(ctx context.Context, now time.Time, limit int) ([]Alarm, error)
+	// CountByUserPushID counts the live alarms registered to one device
+	// token, across every region and API version (the per-device cap).
+	CountByUserPushID(ctx context.Context, userPushID string) (int64, error)
 	// Defer hides an alarm from ListDue until the given instant. A missing
 	// row is not an error: the sweep can race the rider's own cancel.
 	Defer(ctx context.Context, id int64, until time.Time) error
@@ -105,6 +152,9 @@ type Repository interface {
 	// ListByRegion returns one region's alarms, oldest first, for the admin
 	// API. The scheduler sweeps ListDue instead.
 	ListByRegion(ctx context.Context, regionID int64) ([]Alarm, error)
+	// ListByRegionPage is one bounded page of ListByRegion (SC-21): at
+	// most limit alarms with ID > afterID, in ID order.
+	ListByRegionPage(ctx context.Context, regionID, afterID int64, limit int) ([]Alarm, error)
 	// GetInRegion takes the region as a query condition rather than
 	// comparing it afterwards, so an alarm addressed through the wrong
 	// region is ErrNotFound in SQL and cannot become a Go check somebody
@@ -112,13 +162,13 @@ type Repository interface {
 	GetInRegion(ctx context.Context, regionID, id int64) (Alarm, error)
 }
 
-// NormalizeSecondsBefore applies the §5.2 rule: absent, non-numeric, or
-// <= 0 becomes the 600-second default.
+// NormalizeSecondsBefore applies the §5.2 rule -- absent, non-numeric, or
+// <= 0 becomes the 600-second default -- and clamps to MaxSecondsBefore.
 func NormalizeSecondsBefore(v int64, ok bool) int64 {
 	if !ok || v <= 0 {
 		return DefaultSecondsBefore
 	}
-	return v
+	return min(v, MaxSecondsBefore)
 }
 
 // minutesPhrase renders the lead time the way the apps' copy expects,

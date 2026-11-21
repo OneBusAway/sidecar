@@ -21,6 +21,18 @@ const surveyWritesPerMinute = 60
 // spec §2.5, §2.7), matching the push registration description cap.
 const maxIdentifierLen = 255
 
+// Per-rider caps on survey response creates (SC-09), per survey and
+// user_identifier. The apps create one response (the hero question) and
+// amend it with the rest, and amends are never counted; the headroom on a
+// single-response survey covers a create retried after its 201 was lost.
+const (
+	// MaxResponsesPerRider caps creates on a single-response survey.
+	MaxResponsesPerRider = 3
+	// MaxResponsesPerRiderMultiple caps creates on a survey that allows
+	// multiple responses.
+	MaxResponsesPerRiderMultiple = 50
+)
+
 type surveysHandler struct{ deps Deps }
 
 // writeErrors writes the spec §2.5 {"errors": [...]} shape the survey
@@ -188,11 +200,30 @@ func (h *surveysHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeServerError(w, h.deps.Logger, 0, fmt.Sprintf("get survey %d for response", surveyID), err)
 		return
 	}
+	if !survey.ActiveAt(h.deps.Now()) {
+		// A survey the rider-facing list would not show (SC-09) is the same
+		// 404 as an unknown id: ids are sequential, so anything else would
+		// let a caller file responses against drafts and closed surveys.
+		writeJSONError(w, h.deps.Logger, http.StatusNotFound, surveyNotFoundBody)
+		return
+	}
 
 	in, msgs := validateResponseParams(p)
 	if len(msgs) > 0 {
 		h.deps.Logger.Info("httpapi: rejected survey response", "survey_id", survey.ID, "messages", len(msgs))
 		writeErrors(w, h.deps.Logger, msgs)
+		return
+	}
+	limit := int64(MaxResponsesPerRider)
+	if survey.AllowsMultipleResponses {
+		limit = MaxResponsesPerRiderMultiple
+	}
+	if n, countErr := h.deps.Surveys.CountResponsesByUser(r.Context(), survey.ID, in.UserIdentifier); countErr != nil {
+		writeServerError(w, h.deps.Logger, 0, "count rider responses", fmt.Errorf("survey %d: %w", survey.ID, countErr))
+		return
+	} else if n >= limit {
+		h.deps.Logger.Info("httpapi: rejected survey response", "survey_id", survey.ID, "reason", "per-rider cap")
+		writeErrors(w, h.deps.Logger, []string{"User identifier has already responded to this survey"})
 		return
 	}
 

@@ -165,12 +165,20 @@ func (r *alarmRepo) List(ctx context.Context) ([]alarms.Alarm, error) {
 	return alarmsFromRows(rows), nil
 }
 
-func (r *alarmRepo) ListDue(ctx context.Context, now time.Time) ([]alarms.Alarm, error) {
-	rows, err := r.q.ListDueAlarms(ctx, now.Unix())
+func (r *alarmRepo) ListDue(ctx context.Context, now time.Time, limit int) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListDueAlarms(ctx, gen.ListDueAlarmsParams{Now: now.Unix(), MaxRows: int64(limit)})
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list due alarms: %w", err)
 	}
 	return alarmsFromRows(rows), nil
+}
+
+func (r *alarmRepo) CountByUserPushID(ctx context.Context, userPushID string) (int64, error) {
+	n, err := r.q.CountAlarmsByUserPushID(ctx, userPushID)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count alarms by device: %w", err)
+	}
+	return n, nil
 }
 
 // Defer treats a missing row as success, like DeleteByID: the sweep may
@@ -204,6 +212,17 @@ func (r *alarmRepo) ResetFailures(ctx context.Context, id int64) error {
 		return fmt.Errorf("sqlite: reset failures for alarm %d: %w", id, err)
 	}
 	return nil
+}
+
+// ListByRegionPage returns one bounded page of a region's alarms after afterID.
+func (r *alarmRepo) ListByRegionPage(ctx context.Context, regionID, afterID int64, limit int) ([]alarms.Alarm, error) {
+	rows, err := r.q.ListAlarmsByRegionPage(ctx, gen.ListAlarmsByRegionPageParams{
+		RegionID: regionID, AfterID: afterID, MaxRows: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list alarms page (region %d): %w", regionID, err)
+	}
+	return alarmsFromRows(rows), nil
 }
 
 // ListByRegion returns one region's alarms, oldest first, for the admin API.

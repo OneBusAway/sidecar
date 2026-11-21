@@ -25,9 +25,12 @@ type ArrivalsSource interface {
 // checkConcurrency bounds parallel checks per cycle, matching alarms.
 const checkConcurrency = 8
 
-// stopCacheEntries bounds the per-stop cache; beyond this many distinct
-// stops per 55s the oldest are evicted and refetched.
-const stopCacheEntries = 1024
+// stopCacheEntries bounds the per-cycle stop cache. It must hold every
+// distinct stop the registration caps admit (DefaultCaps.Total rows name
+// at most that many stops), or a stop listed again late in a sweep is
+// evicted and refetched: one upstream call per stop per cycle is the
+// invariant (SC-03). Entries are dropped wholesale every cycle.
+const stopCacheEntries = defaultTotalCap
 
 // Updater runs the §6.3 update cycle: once per cycle it lists every
 // subscription, builds its content state from a per-stop shared fetch, and
