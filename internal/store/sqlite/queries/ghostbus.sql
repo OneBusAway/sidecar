@@ -54,3 +54,20 @@ ORDER BY id;
 -- name: GetGhostBusReportByPublicID :one
 SELECT * FROM ghost_bus_reports
 WHERE region_id = @region_id AND public_identifier = @public_identifier;
+
+-- ListGhostBusReportsForExportPage is the admin list's bounded page
+-- (SC-21): ListGhostBusReportsForExport restricted to ids after after_id.
+
+-- name: ListGhostBusReportsForExportPage :many
+SELECT * FROM ghost_bus_reports
+WHERE region_id = @region_id AND created_at >= @since AND id > @after_id
+ORDER BY id
+LIMIT @max_rows;
+
+-- CountGhostBusReportsByTrip is the CSV export's reports-per-trip-instance
+-- column, computed in SQL so the export can stream its rows in pages.
+
+-- name: CountGhostBusReportsByTrip :many
+SELECT trip_identifier, service_date, COUNT(*) AS reports FROM ghost_bus_reports
+WHERE region_id = @region_id AND created_at >= @since
+GROUP BY trip_identifier, service_date;

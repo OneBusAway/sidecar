@@ -223,6 +223,46 @@ func TestURLIsEnglishOnlyAndOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestURLOmittedWhenNotHTTP asserts the feed never publishes a stored url
+// the write side would refuse (alerts.ValidateURL): a row written straight
+// into the database, or before validation existed, keeps its alert in the
+// feed but loses the link. http and https URLs still go out.
+func TestURLOmittedWhenNotHTTP(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		"javascript:alert(1)",
+		"JavaScript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"//evil.example/x",
+		"/relative/path",
+		"ftp://example.org/file",
+		"https://",
+	} {
+		a := base()
+		a.URL = raw
+		entities := alerts.BuildFeed([]alerts.Alert{a}, opts()).GetEntity()
+		if len(entities) != 1 {
+			t.Fatalf("url %q: entity count = %d, want 1 (the alert stays)", raw, len(entities))
+		}
+		if u := entities[0].GetAlert().GetUrl(); u != nil {
+			t.Errorf("url %q: published %v, want omitted", raw, u)
+		}
+		if entities[0].GetAlert().GetHeaderText() == nil {
+			t.Errorf("url %q: header_text missing, want the rest of the alert intact", raw)
+		}
+	}
+
+	for _, raw := range []string{"http://example.org/a", "https://example.org/b?x=1"} {
+		a := base()
+		a.URL = raw
+		tr := alerts.BuildFeed([]alerts.Alert{a}, opts()).GetEntity()[0].GetAlert().GetUrl().GetTranslation()
+		if len(tr) != 1 || tr[0].GetText() != raw {
+			t.Errorf("url %q: translations = %+v, want it published verbatim", raw, tr)
+		}
+	}
+}
+
 func TestBuilderPreservesInputOrderAndDoesNotFilter(t *testing.T) {
 	t.Parallel()
 

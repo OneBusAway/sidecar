@@ -202,6 +202,34 @@ func (r *ghostBusRepo) ListForExport(ctx context.Context, regionID int64, sinceU
 	return out, nil
 }
 
+// ListForExportPage returns one bounded page of ListForExport after afterID.
+func (r *ghostBusRepo) ListForExportPage(ctx context.Context, regionID, sinceUnix, afterID int64, limit int) ([]ghostbus.Report, error) {
+	rows, err := r.q.ListGhostBusReportsForExportPage(ctx, gen.ListGhostBusReportsForExportPageParams{
+		RegionID: regionID, Since: sinceUnix, AfterID: afterID, MaxRows: int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list ghost bus reports page (region %d): %w", regionID, err)
+	}
+	out := make([]ghostbus.Report, len(rows))
+	for i, row := range rows {
+		out[i] = ghostBusFromRow(row)
+	}
+	return out, nil
+}
+
+// TripReportCounts counts the export's reports per trip instance.
+func (r *ghostBusRepo) TripReportCounts(ctx context.Context, regionID, sinceUnix int64) (map[ghostbus.TripKey]int, error) {
+	rows, err := r.q.CountGhostBusReportsByTrip(ctx, gen.CountGhostBusReportsByTripParams{RegionID: regionID, Since: sinceUnix})
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: count ghost bus reports by trip (region %d): %w", regionID, err)
+	}
+	out := make(map[ghostbus.TripKey]int, len(rows))
+	for _, row := range rows {
+		out[ghostbus.TripKey{TripIdentifier: row.TripIdentifier, ServiceDate: row.ServiceDate}] = int(row.Reports)
+	}
+	return out, nil
+}
+
 // GetByPublicID reports ghostbus.ErrNotFound for an unknown public id --
 // including one that exists but in a different region, which is the
 // region-scoping guarantee: the query, not a Go comparison, is what makes a

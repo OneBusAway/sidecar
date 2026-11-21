@@ -19,6 +19,17 @@ const maxDonationBody = 4096
 // app never sends more than one per tap.
 const donationsPerMinute = 10
 
+// donationsPerDay is a server-wide cap on donation requests that pass
+// validation (SC-04): a distributed card-testing run rotates addresses and
+// never trips the per-IP throttle. The apps make at most a handful of
+// donations a day across all riders (current builds open the donation web
+// page instead of calling this route at all).
+const donationsPerDay = 500
+
+// donationsGlobalKey is the one bucket every caller shares in
+// DonationDailyLimiter.
+const donationsGlobalKey = "global"
+
 type donationsHandler struct {
 	deps Deps
 }
@@ -54,6 +65,15 @@ func (h *donationsHandler) create(w http.ResponseWriter, r *http.Request) {
 		Name:        strings.TrimSpace(in.Name),
 		Email:       strings.TrimSpace(in.Email),
 		TestMode:    rawTrue(in.TestMode),
+	}
+	if err := req.Validate(); err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, strings.TrimPrefix(err.Error(), donations.ErrInvalid.Error()+": "))
+		return
+	}
+	if !h.deps.DonationDailyLimiter.Allow(donationsGlobalKey, h.deps.Now()) {
+		h.deps.Logger.Warn("httpapi: donation refused: server-wide daily cap reached", "cap", donationsPerDay)
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
 	}
 	resp, err := h.deps.Donations.Create(r.Context(), req)
 	switch {

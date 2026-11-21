@@ -129,6 +129,27 @@ func (r *liveActivityRepo) DeleteByPushToken(ctx context.Context, pushToken stri
 	return n, nil
 }
 
+func (r *liveActivityRepo) Usage(ctx context.Context, regionID int64, activityID, pushToken, stopID string) (liveactivities.Usage, error) {
+	row, err := r.q.LiveActivityUsage(ctx, gen.LiveActivityUsageParams{
+		RegionID: regionID, PushToken: pushToken, StopID: stopID, ActivityID: activityID,
+	})
+	if err != nil {
+		return liveactivities.Usage{}, fmt.Errorf("sqlite: live activity usage (region %d): %w", regionID, err)
+	}
+	var existingStop string
+	switch v := row.ExistingStopID.(type) {
+	case string:
+		existingStop = v
+	case []byte:
+		existingStop = string(v)
+	}
+	return liveactivities.Usage{
+		Total: row.Total, InRegion: row.InRegion, StopsInRegion: row.StopsInRegion,
+		ForPushToken: row.ForPushToken, OnStop: row.OnStop,
+		Exists: row.Existing > 0, ExistingStopID: existingStop,
+	}, nil
+}
+
 func (r *liveActivityRepo) List(ctx context.Context) ([]liveactivities.LiveActivity, error) {
 	rows, err := r.q.ListLiveActivities(ctx)
 	if err != nil {

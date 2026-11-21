@@ -38,6 +38,15 @@ var ErrNotConfigured = errors.New("obaapi: region has no API key")
 // the 3-strike streak (spec §5.3).
 var ErrNotFound = errors.New("obaapi: arrival-and-departure not found")
 
+// ErrRejected means the OBA server refused an arrival-and-departure request
+// with a 4xx that is a fact about the request itself -- a malformed stop or
+// trip id, say -- so repeating it can never succeed. Unlike a transient
+// failure it counts toward the alarm reaper's streak (spec §5.3). 401 and
+// 403 are deliberately excluded (they are about our API key, and counting
+// them would reap every alarm in a region on a key mistake), as are 408 and
+// 429 (retry signals).
+var ErrRejected = errors.New("obaapi: request rejected by upstream")
+
 // Agency is one transit agency with coverage in a region.
 type Agency struct {
 	ID   string
@@ -375,6 +384,9 @@ func (c *client) ArrivalAndDeparture(ctx context.Context, region regions.Region,
 		if statusOf(err) == http.StatusNotFound {
 			return Departure{}, ErrNotFound
 		}
+		if isDefinitiveRejection(err) {
+			return Departure{}, fmt.Errorf("obaapi: arrival-and-departure in region %d: %w (%w)", region.ID, ErrRejected, redact(err))
+		}
 		return Departure{}, fmt.Errorf("obaapi: arrival-and-departure in region %d: %w", region.ID, redact(err))
 	}
 
@@ -665,6 +677,17 @@ func redact(err error) error {
 		return fmt.Errorf("upstream returned status %d", code)
 	}
 	return errors.New("upstream request failed")
+}
+
+// isDefinitiveRejection reports whether err is a 4xx that says the request
+// itself can never succeed (see ErrRejected for the exclusions).
+func isDefinitiveRejection(err error) bool {
+	switch code := statusOf(err); code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return code >= 400 && code < 500
+	}
 }
 
 // statusOf reports the HTTP status an SDK error carries, or 0.

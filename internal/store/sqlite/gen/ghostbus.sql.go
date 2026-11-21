@@ -10,6 +10,49 @@ import (
 	"database/sql"
 )
 
+const countGhostBusReportsByTrip = `-- name: CountGhostBusReportsByTrip :many
+
+SELECT trip_identifier, service_date, COUNT(*) AS reports FROM ghost_bus_reports
+WHERE region_id = ?1 AND created_at >= ?2
+GROUP BY trip_identifier, service_date
+`
+
+type CountGhostBusReportsByTripParams struct {
+	RegionID int64
+	Since    int64
+}
+
+type CountGhostBusReportsByTripRow struct {
+	TripIdentifier string
+	ServiceDate    int64
+	Reports        int64
+}
+
+// CountGhostBusReportsByTrip is the CSV export's reports-per-trip-instance
+// column, computed in SQL so the export can stream its rows in pages.
+func (q *Queries) CountGhostBusReportsByTrip(ctx context.Context, arg CountGhostBusReportsByTripParams) ([]CountGhostBusReportsByTripRow, error) {
+	rows, err := q.db.QueryContext(ctx, countGhostBusReportsByTrip, arg.RegionID, arg.Since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountGhostBusReportsByTripRow{}
+	for rows.Next() {
+		var i CountGhostBusReportsByTripRow
+		if err := rows.Scan(&i.TripIdentifier, &i.ServiceDate, &i.Reports); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createGhostBusReport = `-- name: CreateGhostBusReport :one
 INSERT INTO ghost_bus_reports (
   region_id, public_identifier, user_identifier, trip_identifier, service_date,
@@ -160,6 +203,77 @@ type ListGhostBusReportsForExportParams struct {
 
 func (q *Queries) ListGhostBusReportsForExport(ctx context.Context, arg ListGhostBusReportsForExportParams) ([]GhostBusReport, error) {
 	rows, err := q.db.QueryContext(ctx, listGhostBusReportsForExport, arg.RegionID, arg.Since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GhostBusReport{}
+	for rows.Next() {
+		var i GhostBusReport
+		if err := rows.Scan(
+			&i.ID,
+			&i.RegionID,
+			&i.PublicIdentifier,
+			&i.UserIdentifier,
+			&i.TripIdentifier,
+			&i.ServiceDate,
+			&i.RouteIdentifier,
+			&i.StopIdentifier,
+			&i.VehicleIdentifier,
+			&i.StopSequence,
+			&i.Predicted,
+			&i.ScheduleDeviationMinutes,
+			&i.WaitDurationMinutes,
+			&i.Comment,
+			&i.UserLatitude,
+			&i.UserLongitude,
+			&i.ScheduledArrivalAt,
+			&i.PredictedArrivalAt,
+			&i.PredictionLastUpdatedAt,
+			&i.SnapshotStatus,
+			&i.SnapshotJson,
+			&i.SnapshotCapturedAt,
+			&i.SnapshotAttempts,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGhostBusReportsForExportPage = `-- name: ListGhostBusReportsForExportPage :many
+
+SELECT id, region_id, public_identifier, user_identifier, trip_identifier, service_date, route_identifier, stop_identifier, vehicle_identifier, stop_sequence, predicted, schedule_deviation_minutes, wait_duration_minutes, comment, user_latitude, user_longitude, scheduled_arrival_at, predicted_arrival_at, prediction_last_updated_at, snapshot_status, snapshot_json, snapshot_captured_at, snapshot_attempts, created_at, updated_at FROM ghost_bus_reports
+WHERE region_id = ?1 AND created_at >= ?2 AND id > ?3
+ORDER BY id
+LIMIT ?4
+`
+
+type ListGhostBusReportsForExportPageParams struct {
+	RegionID int64
+	Since    int64
+	AfterID  int64
+	MaxRows  int64
+}
+
+// ListGhostBusReportsForExportPage is the admin list's bounded page
+// (SC-21): ListGhostBusReportsForExport restricted to ids after after_id.
+func (q *Queries) ListGhostBusReportsForExportPage(ctx context.Context, arg ListGhostBusReportsForExportPageParams) ([]GhostBusReport, error) {
+	rows, err := q.db.QueryContext(ctx, listGhostBusReportsForExportPage,
+		arg.RegionID,
+		arg.Since,
+		arg.AfterID,
+		arg.MaxRows,
+	)
 	if err != nil {
 		return nil, err
 	}

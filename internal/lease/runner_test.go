@@ -494,3 +494,70 @@ func TestRunDoesNotSkipTicksOnTimerJitter(t *testing.T) {
 		t.Fatalf("ticked %d times in 300ms at a 20ms interval, want at least 10 (every-other-tick skip?)", n)
 	}
 }
+
+// blockingTick blocks until its ctx is cancelled and records that it was.
+type blockingTick struct {
+	started   atomic.Bool
+	cancelled atomic.Bool
+}
+
+func (b *blockingTick) tick(ctx context.Context) {
+	b.started.Store(true)
+	<-ctx.Done()
+	b.cancelled.Store(true)
+}
+
+// TestRunCancelsInFlightTickWhenLeaseIsLost pins SC-20: renewal runs under
+// a long cycle, and when it finds another process now holds the lease the
+// in-flight cycle's context is cancelled, so this process stops acting as
+// the owner instead of finishing a sweep the new holder is also running.
+func TestRunCancelsInFlightTickWhenLeaseIsLost(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	b := &blockingTick{}
+	r := newRunner(repo)
+	stop := start(t, r, lease.Loop{Name: "alarms", Interval: time.Hour, Tick: b.tick})
+	defer stop()
+	waitFor(t, "the tick to start", b.started.Load)
+	time.Sleep(5 * r.Poll)
+	if b.cancelled.Load() {
+		t.Fatal("tick cancelled while the lease was still held")
+	}
+	repo.seed("alarms", "other", time.Now().Add(time.Hour))
+	waitFor(t, "the tick ctx to be cancelled after losing the lease", b.cancelled.Load)
+}
+
+// TestRunCancelsInFlightTickOnceAnUnreachableLeaseHasExpired: a store
+// error proves nothing by itself -- the lease is still ours for a TTL --
+// but once a full TTL has passed since the last successful renewal the
+// lease has certainly lapsed and a peer may hold it.
+func TestRunCancelsInFlightTickOnceAnUnreachableLeaseHasExpired(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	b := &blockingTick{}
+	r := newRunner(repo)
+	stop := start(t, r, lease.Loop{Name: "alarms", Interval: time.Hour, Tick: b.tick})
+	defer stop()
+	waitFor(t, "the tick to start", b.started.Load)
+	repo.setFailAcquire(true)
+	waitFor(t, "the tick ctx to be cancelled after the TTL lapsed", b.cancelled.Load)
+}
+
+// TestRunKeepsInFlightTickThroughABriefStoreError: with the clock frozen
+// the TTL never lapses, so failed renewals alone must not cancel a cycle.
+func TestRunKeepsInFlightTickThroughABriefStoreError(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepo()
+	b := &blockingTick{}
+	r := newRunner(repo)
+	frozen := time.Now()
+	r.Now = func() time.Time { return frozen }
+	stop := start(t, r, lease.Loop{Name: "alarms", Interval: time.Hour, Tick: b.tick})
+	defer stop()
+	waitFor(t, "the tick to start", b.started.Load)
+	repo.setFailAcquire(true)
+	time.Sleep(20 * r.Poll)
+	if b.cancelled.Load() {
+		t.Fatal("tick cancelled by store errors inside the TTL")
+	}
+}

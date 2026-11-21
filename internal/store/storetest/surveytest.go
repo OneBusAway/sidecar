@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -47,10 +48,41 @@ func RunSurveyRepository(t *testing.T, newStore newSurveyStoreFunc) {
 	t.Run("AmendNotFoundAndCap", func(t *testing.T) { testAmendNotFoundAndCap(t, newStore) })
 	t.Run("ConcurrentAmendsBothLand", func(t *testing.T) { testConcurrentAmendsBothLand(t, newStore) })
 	t.Run("ListResponsesOrdered", func(t *testing.T) { testListResponsesOrdered(t, newStore) })
+	t.Run("ListResponsesPageFollowsCursor", func(t *testing.T) { testListResponsesPage(t, newStore) })
 	t.Run("CountResponses", func(t *testing.T) { testCountResponses(t, newStore) })
 	t.Run("UpdateStudyIsRegionScoped", func(t *testing.T) { testUpdateStudyRegionScoped(t, newStore) })
 	t.Run("CreateSurveyInRegionRejectsForeignStudy", func(t *testing.T) { testCreateSurveyInRegion(t, newStore) })
 	t.Run("GetResponseInRegionIsScoped", func(t *testing.T) { testGetResponseInRegion(t, newStore) })
+	t.Run("CountResponsesByUser", func(t *testing.T) { testCountResponsesByUser(t, newStore) })
+}
+
+// testCountResponsesByUser backs the per-rider response cap (SC-09).
+func testCountResponsesByUser(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	study := seedStudy(t, repo, regionRepo, 1)
+	a := mustCreateSurvey(t, repo, study.ID, surveyDef("a"))
+	b := mustCreateSurvey(t, repo, study.ID, surveyDef("b"))
+	for i, in := range []surveys.NewResponse{
+		{SurveyID: a.ID, UserIdentifier: "rider-1"},
+		{SurveyID: a.ID, UserIdentifier: "rider-1"},
+		{SurveyID: a.ID, UserIdentifier: "rider-2"},
+		{SurveyID: b.ID, UserIdentifier: "rider-1"},
+	} {
+		in.PublicID = fmt.Sprintf("pub-%d", i)
+		if _, err := repo.CreateResponse(ctx, in, base); err != nil {
+			t.Fatalf("CreateResponse %d: %v", i, err)
+		}
+	}
+	for _, tc := range []struct {
+		survey int64
+		user   string
+		want   int64
+	}{{a.ID, "rider-1", 2}, {a.ID, "rider-2", 1}, {b.ID, "rider-1", 1}, {b.ID, "rider-2", 0}} {
+		if got, err := repo.CountResponsesByUser(ctx, tc.survey, tc.user); err != nil || got != tc.want {
+			t.Errorf("CountResponsesByUser(%d, %s) = %d, %v; want %d", tc.survey, tc.user, got, err, tc.want)
+		}
+	}
 }
 
 func surveyDef(name string) surveys.Definition {
@@ -787,6 +819,30 @@ func testListResponsesOrdered(t *testing.T, newStore newSurveyStoreFunc) {
 	}
 	if len(list) != 2 || list[0].ID != earlier.ID || list[1].ID != later.ID {
 		t.Fatalf("ListResponses = %+v, want [earlier, later] by created_at", list)
+	}
+}
+
+// testListResponsesPage pins the bounded read (SC-21): ListResponses'
+// (created_at, id) order, resumed strictly after a cursor -- including a
+// later-created row with a lower id, which an id-only cursor would skip.
+func testListResponsesPage(t *testing.T, newStore newSurveyStoreFunc) {
+	repo, regs := newStore(t)
+	ctx := context.Background()
+	st := seedStudy(t, repo, regs, 1)
+	s := mustCreateSurvey(t, repo, st.ID, surveyDef("paged"))
+	later, err := repo.CreateResponse(ctx, surveys.NewResponse{SurveyID: s.ID, PublicID: "later", UserIdentifier: "d"}, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := mustCreateResponse(t, repo, s.ID, "a")
+	b := mustCreateResponse(t, repo, s.ID, "b")
+	page, err := repo.ListResponsesPage(ctx, s.ID, surveys.ResponseCursor{}, 2)
+	if err != nil || len(page) != 2 || page[0].ID != a.ID || page[1].ID != b.ID {
+		t.Fatalf("first page = %+v, %v; want [a b]", page, err)
+	}
+	page, err = repo.ListResponsesPage(ctx, s.ID, surveys.CursorAfter(page[1]), 2)
+	if err != nil || len(page) != 1 || page[0].ID != later.ID {
+		t.Fatalf("second page = %+v, %v; want [later]", page, err)
 	}
 }
 

@@ -21,11 +21,33 @@ import (
 // on unexported functions, and this one is part of the package's exported
 // API.)
 func WriteResponsesCSV(w io.Writer, survey Survey, responses []Response) error {
+	return StreamResponsesCSV(w, survey, func(yield func([]Response) error) error { return yield(responses) })
+}
+
+// StreamResponsesCSV is WriteResponsesCSV for a survey too large to hold in
+// memory (SC-21): pages calls yield once per page of responses, in export
+// order. The writer is flushed after every page, so memory is one page.
+func StreamResponsesCSV(w io.Writer, _ Survey, pages func(yield func([]Response) error) error) error {
 	cw := csv.NewWriter(w)
 	if err := cw.Write([]string{"response_id", "user_identifier", "stop_identifier", "stop_latitude", "stop_longitude",
 		"created_at", "updated_at", "question_id", "question_type", "question_label", "answer"}); err != nil {
 		return err
 	}
+	err := pages(func(page []Response) error {
+		if err := writeResponseRows(cw, page); err != nil {
+			return err
+		}
+		cw.Flush()
+		return cw.Error()
+	})
+	if err != nil {
+		return err
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+func writeResponseRows(cw *csv.Writer, responses []Response) error {
 	for _, r := range responses {
 		// The public id is server-minted, but its URL-safe base64 alphabet
 		// includes '-', so about one id in 64 opens with a formula trigger.
@@ -44,6 +66,5 @@ func WriteResponsesCSV(w io.Writer, survey Survey, responses []Response) error {
 			}
 		}
 	}
-	cw.Flush()
-	return cw.Error()
+	return nil
 }

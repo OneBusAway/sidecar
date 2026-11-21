@@ -3,6 +3,7 @@ package alarms_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/alarms"
 )
@@ -94,6 +95,49 @@ func TestDecide(t *testing.T) {
 	for _, tt := range tests {
 		if got := alarms.Decide(tt.until, tt.before); got != tt.want {
 			t.Errorf("Decide(%d, %d) = %v; want %v", tt.until, tt.before, got, tt.want)
+		}
+	}
+}
+
+// TestNormalizeSecondsBeforeClampsToMax (SC-01): an unbounded lead time
+// turns any real trip into an immediate push to an arbitrary token. The
+// clamp sits far above what either app offers (Android: 30 minutes; iOS:
+// at most the minutes until the departure being viewed).
+func TestNormalizeSecondsBeforeClampsToMax(t *testing.T) {
+	for _, tc := range []struct{ in, want int64 }{
+		{1_000_000_000, alarms.MaxSecondsBefore},
+		{alarms.MaxSecondsBefore + 1, alarms.MaxSecondsBefore},
+		{alarms.MaxSecondsBefore, alarms.MaxSecondsBefore},
+		{30 * 60, 30 * 60},
+	} {
+		if got := alarms.NormalizeSecondsBefore(tc.in, true); got != tc.want {
+			t.Errorf("NormalizeSecondsBefore(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	if alarms.MaxSecondsBefore < 6*60*60 {
+		t.Errorf("MaxSecondsBefore = %d: must admit multi-hour iOS picker values", alarms.MaxSecondsBefore)
+	}
+}
+
+// TestServiceDateInWindow pins the create-time and sweep-time age rule.
+func TestServiceDateInWindow(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ms := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
+	for _, tc := range []struct {
+		name string
+		sd   int64
+		want bool
+	}{
+		{"omitted", 0, true},
+		{"today", ms(-12 * time.Hour), true},
+		{"yesterday's late trip", ms(-36 * time.Hour), true},
+		{"tomorrow", ms(24 * time.Hour), true},
+		{"three days ago", ms(-72 * time.Hour), false},
+		{"three days ahead", ms(72 * time.Hour), false},
+		{"seconds instead of ms", now.Unix(), false},
+	} {
+		if got := alarms.ServiceDateInWindow(tc.sd, now); got != tc.want {
+			t.Errorf("%s: ServiceDateInWindow(%d) = %v, want %v", tc.name, tc.sd, got, tc.want)
 		}
 	}
 }

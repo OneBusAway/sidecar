@@ -69,14 +69,48 @@ func WriteReportsCSV(w io.Writer, region regions.Region, reports []Report) error
 		tripCounts[[2]any{r.TripIdentifier, r.ServiceDate}]++
 	}
 
+	return writeReports(w, loc, tripCounts, func(yield func([]Report) error) error { return yield(reports) })
+}
+
+// TripKey identifies one trip instance for the trip_report_count column.
+type TripKey struct {
+	TripIdentifier string
+	ServiceDate    int64
+}
+
+// StreamReportsCSV is WriteReportsCSV for an export too large to hold in
+// memory (SC-21): tripCounts is the per-trip-instance report count over the
+// whole export (computed by the store), and pages calls yield once per
+// page of reports, in export order, until it returns or yield fails. The
+// writer is flushed after every page, so memory is one page.
+func StreamReportsCSV(w io.Writer, region regions.Region, tripCounts map[TripKey]int, pages func(yield func([]Report) error) error) error {
+	loc, err := time.LoadLocation(region.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	counts := make(map[[2]any]int, len(tripCounts))
+	for k, n := range tripCounts {
+		counts[[2]any{k.TripIdentifier, k.ServiceDate}] = n
+	}
+	return writeReports(w, loc, counts, pages)
+}
+
+func writeReports(w io.Writer, loc *time.Location, tripCounts map[[2]any]int, pages func(yield func([]Report) error) error) error {
 	cw := csv.NewWriter(w)
 	if err := cw.Write(ghostBusHeader); err != nil {
 		return err
 	}
-	for _, r := range reports {
-		if err := cw.Write(reportRow(r, loc, tripCounts)); err != nil {
-			return err
+	err := pages(func(page []Report) error {
+		for _, r := range page {
+			if err := cw.Write(reportRow(r, loc, tripCounts)); err != nil {
+				return err
+			}
 		}
+		cw.Flush()
+		return cw.Error()
+	})
+	if err != nil {
+		return err
 	}
 	cw.Flush()
 	return cw.Error()

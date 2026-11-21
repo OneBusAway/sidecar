@@ -64,6 +64,12 @@ func (f *fakeGhostBusRepo) RecordSnapshotFailure(context.Context, int64, time.Ti
 func (f *fakeGhostBusRepo) ListForExport(context.Context, int64, int64) ([]ghostbus.Report, error) {
 	panic("not used by handler tests")
 }
+func (f *fakeGhostBusRepo) ListForExportPage(context.Context, int64, int64, int64, int) ([]ghostbus.Report, error) {
+	return nil, nil
+}
+func (f *fakeGhostBusRepo) TripReportCounts(context.Context, int64, int64) (map[ghostbus.TripKey]int, error) {
+	return nil, nil
+}
 func (f *fakeGhostBusRepo) GetByPublicID(context.Context, int64, string) (ghostbus.Report, error) {
 	panic("not used by handler tests")
 }

@@ -70,11 +70,24 @@ func (h *adminResponsesHandler) listResponses(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	list, err := h.deps.Surveys.ListResponses(r.Context(), s.ID)
+	limit, err := pageLimit(r, h.deps.adminListCap())
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	after, err := responseCursor(r)
+	if err != nil {
+		writeJSONError(w, h.deps.Logger, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := h.deps.Surveys.ListResponsesPage(r.Context(), s.ID, after, limit+1)
 	if err != nil {
 		writeSurveyStoreError(w, h.deps.Logger, "list survey responses", err)
 		return
 	}
+	list = trimPage(w, list, limit, func(resp surveys.Response) string {
+		return formatResponseCursor(surveys.CursorAfter(resp))
+	})
 	out := make([]adminResponseJSON, 0, len(list))
 	for _, resp := range list {
 		out = append(out, toAdminResponseJSON(resp))
@@ -94,7 +107,11 @@ func (h *adminResponsesHandler) responsesCSV(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	list, err := h.deps.Surveys.ListResponses(r.Context(), s.ID)
+	// The first page is read before any header is written, so a store
+	// failure up front is still a clean 500. Later pages stream (SC-21):
+	// memory is one page, never the whole survey.
+	pageSize := h.deps.adminListCap()
+	first, err := h.deps.Surveys.ListResponsesPage(r.Context(), s.ID, surveys.ResponseCursor{}, pageSize)
 	if err != nil {
 		writeSurveyStoreError(w, h.deps.Logger, "list survey responses", err)
 		return
@@ -104,7 +121,23 @@ func (h *adminResponsesHandler) responsesCSV(w http.ResponseWriter, r *http.Requ
 	// (the first Write below commits it if nothing already has); a write
 	// failure past that point can only be logged, never turned into a
 	// different status code.
-	if err := surveys.WriteResponsesCSV(w, s, list); err != nil {
+	err = surveys.StreamResponsesCSV(w, s, func(yield func([]surveys.Response) error) error {
+		page := first
+		for {
+			if yieldErr := yield(page); yieldErr != nil {
+				return yieldErr
+			}
+			if len(page) < pageSize {
+				return nil
+			}
+			next, pageErr := h.deps.Surveys.ListResponsesPage(r.Context(), s.ID, surveys.CursorAfter(page[len(page)-1]), pageSize)
+			if pageErr != nil {
+				return pageErr
+			}
+			page = next
+		}
+	})
+	if err != nil {
 		h.deps.Logger.Warn("httpapi: write survey responses csv", "err", err)
 	}
 }

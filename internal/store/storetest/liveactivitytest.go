@@ -29,6 +29,44 @@ func RunLiveActivityRepository(t *testing.T, newStore newLiveActivityStoreFunc) 
 	t.Run("ConcurrentFirstRegistrationRace", func(t *testing.T) { testLAConcurrentFirstRegistrationRace(t, newStore) })
 	t.Run("DeleteByIDRemovesExistingRow", func(t *testing.T) { testLADeleteByIDRemovesExistingRow(t, newStore) })
 	t.Run("DeleteByIDSkipsReRegisteredRow", func(t *testing.T) { testLADeleteByIDSkipsReRegisteredRow(t, newStore) })
+	t.Run("UsageCountsForRegistrationCaps", func(t *testing.T) { testLAUsage(t, newStore) })
+}
+
+// testLAUsage pins the counts the registration caps read (SC-03).
+func testLAUsage(t *testing.T, newStore newLiveActivityStoreFunc) {
+	repo, regionRepo := newStore(t)
+	ctx := context.Background()
+	putStoretestRegion(t, regionRepo, 1)
+	putStoretestRegion(t, regionRepo, 2)
+	add := func(token, activity, push, stop string, region int64) {
+		t.Helper()
+		in := fullLAIn(token, activity)
+		in.PushToken, in.StopID, in.RegionID = push, stop, region
+		if _, err := repo.Upsert(ctx, in, base); err != nil {
+			t.Fatalf("Upsert %s: %v", token, err)
+		}
+	}
+	add("t1", "a1", "p1", "s1", 1)
+	add("t2", "a2", "p1", "s1", 1)
+	add("t3", "a3", "p2", "s2", 1)
+	add("t4", "a4", "p3", "s1", 2)
+
+	u, err := repo.Usage(ctx, 1, "a2", "p1", "s1")
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	want := liveactivities.Usage{Total: 4, InRegion: 3, StopsInRegion: 2, ForPushToken: 2, OnStop: 2, Exists: true, ExistingStopID: "s1"}
+	if u != want {
+		t.Fatalf("Usage(existing) = %+v, want %+v", u, want)
+	}
+	u, err = repo.Usage(ctx, 2, "new", "p9", "s9")
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	want = liveactivities.Usage{Total: 4, InRegion: 1, StopsInRegion: 1, ForPushToken: 0, OnStop: 0}
+	if u != want {
+		t.Fatalf("Usage(new) = %+v, want %+v", u, want)
+	}
 }
 
 func fullLAIn(token, activityID string) liveactivities.NewLiveActivity {
