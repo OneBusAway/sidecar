@@ -177,6 +177,33 @@ type Deps struct {
 	// their CSV exports stream in (SC-21). Zero means 10000.
 	AdminListCap int
 
+	// LoginIPLimiter and LoginUserLimiter bound FAILED admin logins per
+	// client address and per normalized username (SC-02). A spent budget is
+	// a 429 before any argon2 work. NewRouter defaults both; successful
+	// logins are never charged. See sessionHandler.throttled for how the
+	// username bucket avoids becoming a lockout weapon.
+	LoginIPLimiter   *ratelimit.Limiter
+	LoginUserLimiter *ratelimit.Limiter
+	// LoginVerifySlots caps concurrent password verifications process-wide
+	// (each argon2id derivation holds ~19 MiB); LoginVerifyWait is how long
+	// a login queues for a slot before answering 503. NewRouter defaults
+	// both.
+	LoginVerifySlots int
+	LoginVerifyWait  time.Duration
+	// loginSlots is the semaphore NewRouter builds from LoginVerifySlots.
+	loginSlots chan struct{}
+
+	// SessionLifetime is the absolute admin session lifetime from login and
+	// SessionIdleTimeout the idle timeout (SC-25). NewRouter defaults them to
+	// auth.SessionLifetime and auth.SessionIdleTimeout.
+	SessionLifetime    time.Duration
+	SessionIdleTimeout time.Duration
+
+	// PushRegionHourlyLimit overrides the SC-27 cap on "all" pushes per
+	// region per hour through the admin API: zero keeps the default, a
+	// negative value disables it.
+	PushRegionHourlyLimit int
+
 	// AdminUI is the built admin SPA, served under /admin. Nil means the
 	// binary was built without it and those routes are not registered.
 	AdminUI fs.FS
@@ -428,6 +455,7 @@ func NewRouter(deps Deps) http.Handler {
 		if deps.BearerFailLimiter == nil {
 			deps.BearerFailLimiter = ratelimit.New(bearerFailuresPerMinute, time.Minute)
 		}
+		applyLoginDefaults(&deps)
 		// The alert push routes count the audience before they enqueue
 		// (design spec §2.9); Alerts, Regions and Now are already guaranteed
 		// above, so the registry is the one thing left that would nil-deref
@@ -437,7 +465,7 @@ func NewRouter(deps Deps) http.Handler {
 		}
 		registerAdminRoutes(mux, deps)
 	}
-	return requestLog(deps, mux)
+	return requestLog(deps, securityHeaders(deps.AdminUI, mux))
 }
 
 // adminRoute is one admin API route plus the middleware it must carry.

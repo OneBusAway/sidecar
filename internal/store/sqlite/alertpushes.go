@@ -208,6 +208,22 @@ func (r *alertPushRepo) RecordFailure(ctx context.Context, id int64, token, reas
 	defer func() { _ = tx.Rollback() }()
 	q := r.q.WithTx(tx)
 
+	// SC-11 bounds, checked inside the (immediate) transaction so two
+	// concurrent bounces cannot both squeeze under the cap: never more
+	// failures than devices the push went to, and nothing for a push that
+	// completed more than FeedbackWindow ago. An unknown id falls through
+	// to the insert, whose foreign key reports it as before.
+	push, err := q.GetAlertPush(ctx, id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("sqlite: record alert push %d failure: %w", id, err)
+	case push.FailedCount >= push.DeviceCount:
+		return false, nil
+	case push.CompletedAt.Valid && now.Unix() > push.CompletedAt.Int64+int64(alertpush.FeedbackWindow/time.Second):
+		return false, nil
+	}
+
 	// INSERT OR IGNORE absorbs the (push_id, token_sha256) replay, but not a
 	// foreign key violation: an unknown push id still errors here.
 	inserted, err := q.InsertAlertPushFailure(ctx, gen.InsertAlertPushFailureParams{
@@ -283,4 +299,12 @@ func (r *alertPushRepo) Cancel(ctx context.Context, id int64, now time.Time) err
 		return fmt.Errorf("sqlite: cancel alert push %d: %w", id, err)
 	}
 	return fmt.Errorf("sqlite: cancel alert push %d: %w", id, alertpush.ErrTerminal)
+}
+
+func (r *alertPushRepo) CountReachingAllSince(ctx context.Context, regionID int64, since time.Time) (int64, error) {
+	n, err := r.q.CountReachingAllPushesSince(ctx, gen.CountReachingAllPushesSinceParams{RegionID: regionID, Since: since.Unix()})
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count region %d pushes: %w", regionID, err)
+	}
+	return n, nil
 }

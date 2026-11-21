@@ -67,6 +67,24 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) (int64, 
 	return result.RowsAffected()
 }
 
+const extendSession = `-- name: ExtendSession :execrows
+UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2
+`
+
+type ExtendSessionParams struct {
+	ExpiresAt int64
+	TokenHash string
+}
+
+// The idle-timeout write: the middleware slides expires_at (spec SC-25).
+func (q *Queries) ExtendSession(ctx context.Context, arg ExtendSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, extendSession, arg.ExpiresAt, arg.TokenHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getSessionRow = `-- name: GetSessionRow :one
 SELECT token_hash, user_id, created_at, expires_at FROM sessions WHERE token_hash = ?
 `
@@ -83,4 +101,36 @@ func (q *Queries) GetSessionRow(ctx context.Context, tokenHash string) (Session,
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const listSessions = `-- name: ListSessions :many
+SELECT token_hash, user_id, created_at, expires_at FROM sessions ORDER BY created_at, token_hash
+`
+
+func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
+	rows, err := q.db.QueryContext(ctx, listSessions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Session{}
+	for rows.Next() {
+		var i Session
+		if err := rows.Scan(
+			&i.TokenHash,
+			&i.UserID,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

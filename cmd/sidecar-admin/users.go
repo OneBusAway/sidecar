@@ -26,7 +26,7 @@ import (
 // so `user create` is what makes the admin UI reachable at all.
 func runUser(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, store *sqlite.Store, now time.Time, args []string) error {
 	if len(args) == 0 {
-		return errors.New("user requires a subcommand: create, passwd, list, delete")
+		return errors.New("user requires a subcommand: create, passwd, list, delete, sessions, revoke")
 	}
 	cmd, cmdArgs := args[0], args[1:]
 	switch cmd {
@@ -38,8 +38,12 @@ func runUser(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, sto
 		return userList(ctx, stdout, store, cmdArgs)
 	case "delete":
 		return userDelete(ctx, stdout, store, cmdArgs)
+	case "sessions":
+		return userSessions(ctx, stdout, store, now, cmdArgs)
+	case "revoke":
+		return userRevoke(ctx, stdout, store, now, cmdArgs)
 	default:
-		return fmt.Errorf("unknown user subcommand %q; expected create, passwd, list, or delete", cmd)
+		return fmt.Errorf("unknown user subcommand %q; expected create, passwd, list, delete, sessions, or revoke", cmd)
 	}
 }
 
@@ -241,4 +245,121 @@ func userDelete(ctx context.Context, stdout io.Writer, store *sqlite.Store, args
 
 	fmt.Fprintf(stdout, "deleted user %s\n", normalized)
 	return nil
+}
+
+// sessionIDLen is how much of a session's token hash `user sessions` shows
+// and `user revoke --session` matches on; minSessionIDLen is the shortest
+// prefix revoke accepts. The hash is SHA-256 of the cookie token, so even
+// the whole value grants nothing -- the prefix is just shorter to type.
+const (
+	sessionIDLen    = 12
+	minSessionIDLen = 8
+)
+
+// userSessions prints one line per live admin session (SC-25): id, a tab,
+// username, created-at, and the current idle deadline, all RFC 3339 UTC.
+func userSessions(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
+	fs := flag.NewFlagSet("user sessions", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	username := fs.String("username", "", "only this account's sessions")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	sessions, names, err := liveSessions(ctx, store, now)
+	if err != nil {
+		return fmt.Errorf("user sessions: %w", err)
+	}
+	filter := auth.NormalizeUsername(*username)
+	for _, s := range sessions {
+		if filter != "" && names[s.UserID] != filter {
+			continue
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", s.TokenHash[:sessionIDLen], names[s.UserID],
+			s.CreatedAt.UTC().Format(time.RFC3339), s.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// userRevoke ends one session (--session <id>) or every session of one
+// account (--username). Exactly one selector is required; an id must be at
+// least minSessionIDLen characters and match exactly one live session.
+func userRevoke(ctx context.Context, stdout io.Writer, store *sqlite.Store, now time.Time, args []string) error {
+	fs := flag.NewFlagSet("user revoke", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	id := fs.String("session", "", "id (token-hash prefix) from `user sessions`")
+	username := fs.String("username", "", "revoke every session of this account")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if (*id == "") == (*username == "") {
+		return errors.New("user revoke requires exactly one of --session or --username")
+	}
+	if *username != "" {
+		normalized := auth.NormalizeUsername(*username)
+		user, err := store.Auth().GetUserByUsername(ctx, normalized)
+		if err != nil {
+			if errors.Is(err, auth.ErrNotFound) {
+				return fmt.Errorf("user revoke: user %q not found", normalized)
+			}
+			return fmt.Errorf("user revoke: %w", err)
+		}
+		n, err := store.Auth().DeleteUserSessions(ctx, user.ID)
+		if err != nil {
+			return fmt.Errorf("user revoke: %w", err)
+		}
+		fmt.Fprintf(stdout, "revoked %d session(s) for %s\n", n, normalized)
+		return nil
+	}
+
+	prefix := strings.ToLower(*id)
+	if len(prefix) < minSessionIDLen {
+		return fmt.Errorf("user revoke: --session needs at least %d characters of the id", minSessionIDLen)
+	}
+	sessions, _, err := liveSessions(ctx, store, now)
+	if err != nil {
+		return fmt.Errorf("user revoke: %w", err)
+	}
+	var match []auth.Session
+	for _, s := range sessions {
+		if strings.HasPrefix(s.TokenHash, prefix) {
+			match = append(match, s)
+		}
+	}
+	switch len(match) {
+	case 0:
+		return fmt.Errorf("user revoke: no live session with id %q", prefix)
+	case 1:
+	default:
+		return fmt.Errorf("user revoke: id %q matches %d sessions; give more characters", prefix, len(match))
+	}
+	if err := store.Auth().DeleteSession(ctx, match[0].TokenHash); err != nil {
+		return fmt.Errorf("user revoke: %w", err)
+	}
+	fmt.Fprintf(stdout, "revoked session %s\n", match[0].TokenHash[:sessionIDLen])
+	return nil
+}
+
+// liveSessions returns the sessions still live at now (an expired row awaits
+// the next sign-in's sweep and is not worth showing) and a user-id to
+// username map.
+func liveSessions(ctx context.Context, store *sqlite.Store, now time.Time) ([]auth.Session, map[int64]string, error) {
+	all, err := store.Auth().ListSessions(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	users, err := store.Auth().ListUsers(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	names := make(map[int64]string, len(users))
+	for _, u := range users {
+		names[u.ID] = u.Username
+	}
+	live := all[:0]
+	for _, s := range all {
+		if s.ExpiresAt.After(now) {
+			live = append(live, s)
+		}
+	}
+	return live, names, nil
 }

@@ -15,3 +15,10 @@ DELETE FROM sessions WHERE user_id = ?;
 
 -- name: DeleteExpiredSessions :execrows
 DELETE FROM sessions WHERE expires_at <= ?;
+
+-- The idle-timeout write: the middleware slides expires_at (spec SC-25).
+-- name: ExtendSession :execrows
+UPDATE sessions SET expires_at = sqlc.arg(expires_at) WHERE token_hash = sqlc.arg(token_hash);
+
+-- name: ListSessions :many
+SELECT * FROM sessions ORDER BY created_at, token_hash;

@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/OneBusAway/sidecar/internal/auth"
 )
@@ -114,14 +116,16 @@ func (h *authMiddleware) requirePrincipal(allowed principalSet, next http.Handle
 // GetSession's contract folds expiry into ErrNotFound (and deletes the row on
 // the way), so there is nothing here to distinguish.
 func (h *authMiddleware) authenticateSession(w http.ResponseWriter, r *http.Request) (principal, bool) {
-	cookie, err := r.Cookie(auth.CookieName)
+	cookie, err := r.Cookie(sessionCookieName(r))
 	if err != nil {
 		h.unauthorized(w, "no session cookie")
 		return principal{}, false
 	}
 
 	ctx := r.Context()
-	session, err := h.deps.Auth.GetSession(ctx, auth.HashToken(cookie.Value), h.deps.Now())
+	now := h.deps.Now()
+	tokenHash := auth.HashToken(cookie.Value)
+	session, err := h.deps.Auth.GetSession(ctx, tokenHash, now)
 	if err != nil {
 		if !errors.Is(err, auth.ErrNotFound) {
 			// A broken store is not a logged-out user. Saying 401 here
@@ -131,6 +135,9 @@ func (h *authMiddleware) authenticateSession(w http.ResponseWriter, r *http.Requ
 			return principal{}, false
 		}
 		h.unauthorized(w, "no live session for cookie")
+		return principal{}, false
+	}
+	if !h.liveAndSlid(r, w, session, now) {
 		return principal{}, false
 	}
 
@@ -155,4 +162,44 @@ func (h *authMiddleware) authenticateSession(w http.ResponseWriter, r *http.Requ
 func (h *authMiddleware) unauthorized(w http.ResponseWriter, reason string) {
 	h.deps.Logger.Debug("httpapi: authentication required", "reason", reason)
 	writeJSONError(w, h.deps.Logger, http.StatusUnauthorized, "authentication required")
+}
+
+// liveAndSlid applies SC-25's two clocks to a session GetSession reported
+// live. The absolute lifetime is measured from created_at here, at request
+// time, rather than trusted from expires_at, so lowering
+// --admin-session-lifetime also ends sessions minted under a longer one. The
+// idle timeout lives in expires_at, which this slides forward to now+idle
+// (capped at the absolute deadline). The write is skipped unless it would
+// move the deadline by more than a twentieth of the idle window -- or pull
+// it in, which a row minted under longer settings needs once -- so a burst
+// of requests costs one UPDATE, not one each. A failed slide is logged and
+// the request proceeds: the session is live right now, and the worst case
+// is that it idles out up to one granule early.
+//
+// It writes the 401 itself and reports false when the session is past its
+// absolute lifetime.
+func (h *authMiddleware) liveAndSlid(r *http.Request, w http.ResponseWriter, s auth.Session, now time.Time) bool {
+	ctx := r.Context()
+	// Zero means a hand-built middleware (tests); NewRouter always sets both.
+	lifetime := cmp.Or(h.deps.SessionLifetime, auth.SessionLifetime)
+	idle := cmp.Or(h.deps.SessionIdleTimeout, auth.SessionIdleTimeout)
+	hardDeadline := s.CreatedAt.Add(lifetime)
+	if !now.Before(hardDeadline) {
+		if err := h.deps.Auth.DeleteSession(ctx, s.TokenHash); err != nil && !errors.Is(err, auth.ErrNotFound) {
+			h.deps.Logger.Warn("httpapi: delete session past its lifetime", "err", err)
+		}
+		h.unauthorized(w, "session past its absolute lifetime")
+		return false
+	}
+	next := now.Add(idle)
+	if next.After(hardDeadline) {
+		next = hardDeadline
+	}
+	granule := max(idle/20, time.Second)
+	if next.Sub(s.ExpiresAt) >= granule || next.Before(s.ExpiresAt) {
+		if err := h.deps.Auth.ExtendSession(ctx, s.TokenHash, next); err != nil {
+			h.deps.Logger.Warn("httpapi: slide session idle deadline", "err", err)
+		}
+	}
+	return true
 }

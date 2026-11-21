@@ -100,3 +100,13 @@ WHERE id = sqlc.arg(id) AND status = 'sending'
 -- name: CancelAlertPush :execrows
 UPDATE alert_pushes SET status = 'canceled', completed_at = sqlc.arg(completed_at), updated_at = sqlc.arg(now)
 WHERE id = sqlc.arg(id) AND status IN ('queued', 'sending');
+
+-- name: CountReachingAllPushesSince :one
+-- Pushes to the whole region created at or after since that may have
+-- reached a device: everything except a failed or canceled push that never
+-- submitted a batch (SC-27 cooldown, design spec section 2.2).
+SELECT COUNT(*) FROM alert_pushes
+WHERE region_id = sqlc.arg(region_id)
+  AND audience = 'all'
+  AND created_at >= sqlc.arg(since)
+  AND NOT (status IN ('failed', 'canceled') AND submitted_count = 0);

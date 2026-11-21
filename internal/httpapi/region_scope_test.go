@@ -798,7 +798,11 @@ func (f *adminFixture) assertRegionBIntact(t *testing.T, fx tenancyFixtureIDs, b
 func TestRouteTable_TenancyWalk(t *testing.T) {
 	t.Parallel()
 
-	f := newFullAdminFixture(t)
+	// Every route seeds its own region-B push at the same instant, and the
+	// push route's positive control then sends one more: forty-odd "all"
+	// pushes in one fixed minute is a test artefact, not traffic the SC-27
+	// region cap should judge.
+	f := newAdminFixtureWith(t, true, func(d *Deps) { d.PushRegionHourlyLimit = -1 })
 	keyForA := f.mintRegionKey(t, regionPuget) // region A = 1
 
 	walked := map[string]bool{}

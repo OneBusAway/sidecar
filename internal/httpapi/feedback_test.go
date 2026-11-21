@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/httpapi"
@@ -607,6 +609,11 @@ func TestFeedbackRecordsAlertPushFailureByNotifID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	// The dispatcher records the audience at send start; failures are
+	// capped at it (SC-11).
+	if err = store.AlertPushes().SetDeviceCount(ctx, p.ID, 4, base); err != nil {
+		t.Fatalf("SetDeviceCount: %v", err)
+	}
 
 	h := httpapi.NewRouter(httpapi.Deps{
 		PushRegs:    store.PushRegs(),
@@ -698,5 +705,52 @@ func TestFeedbackAccountingWithoutAlertPushes(t *testing.T) {
 	}
 	if _, err := store.PushRegs().Get(context.Background(), 1, "tok"); !errors.Is(err, pushreg.ErrNotFound) {
 		t.Errorf("terminal prune stopped working: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestFeedbackFailureReasonIsClamped pins SC-11's reason hygiene: the reason
+// is caller-supplied text that lands in alert_push_failures and is shown to
+// operators in the admin UI, so it is cut to alertpush.MaxFailureReasonRunes
+// and stripped of control characters before it is stored.
+func TestFeedbackFailureReasonIsClamped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	putRegion(t, store.Regions(), 1)
+	alertID := publishAlert(t, store.Alerts(), 1, "Route 40 detour", false)
+	if err := store.PushRegs().Upsert(ctx, pushreg.Upsert{RegionID: 1, Token: "tok", OperatingSystem: "ios"}, base); err != nil {
+		t.Fatal(err)
+	}
+	enq := &alertpush.Enqueuer{Repo: store.AlertPushes(), Alerts: store.Alerts(), PushRegs: store.PushRegs()}
+	p, err := enq.Enqueue(ctx, alertID, alertpush.AudienceAll, nil, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.AlertPushes().SetDeviceCount(ctx, p.ID, 1, base); err != nil {
+		t.Fatal(err)
+	}
+	h := httpapi.NewRouter(httpapi.Deps{
+		PushRegs: store.PushRegs(), AlertPushes: store.AlertPushes(), Regions: store.Regions(),
+		Now: func() time.Time { return base }, Logger: slog.New(slog.DiscardHandler),
+	})
+	reason := "Bad\u001b[31mThing\r\n" + strings.Repeat("x", 10000)
+	body, _ := json.Marshal(map[string]string{
+		"type": "failed-push", "platform": "ios", "token": "tok", "error": reason, "notif_id": alertpush.NotifID(p.ID),
+	})
+	feedbackOK(t, h, "oversized reason", string(body))
+
+	got, err := store.AlertPushes().Get(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.FailureReasons) != 1 {
+		t.Fatalf("FailureReasons = %v, want one row", got.FailureReasons)
+	}
+	stored := got.FailureReasons[0].Reason
+	if n := utf8.RuneCountInString(stored); n > alertpush.MaxFailureReasonRunes {
+		t.Errorf("stored reason is %d runes, want <= %d", n, alertpush.MaxFailureReasonRunes)
+	}
+	if strings.ContainsAny(stored, "\u001b\r\n") || !strings.HasPrefix(stored, "Bad") {
+		t.Errorf("stored reason = %.80q..., want control characters stripped and the text kept", stored)
 	}
 }

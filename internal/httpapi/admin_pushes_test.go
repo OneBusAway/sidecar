@@ -548,6 +548,9 @@ func (failingAlertPushes) MarkCompleted(context.Context, int64, alertpush.Status
 	return false, errStoreBroken
 }
 func (failingAlertPushes) Cancel(context.Context, int64, time.Time) error { return errStoreBroken }
+func (failingAlertPushes) CountReachingAllSince(context.Context, int64, time.Time) (int64, error) {
+	return 0, errStoreBroken
+}
 
 // failingPushRegs is the registry equivalent. The push routes require a
 // non-nil one at boot (they count the audience before enqueueing), so the
@@ -702,4 +705,46 @@ func TestAdminCreatePush_InvalidMessagesAre400(t *testing.T) {
 	if f.waker.calls != 0 {
 		t.Errorf("Wake calls = %d, want 0", f.waker.calls)
 	}
+}
+
+// TestAdminCreatePush_Cooldown pins SC-27 at the HTTP layer. A cooldown
+// refusal is a 409 with the operator-readable reason in the {"error"} body:
+// OBACloud's Rails client maps 409 to Sidecar::Conflict and shows that text
+// ("The push wasn't sent: ..."), where a 429 would surface as an "unexpected
+// status" error. A test-audience send right after is not throttled.
+func TestAdminCreatePush_Cooldown(t *testing.T) {
+	t.Parallel()
+
+	f := newAdminFixture(t)
+	id := f.seedPublishedAlert(t, regionPuget, false)
+	f.seedRegistration(t, regionPuget, "tok-1", false)
+	f.seedRegistration(t, regionPuget, "qa", true)
+	ctx := context.Background()
+
+	finish := func() {
+		t.Helper()
+		claimed, err := f.store.AlertPushes().Claim(ctx, testNow, testNow.Add(-time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range claimed {
+			if _, err := f.store.AlertPushes().AdvanceCursor(ctx, p.ID, 0, 1, 1, testNow); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.AlertPushes().MarkCompleted(ctx, p.ID, alertpush.StatusSent, "", testNow); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	f.assertStatus(t, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`, http.StatusAccepted, "first all push")
+	finish()
+	rec := f.do(http.MethodPost, pushesPath(regionPuget, id), `{"audience":"all"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("repeat all push within the spacing: status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+	if body := bodyText(rec); !strings.Contains(body, "wait before sending it again") {
+		t.Errorf("409 body = %s, want the cooldown reason", body)
+	}
+	f.assertStatus(t, http.MethodPost, pushesPath(regionPuget, id), `{"audience":"test"}`, http.StatusAccepted, "test push right after")
 }

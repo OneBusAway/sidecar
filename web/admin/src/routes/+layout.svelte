@@ -69,6 +69,12 @@
 </main>
 
 <style>
+	/* app.html's mount point. SvelteKit's template inlines this as a style
+	   attribute, which the admin CSP (no 'unsafe-inline', SC-17) would
+	   block; a class keeps the same layout. */
+	:global(.sk-root) {
+		display: contents;
+	}
 	:global(body) {
 		margin: 0;
 		font-family: system-ui, sans-serif;
