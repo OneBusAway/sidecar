@@ -184,6 +184,17 @@ type client struct {
 // New builds a Client. defaultKey is the process-wide fallback used for any
 // region that carries no key of its own; it may be empty.
 func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client {
+	return newClient(defaultKey, httpClient, logger, MaxResponseBytes)
+}
+
+// MaxResponseBytes caps any one OBA response body. The region's OBA server
+// comes from the regions directory, so it is an external host; the largest
+// legitimate response, vehicles-for-agency for a big agency, runs to a few
+// MB, and a body past the cap fails the call instead of being decoded into
+// memory without bound.
+const MaxResponseBytes = 32 << 20
+
+func newClient(defaultKey string, httpClient *http.Client, logger *slog.Logger, maxBody int64) *client {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -191,7 +202,7 @@ func New(defaultKey string, httpClient *http.Client, logger *slog.Logger) Client
 	// it to the redirect target via Referer; see httpx.NoRedirectClient.
 	return &client{
 		defaultKey: defaultKey,
-		http:       httpx.NoRedirectClient(httpClient),
+		http:       httpx.CapResponseBodies(httpx.NoRedirectClient(httpClient), maxBody),
 		logger:     logger,
 		sdks:       make(map[string]*oba.Client),
 	}
@@ -675,6 +686,10 @@ func redact(err error) error {
 	}
 	if code := statusOf(err); code != 0 {
 		return fmt.Errorf("upstream returned status %d", code)
+	}
+	// The cap's sentinel carries no URL; keep it matchable.
+	if errors.Is(err, httpx.ErrResponseTooLarge) {
+		return fmt.Errorf("upstream response: %w", httpx.ErrResponseTooLarge)
 	}
 	return errors.New("upstream request failed")
 }

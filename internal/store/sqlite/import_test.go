@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -60,7 +62,7 @@ func importDoc() *export.Document {
 		GhostBusReports: []export.GhostBusReport{{
 			PublicID: "gb-1", UserIdentifier: "user-1", TripIdentifier: "1_trip", ServiceDateMS: 1756339200000,
 			RouteIdentifier: "1_44", StopIdentifier: "1_100", StopSequence: &seq, Predicted: &predicted,
-			WaitDurationMinutes: 12, Comment: "never came",
+			WaitDurationMinutes: 15, Comment: "never came",
 			SnapshotStatus: "captured", Snapshot: json.RawMessage(`{"status":{"phase":"in_progress"},"display":{"route_short_name":"44"}}`),
 			SnapshotCapturedAt: &captured, CreatedAt: importBase.Add(-3 * time.Hour),
 		}},
@@ -258,8 +260,8 @@ func TestImport_SecondaryRows(t *testing.T) {
 	doc.Alerts[0].Translations = append(doc.Alerts[0].Translations,
 		export.AlertTranslation{Language: "de", HeaderText: " \t", DescriptionText: "Nehmen Sie die 43."})
 	doc.GhostBusReports = append(doc.GhostBusReports,
-		export.GhostBusReport{PublicID: "gb-pending", UserIdentifier: "u2", TripIdentifier: "1_t2", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "pending", Snapshot: json.RawMessage(`{"ignored":true}`)},
-		export.GhostBusReport{PublicID: "gb-gone", UserIdentifier: "u3", TripIdentifier: "1_t3", ServiceDateMS: 1756339200000, WaitDurationMinutes: 1, SnapshotStatus: "unavailable"},
+		export.GhostBusReport{PublicID: "gb-pending", UserIdentifier: "u2", TripIdentifier: "1_t2", ServiceDateMS: 1756339200000, WaitDurationMinutes: 5, SnapshotStatus: "pending", Snapshot: json.RawMessage(`{"ignored":true}`)},
+		export.GhostBusReport{PublicID: "gb-gone", UserIdentifier: "u3", TripIdentifier: "1_t3", ServiceDateMS: 1756339200000, WaitDurationMinutes: 5, SnapshotStatus: "unavailable"},
 	)
 	if _, err := store.Import(ctx, doc, importBase); err != nil {
 		t.Fatal(err)
@@ -360,5 +362,169 @@ func TestImport_ValidatesBeforeWriting(t *testing.T) {
 	empty := sqlitetest.Open(t)
 	if _, err := empty.Import(ctx, importDoc(), importBase); !errors.Is(err, sqlite.ErrRegionMissing) {
 		t.Fatalf("missing region: %v", err)
+	}
+}
+
+// TestImport_RejectsIDAtSequenceFloor (SC-13): an alert id of MaxInt64
+// would park the shared alerts sequence where SQLite has no id left to
+// mint, breaking alert creation in every region. It is rejected before the
+// transaction opens: nothing lands, the sequences do not move, and another
+// region can still author.
+func TestImport_RejectsIDAtSequenceFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	if err := store.Regions().UpsertFromDirectory(ctx, []regions.Region{{
+		ID: 2, Name: "Elsewhere", OBABaseURL: "https://example.org/", Active: true,
+	}}, importBase); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Sequences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := importDoc()
+	doc.Alerts[0].ID = math.MaxInt64
+	if dryErr := store.ValidateImport(ctx, doc, importBase); dryErr == nil {
+		t.Fatal("dry run accepted an id at MaxInt64")
+	}
+	if _, impErr := store.Import(ctx, doc, importBase); impErr == nil || !strings.Contains(impErr.Error(), "sequence floor") {
+		t.Fatalf("import err %v, want a sequence-floor rejection", impErr)
+	}
+	after, err := store.Sequences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(before) != fmt.Sprint(after) {
+		t.Fatalf("sequences moved: %v -> %v", before, after)
+	}
+	if _, err := store.Surveys().GetStudy(ctx, 7); err == nil {
+		t.Fatal("rejected import left the study behind")
+	}
+	if _, err := store.Alerts().Create(ctx, alerts.NewAlert{RegionID: 2, AgencyID: "1", HeaderText: "h", StartTime: importBase}, importBase); err != nil {
+		t.Fatalf("another region can no longer author: %v", err)
+	}
+}
+
+// TestImport_AlertURLValidated (SC-07): import applies the admin API's url
+// rule. OBACloud validates http(s) on write, so this should never fire on
+// real data; when it does, the error names the alert to fix in OBACloud.
+func TestImport_AlertURLValidated(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	for _, u := range []string{"javascript:alert(1)", "data:text/html,x", "//evil.example/x", "/detours", "https://example.org/" + strings.Repeat("a", 5000)} {
+		doc := importDoc()
+		doc.Alerts[0].URL = u
+		if err := store.ValidateImport(ctx, doc, importBase); err == nil || !strings.Contains(err.Error(), "alert 4242") || !strings.Contains(err.Error(), "url") {
+			t.Errorf("url %.40q: dry run err %v, want one naming alert 4242's url", u, err)
+		}
+		if _, err := store.Import(ctx, doc, importBase); err == nil {
+			t.Errorf("url %.40q imported", u)
+		}
+	}
+	if _, err := store.Alerts().Get(ctx, 4242); err == nil {
+		t.Fatal("rejected import left the alert behind")
+	}
+	doc := importDoc()
+	doc.Alerts[0].URL = "https://example.org/detours"
+	if _, err := store.Import(ctx, doc, importBase); err != nil {
+		t.Fatalf("valid url: %v", err)
+	}
+}
+
+// TestImport_HTTPLayerRules (SC-15): imported rows meet the rules the HTTP
+// layer applies to the same fields -- length caps, coordinate ranges, the
+// wait-duration choices, a URL-safe public id, a snapshot that is a JSON
+// object -- and a row that breaks one is rejected by name before anything
+// is written (the operator fixes or deletes it in OBACloud and re-exports).
+func TestImport_HTTPLayerRules(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	long := strings.Repeat("x", 256)
+	far := 91.0
+	wide := -180.5
+	cases := []struct {
+		name, wantRow string
+		mutate        func(*export.Document)
+	}{
+		{"response user_identifier too long", "survey response resp-1", func(d *export.Document) { d.SurveyResponses[0].UserIdentifier = long }},
+		{"response stop_identifier too long", "survey response resp-1", func(d *export.Document) { d.SurveyResponses[0].StopIdentifier = long }},
+		{"response latitude out of range", "survey response resp-1", func(d *export.Document) { d.SurveyResponses[0].StopLatitude = &far }},
+		{"response longitude out of range", "survey response resp-1", func(d *export.Document) { d.SurveyResponses[0].StopLongitude = &wide }},
+		{"response public id not URL-safe", "survey response", func(d *export.Document) { d.SurveyResponses[0].PublicID = "../admin" }},
+		{"response public id too long", "survey response", func(d *export.Document) { d.SurveyResponses[0].PublicID = strings.Repeat("a", 65) }},
+		{"token too long", "push registration", func(d *export.Document) { d.PushRegistrations[0].Token = strings.Repeat("t", 4097) }},
+		{"test device description too long", "push registration", func(d *export.Document) { d.PushRegistrations[0].Description = long }},
+		{"report user_identifier too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].UserIdentifier = long }},
+		{"report trip_identifier too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].TripIdentifier = long }},
+		{"report route_identifier too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].RouteIdentifier = long }},
+		{"report stop_identifier too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].StopIdentifier = long }},
+		{"report vehicle_identifier too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].VehicleIdentifier = long }},
+		{"report comment too long", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].Comment = strings.Repeat("é", 1001) }},
+		{"report latitude out of range", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].UserLatitude = &far }},
+		{"report longitude out of range", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].UserLongitude = &wide }},
+		{"report wait duration not a choice", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].WaitDurationMinutes = 12 }},
+		{"report public id not URL-safe", "ghost bus report", func(d *export.Document) { d.GhostBusReports[0].PublicID = "gb 1" }},
+		{"snapshot not an object", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].Snapshot = json.RawMessage(`[1,2]`) }},
+		{"snapshot a string", "ghost bus report gb-1", func(d *export.Document) { d.GhostBusReports[0].Snapshot = json.RawMessage(`"x"`) }},
+		{"snapshot too large", "ghost bus report gb-1", func(d *export.Document) {
+			d.GhostBusReports[0].Snapshot = json.RawMessage(`{"pad":"` + strings.Repeat("p", 70_000) + `"}`)
+		}},
+	}
+	for _, tc := range cases {
+		doc := importDoc()
+		tc.mutate(doc)
+		err := store.ValidateImport(ctx, doc, importBase)
+		if err == nil || !strings.Contains(err.Error(), tc.wantRow) {
+			t.Errorf("%s: dry run err %v, want one naming %q", tc.name, err, tc.wantRow)
+			continue
+		}
+		if _, err := store.Import(ctx, doc, importBase); err == nil {
+			t.Errorf("%s: imported", tc.name)
+		}
+	}
+	if _, err := store.Alerts().Get(ctx, 4242); err == nil {
+		t.Fatal("a rejected import left the alert behind")
+	}
+
+	// The limits themselves are accepted: exactly 255 bytes, 1000 runes,
+	// +/-90 and +/-180, a 4096-byte token, Rails's 20-hex public ids.
+	doc := importDoc()
+	edge := strings.Repeat("x", 255)
+	lat, lon := -90.0, 180.0
+	doc.SurveyResponses[0].UserIdentifier, doc.SurveyResponses[0].PublicID = edge, "b7e4483857d9af7702b9"
+	doc.GhostBusReports[0].TripIdentifier, doc.GhostBusReports[0].Comment = edge, strings.Repeat("é", 1000)
+	doc.GhostBusReports[0].UserLatitude, doc.GhostBusReports[0].UserLongitude = &lat, &lon
+	doc.PushRegistrations[1].Token = strings.Repeat("t", 4096)
+	if _, err := store.Import(ctx, doc, importBase); err != nil {
+		t.Fatalf("rows at the limits rejected: %v", err)
+	}
+}
+
+// TestImport_NonTestDeviceDescriptionDropped (SC-15): the HTTP layer keeps
+// no description on a non-test registration (spec section 4), so a legacy
+// one is normalized away on import instead of failing the document.
+func TestImport_NonTestDeviceDescriptionDropped(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := sqlitetest.Open(t)
+	seedImportRegion(t, store)
+	doc := importDoc()
+	doc.PushRegistrations[1].Description = strings.Repeat("d", 300)
+	if _, err := store.Import(ctx, doc, importBase); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := store.PushRegs().Get(ctx, 1, "tok-android")
+	if err != nil || reg.Description != "" {
+		t.Fatalf("non-test description kept: %q %v", reg.Description, err)
+	}
+	reg, err = store.PushRegs().Get(ctx, 1, "tok-ios")
+	if err != nil || reg.Description != "Aaron's phone" {
+		t.Fatalf("test device description lost: %q %v", reg.Description, err)
 	}
 }

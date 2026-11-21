@@ -75,3 +75,36 @@ func TestFloat_ZeroRendersAsZero(t *testing.T) {
 		t.Errorf("Float(&0.0) = %q, want %q", got, "0")
 	}
 }
+
+// TestCell_GuardsTriggerAfterLeadingSpaceOrControl (SC-23): spreadsheets
+// trim leading whitespace and skip control characters before deciding a
+// cell is a formula, and some accept full-width trigger characters, so the
+// guard looks past those to the first significant character.
+func TestCell_GuardsTriggerAfterLeadingSpaceOrControl(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{
+		"\n=1+1",
+		" =1+1",
+		"   +SUM(A1)",
+		"\u00a0=1+1",     // no-break space
+		"\u3000-1",       // ideographic space
+		"\ufeff=1+1",     // byte-order mark
+		"\u200b@SUM(A1)", // zero-width space
+		"\x00=1",         // NUL
+		"\uff1d1+1",      // full-width equals
+		"\uff0bcmd",      // full-width plus
+		"\uff0dcmd",      // full-width hyphen-minus
+		"\uff20SUM(A1)",  // full-width commercial at
+		"\ufe66cmd",      // small equals sign
+		" \t\n\uff1dHYPERLINK(\"x\")",
+	} {
+		if got := csvsafe.Cell(in); got != "'"+in {
+			t.Errorf("Cell(%q) = %q, want a leading apostrophe", in, got)
+		}
+	}
+	for _, in := range []string{" plain", "\u00a0text", "  1 + 1 = 2", "\n"} {
+		if got := csvsafe.Cell(in); got != in {
+			t.Errorf("Cell(%q) = %q, want unchanged", in, got)
+		}
+	}
+}

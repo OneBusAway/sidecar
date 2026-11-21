@@ -436,6 +436,9 @@ func alertCreate(ctx context.Context, stdout io.Writer, store *sqlite.Store, now
 	if len(missing) > 0 {
 		return fmt.Errorf("alert create requires %s", strings.Join(missing, ", "))
 	}
+	if urlErr := alerts.ValidateURL(*url); urlErr != nil {
+		return fmt.Errorf("alert create: --%w", urlErr)
+	}
 	if strings.TrimSpace(*header) == "" {
 		return errors.New("alert create: --header cannot be empty")
 	}
@@ -717,6 +720,9 @@ func alertEdit(ctx context.Context, store *sqlite.Store, now time.Time, args []s
 		patch.DescriptionText = description
 	}
 	if seen["url"] {
+		if urlErr := alerts.ValidateURL(*url); urlErr != nil {
+			return fmt.Errorf("alert edit: --%w", urlErr)
+		}
 		patch.URL = url
 	}
 	if seen["agency-id"] {

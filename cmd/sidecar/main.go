@@ -300,6 +300,7 @@ func run(stdout, stderr io.Writer, args []string) (err error) {
 		logger.Warn("no --gorush-url/SIDECAR_GORUSH_URL set; departure alarms and Live Activities will be stored and reaped but never pushed, and alert pushes will fail immediately")
 	} else {
 		g := push.NewGorush(*gorushURL, *apnsTopic, http.DefaultClient)
+		g.SetLogger(logger)
 		sender = g
 		batchSender = g
 		if *apnsTopic == "" {
