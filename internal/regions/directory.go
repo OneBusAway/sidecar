@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -194,6 +195,12 @@ func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) 
 			return Region{}, false
 		}
 	}
+	// obaBaseUrl is where region API keys are sent and sidecarBaseUrl is
+	// echoed to the apps in alarm and Live Activity URLs, so both must be
+	// absolute http(s) URLs with a host (sidecarBaseUrl may be absent).
+	if !httpURL(e.OBABaseURL) || (e.SidecarBaseURL != "" && !httpURL(e.SidecarBaseURL)) {
+		return Region{}, false
+	}
 
 	seen[e.ID] = true
 	return Region{
@@ -205,6 +212,16 @@ func (c *Client) validate(e directoryEntry, seen map[int64]bool) (Region, bool) 
 		Active:         e.Active,
 		Centroid:       computeCentroid(e.Bounds),
 	}, true
+}
+
+// httpURL reports whether s is an absolute http or https URL with a host.
+// Plain http and loopback or private hosts are deliberately allowed: local
+// development and OBACloud's contract harness serve OBA and the sidecar on
+// http://127.0.0.1, and the directory URL itself is operator-chosen
+// (SIDECAR_REGIONS_URL), so it is trusted to name the servers it means.
+func httpURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // StripControlChars removes ASCII control characters (0x00-0x1F and the

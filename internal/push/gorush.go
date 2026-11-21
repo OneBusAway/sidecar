@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,6 +55,9 @@ type Gorush struct {
 	pushURL   string
 	apnsTopic string
 	http      *http.Client
+
+	logger       *slog.Logger // SetLogger; nil means slog.Default()
+	maskedWarned atomic.Bool  // MaskedTokenWarning logged once
 }
 
 // NewGorush builds a Gorush that posts to baseURL's /api/push (a bare
@@ -146,6 +151,9 @@ func (g *Gorush) SendBatch(ctx context.Context, n Notification, notifID string) 
 	for _, l := range resp.Logs {
 		if l.Type != gorushFailedPush || l.Token == "" {
 			continue
+		}
+		if IsMaskedToken(l.Token) {
+			g.warnMasked()
 		}
 		res.Rejected = append(res.Rejected, Rejection{Token: l.Token, Reason: l.Error})
 	}

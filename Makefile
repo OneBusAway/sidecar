@@ -143,6 +143,14 @@ lint-fix: require-golangci-lint ## Run golangci-lint with autofixes applied
 .PHONY: check
 check: fmt-check vet lint generate-check test test-tz test-race web-check ## Everything CI runs
 
+# Pinned like the other tools; bump deliberately. The scheduled
+# .github/workflows/govulncheck.yml runs this, not `check`.
+GOVULNCHECK_VERSION := v1.9.0
+
+.PHONY: vulncheck
+vulncheck: ## Report known vulnerabilities reachable from this module (deps and stdlib)
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
 .PHONY: clean
 clean: ## Remove build and coverage artifacts
 	rm -rf $(BIN_DIR) $(COVER_FILE)

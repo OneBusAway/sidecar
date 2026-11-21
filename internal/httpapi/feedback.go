@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/OneBusAway/sidecar/internal/alertpush"
 	"github.com/OneBusAway/sidecar/internal/push"
@@ -28,7 +29,10 @@ type gorushFeedback struct {
 	NotifID string `json:"notif_id"`
 }
 
-type feedbackHandler struct{ deps Deps }
+type feedbackHandler struct {
+	deps         Deps
+	maskedWarned atomic.Bool // push.MaskedTokenWarning logged once
+}
 
 // receive consumes async delivery feedback (spec §6.5). It prunes both the
 // push registration and the Live Activity subscription tables, whichever are
@@ -62,6 +66,14 @@ func (h *feedbackHandler) receive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.recordAlertPushFailure(r, fb)
+	if push.IsMaskedToken(fb.Token) {
+		// A masked token matches nothing; say why pruning never happens.
+		if h.maskedWarned.CompareAndSwap(false, true) {
+			h.deps.Logger.Error(push.MaskedTokenWarning)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if fb.Token == "" || !push.IsTerminal(fb.Error) {
 		w.WriteHeader(http.StatusOK)
 		return

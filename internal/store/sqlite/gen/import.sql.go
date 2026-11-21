@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const getAlertProvenance = `-- name: GetAlertProvenance :one
+
+SELECT region_id, created_at, imported_at FROM alerts WHERE id = ?
+`
+
+type GetAlertProvenanceRow struct {
+	RegionID   int64
+	CreatedAt  int64
+	ImportedAt sql.NullInt64
+}
+
+// Provenance of a row already holding an imported id (security audit
+// SC-14): who owns it, when it was created, and whether an import wrote it.
+func (q *Queries) GetAlertProvenance(ctx context.Context, id int64) (GetAlertProvenanceRow, error) {
+	row := q.db.QueryRowContext(ctx, getAlertProvenance, id)
+	var i GetAlertProvenanceRow
+	err := row.Scan(&i.RegionID, &i.CreatedAt, &i.ImportedAt)
+	return i, err
+}
+
 const getQuestionSurveyID = `-- name: GetQuestionSurveyID :one
 SELECT survey_id FROM survey_questions WHERE id = ?
 `
@@ -21,13 +41,47 @@ func (q *Queries) GetQuestionSurveyID(ctx context.Context, id int64) (int64, err
 	return survey_id, err
 }
 
+const getStudyProvenance = `-- name: GetStudyProvenance :one
+SELECT region_id, created_at, imported_at FROM studies WHERE id = ?
+`
+
+type GetStudyProvenanceRow struct {
+	RegionID   int64
+	CreatedAt  int64
+	ImportedAt sql.NullInt64
+}
+
+func (q *Queries) GetStudyProvenance(ctx context.Context, id int64) (GetStudyProvenanceRow, error) {
+	row := q.db.QueryRowContext(ctx, getStudyProvenance, id)
+	var i GetStudyProvenanceRow
+	err := row.Scan(&i.RegionID, &i.CreatedAt, &i.ImportedAt)
+	return i, err
+}
+
+const getSurveyProvenance = `-- name: GetSurveyProvenance :one
+SELECT study_id, created_at, imported_at FROM surveys WHERE id = ?
+`
+
+type GetSurveyProvenanceRow struct {
+	StudyID    int64
+	CreatedAt  int64
+	ImportedAt sql.NullInt64
+}
+
+func (q *Queries) GetSurveyProvenance(ctx context.Context, id int64) (GetSurveyProvenanceRow, error) {
+	row := q.db.QueryRowContext(ctx, getSurveyProvenance, id)
+	var i GetSurveyProvenanceRow
+	err := row.Scan(&i.StudyID, &i.CreatedAt, &i.ImportedAt)
+	return i, err
+}
+
 const importAlert = `-- name: ImportAlert :execrows
 
 INSERT INTO alerts (
   id, region_id, agency_id, header_text, description_text, url,
   cause, effect, severity_level, start_time, end_time,
-  published, is_test, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  published, is_test, created_at, updated_at, imported_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING
 `
 
@@ -47,6 +101,7 @@ type ImportAlertParams struct {
 	IsTest          bool
 	CreatedAt       int64
 	UpdatedAt       int64
+	ImportedAt      sql.NullInt64
 }
 
 // Import statements (internal/export): every insert carries the source's
@@ -74,6 +129,7 @@ func (q *Queries) ImportAlert(ctx context.Context, arg ImportAlertParams) (int64
 		arg.IsTest,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ImportedAt,
 	)
 	if err != nil {
 		return 0, err
@@ -228,8 +284,8 @@ func (q *Queries) ImportPushRegistration(ctx context.Context, arg ImportPushRegi
 }
 
 const importStudy = `-- name: ImportStudy :execrows
-INSERT INTO studies (id, region_id, name, description, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO studies (id, region_id, name, description, created_at, updated_at, imported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING
 `
 
@@ -240,6 +296,7 @@ type ImportStudyParams struct {
 	Description string
 	CreatedAt   int64
 	UpdatedAt   int64
+	ImportedAt  sql.NullInt64
 }
 
 func (q *Queries) ImportStudy(ctx context.Context, arg ImportStudyParams) (int64, error) {
@@ -250,6 +307,7 @@ func (q *Queries) ImportStudy(ctx context.Context, arg ImportStudyParams) (int64
 		arg.Description,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ImportedAt,
 	)
 	if err != nil {
 		return 0, err
@@ -261,8 +319,8 @@ const importSurvey = `-- name: ImportSurvey :execrows
 INSERT INTO surveys (
   id, study_id, name, available, start_time, end_time,
   show_on_map, show_on_stops, always_visible, allows_multiple_responses,
-  visible_stop_list, visible_route_list, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  visible_stop_list, visible_route_list, created_at, updated_at, imported_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING
 `
 
@@ -281,6 +339,7 @@ type ImportSurveyParams struct {
 	VisibleRouteList        sql.NullString
 	CreatedAt               int64
 	UpdatedAt               int64
+	ImportedAt              sql.NullInt64
 }
 
 func (q *Queries) ImportSurvey(ctx context.Context, arg ImportSurveyParams) (int64, error) {
@@ -299,6 +358,7 @@ func (q *Queries) ImportSurvey(ctx context.Context, arg ImportSurveyParams) (int
 		arg.VisibleRouteList,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.ImportedAt,
 	)
 	if err != nil {
 		return 0, err
@@ -377,4 +437,46 @@ func (q *Queries) ImportSurveyResponse(ctx context.Context, arg ImportSurveyResp
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const markAlertImported = `-- name: MarkAlertImported :exec
+UPDATE alerts SET imported_at = ? WHERE id = ? AND imported_at IS NULL
+`
+
+type MarkAlertImportedParams struct {
+	ImportedAt sql.NullInt64
+	ID         int64
+}
+
+func (q *Queries) MarkAlertImported(ctx context.Context, arg MarkAlertImportedParams) error {
+	_, err := q.db.ExecContext(ctx, markAlertImported, arg.ImportedAt, arg.ID)
+	return err
+}
+
+const markStudyImported = `-- name: MarkStudyImported :exec
+UPDATE studies SET imported_at = ? WHERE id = ? AND imported_at IS NULL
+`
+
+type MarkStudyImportedParams struct {
+	ImportedAt sql.NullInt64
+	ID         int64
+}
+
+func (q *Queries) MarkStudyImported(ctx context.Context, arg MarkStudyImportedParams) error {
+	_, err := q.db.ExecContext(ctx, markStudyImported, arg.ImportedAt, arg.ID)
+	return err
+}
+
+const markSurveyImported = `-- name: MarkSurveyImported :exec
+UPDATE surveys SET imported_at = ? WHERE id = ? AND imported_at IS NULL
+`
+
+type MarkSurveyImportedParams struct {
+	ImportedAt sql.NullInt64
+	ID         int64
+}
+
+func (q *Queries) MarkSurveyImported(ctx context.Context, arg MarkSurveyImportedParams) error {
+	_, err := q.db.ExecContext(ctx, markSurveyImported, arg.ImportedAt, arg.ID)
+	return err
 }

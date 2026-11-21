@@ -45,6 +45,7 @@ type Alert struct {
 	IsTest          bool
 	CreatedAt       int64
 	UpdatedAt       int64
+	ImportedAt      sql.NullInt64
 }
 
 type AlertPush struct {
@@ -211,6 +212,7 @@ type Study struct {
 	Description string
 	CreatedAt   int64
 	UpdatedAt   int64
+	ImportedAt  sql.NullInt64
 }
 
 type Survey struct {
@@ -228,6 +230,7 @@ type Survey struct {
 	VisibleRouteList        sql.NullString
 	CreatedAt               int64
 	UpdatedAt               int64
+	ImportedAt              sql.NullInt64
 }
 
 type SurveyQuestion struct {
