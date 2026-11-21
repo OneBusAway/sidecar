@@ -71,7 +71,8 @@ paths:
         GTFS-realtime `FeedMessage` (`gtfs_realtime_version: "1.0"`)
         containing only `Alert` entities. Test alerts are excluded unless
         `test` is present. Feed entity ids are stable per alert across
-        requests. Append `.pbtext` to the path to receive the same message as
+        requests. The shipped apps request the `.pb` form
+        (`/alerts.pb`), which is served identically. Append `.pbtext` to the path to receive the same message as
         protobuf JSON (`text/plain`) for debugging.
       parameters:
         - $ref: '#/components/parameters/RegionId'
@@ -257,7 +258,8 @@ paths:
         Dark Sky-derived shape. Servers should cache upstream responses
         (~30 minutes). On upstream failure the response is `403` (the
         reference happens to emit `{}`; any body is ignored — apps treat any
-        non-200 as "hide the weather UI").
+        non-200 as "hide the weather UI"). Shipped apps request the
+        `/weather.json` form, which is served identically.
       parameters:
         - $ref: '#/components/parameters/RegionId'
       responses:
@@ -285,7 +287,8 @@ paths:
         then matched against raw vehicle ids (effectively case-insensitive
         for the usual lowercase/numeric fleet ids; replicate this exactly
         rather than lowercasing both sides). Queries shorter than
-        3 characters return an empty array.
+        3 characters return an empty array. `/vehicles.json` is served
+        identically.
       parameters:
         - $ref: '#/components/parameters/RegionId'
         - name: query

@@ -24,9 +24,9 @@ check() {
 
 check /healthz 200
 check /admin 200            # proves the SPA embedded (503 means it did not)
-alerts="$(status /api/v1/regions/1/alerts.pbtext)"
+alerts="$(status /api/v1/regions/1/alerts.pb)"
 case "$alerts" in
-  200) echo "ok   /api/v1/regions/1/alerts.pbtext -> 200" ;;
-  404) echo "skip /api/v1/regions/1/alerts.pbtext -> 404 (no regions synced yet)" ;;
-  *)   echo "FAIL /api/v1/regions/1/alerts.pbtext -> $alerts" >&2; exit 1 ;;
+  200) echo "ok   /api/v1/regions/1/alerts.pb -> 200" ;;
+  404) echo "skip /api/v1/regions/1/alerts.pb -> 404 (no regions synced yet)" ;;
+  *)   echo "FAIL /api/v1/regions/1/alerts.pb -> $alerts" >&2; exit 1 ;;
 esac
