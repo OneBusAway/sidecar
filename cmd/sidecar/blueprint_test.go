@@ -38,6 +38,7 @@ func TestStagingBlueprintMirrorsProduction(t *testing.T) {
 		{"name: gorush\n", "name: gorush-staging\n"},
 		{"name: sidecar-data", "name: sidecar-staging-data"},
 		{"      - key: GORUSH_IOS_PRODUCTION\n        value: \"true\"", "      - key: GORUSH_IOS_PRODUCTION\n        value: \"false\""},
+		{"      - key: SIDECAR_GORUSH_URL\n        value: gorush:8088", "      - key: SIDECAR_GORUSH_URL\n        value: gorush-staging:8088"},
 		{"      - key: SIDECAR_SENTRY_ENVIRONMENT\n        value: production", "      - key: SIDECAR_SENTRY_ENVIRONMENT\n        value: staging"},
 		{"      - key: SIDECAR_BACKUP_BUCKET\n        sync: false\n", "      - key: SIDECAR_BACKUP_BUCKET\n        sync: false\n      # Keep staging's replica apart from production's in a shared bucket.\n      - key: SIDECAR_BACKUP_PATH\n        value: sidecar-staging\n"},
 		{"      - key: SIDECAR_DB\n        value: /data/sidecar.db\n", "      - key: SIDECAR_DB\n        value: /data/sidecar.db\n      # A hand-maintained directory whose regions all point at this host, so\n      # TestFlight builds that use the custom regions URL land here and\n      # production devices never do (README, Staging).\n      - key: SIDECAR_REGIONS_URL\n        sync: false\n"},

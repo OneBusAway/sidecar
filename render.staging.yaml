@@ -47,17 +47,19 @@ services:
       # production devices never do (README, Staging).
       - key: SIDECAR_REGIONS_URL
         sync: false
+      # Static private host:port rather than fromService/hostport: Render only
+      # creates fromService env vars after gorush reaches Live, which blocks on
+      # first apply while APNs credentials are still empty.
       - key: SIDECAR_GORUSH_URL
-        fromService:
-          name: gorush-staging
-          type: pserv
-          property: hostport
+        value: gorush-staging:8088
       - key: SIDECAR_APNS_TOPIC
         sync: false
       - key: SIDECAR_OBA_API_KEY
         sync: false
       - key: SIDECAR_PIRATE_WEATHER_KEY
         sync: false
+      # Optional until Phase 4 (donations stay on Rails); leave blank to
+      # disable /api/v1/payment_intents.
       - key: SIDECAR_STRIPE_SECRET_KEY
         sync: false
       - key: SIDECAR_STRIPE_TEST_SECRET_KEY
@@ -130,6 +132,13 @@ services:
       - key: GORUSH_IOS_KEY_ID
         sync: false
       - key: GORUSH_IOS_TEAM_ID
+        sync: false
+      # Android (FCM) -- set GORUSH_ANDROID_ENABLED to "true" and supply the
+      # raw FCM service-account JSON (not a path or base64) when enabling
+      # Android pushes.
+      - key: GORUSH_ANDROID_ENABLED
+        value: "false"
+      - key: GORUSH_ANDROID_CREDENTIAL
         sync: false
       # Staging value only -- gorush never reads
       # GORUSH_CORE_FEEDBACK_HOOK_HOSTPORT itself. It exists only to expose
