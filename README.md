@@ -1318,10 +1318,12 @@ image, the git sha it was built from; Sentry's own delivery failures are
 logged as `errreport: sentry` warnings. Leave the DSN unset and nothing
 leaves the box. `/healthz` is logged at debug level only.
 
-`SIDECAR_GORUSH_URL` on the sidecar service is populated from `gorush`'s
-`hostport`, which Render supplies with no scheme; the server assumes
-`http://` for a scheme-less value, which is correct here since Render's
-private network is plain HTTP.
+`SIDECAR_GORUSH_URL` on the sidecar service is set statically to
+`gorush:8088` (`gorush-staging:8088` on staging) rather than using
+`fromService`/`hostport`, because Render only creates `fromService` variables
+once `gorush` reaches Live (which blocks on first apply before APNs
+credentials are supplied); the server assumes `http://` for a scheme-less
+value, which is correct here since Render's private network is plain HTTP.
 
 **Background loops and leases.** Every background loop (regions directory
 sync, push registration pruning, the alert push dispatcher, the alarm
